@@ -867,10 +867,23 @@ emitRustFile kernelName pkg =
                             -> base ++ " as " ++ rawTy               -- narrowing cast (e.g. i64 → u32)
                         | otherwise -> base                          -- opaque: pass through unchanged
             callArgs = intercalate ", " (map argCall [0..nParams - 1])
+            -- [#47(a)] When the raw return type is `serde_json::Value` the callee
+            -- is a serde-bound generic (`-> T where T: DeserializeOwned`) that we
+            -- reduced to `Value`. Rust cannot infer `T` from `to_string(&(f()))`
+            -- alone, so we MUST emit the turbofish `::<serde_json::Value>` at the
+            -- call site to satisfy E0283 at cargo build. This applies to the
+            -- free-fn form AND the instance-method (`arg0.get::<Value>()`) AND the
+            -- static-fn (`Recv::load::<Value>()`) forms — a serde-bound generic
+            -- `get<T: DeserializeOwned>(&self) -> T` / `load<T: …>() -> T` on a
+            -- concrete type (firestore `DocumentReference::get`) needs it just as
+            -- much as a free fn does.
+            serdeTurbofish = if effRawResult == "serde_json::Value"
+                                 then "::<serde_json::Value>"
+                                 else ""
             callExpr
                 | isInstance =
                     let restArgs = intercalate ", " (map argCall [1..nParams - 1])
-                    in "arg0." ++ fnName ++ "(" ++ restArgs ++ ")"
+                    in "arg0." ++ fnName ++ serdeTurbofish ++ "(" ++ restArgs ++ ")"
                 | isStaticFn && fnName == "from_string" =
                     -- X4: emit `<T as std::str::FromStr>::from_str(args)` for the
                     -- Display/FromStr bridge synthetic functions.
@@ -883,21 +896,13 @@ emitRustFile kernelName pkg =
                         recv' = if '<' `elem` recvResolved
                                 then "<" ++ recvResolved ++ ">"
                                 else recvResolved
-                    in recv' ++ "::" ++ fnName ++ "(" ++ callArgs ++ ")"
+                    in recv' ++ "::" ++ fnName ++ serdeTurbofish ++ "(" ++ callArgs ++ ")"
                 | otherwise =
                     -- Absolute `::<crate>` path: never collide with a same-named
                     -- runtime kernel module re-exported at the app crate root.
-                    -- [#47(a)] When the raw return type is `serde_json::Value` the
-                    -- callee is a serde-bound generic (`-> T where T: Deserialize`).
-                    -- Rust cannot infer `T` from `to_string(&(f()))` alone, so we
-                    -- always emit the turbofish `::<serde_json::Value>` for the
-                    -- free-function form to satisfy E0283 at cargo build.
-                    let tf = if effRawResult == "serde_json::Value"
-                                 then "::<serde_json::Value>"
-                                 else ""
-                    in if null params
-                        then "::" ++ crateImport ++ "::" ++ fnName ++ tf ++ "()"
-                        else "::" ++ crateImport ++ "::" ++ fnName ++ tf ++ "(" ++ callArgs ++ ")"
+                    if null params
+                        then "::" ++ crateImport ++ "::" ++ fnName ++ serdeTurbofish ++ "()"
+                        else "::" ++ crateImport ++ "::" ++ fnName ++ serdeTurbofish ++ "(" ++ callArgs ++ ")"
             -- Build the function body based on effect.  retCoerce lifts the
             -- raw Rust value into the declared return type (Option→SkyMaybe,
             -- Vec element map, numeric widening to i64/f64, &T→owned, opaque

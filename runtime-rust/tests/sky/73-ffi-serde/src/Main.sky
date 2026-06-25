@@ -5,10 +5,19 @@ module Main exposing (main)
 -- P3 assertions: put/roundtrip/get_one are bound and callable; by_ref/pair/map_val
 -- are absent (C-G3); own_serde is absent (C-G1).
 --
+-- DEFECT-2: a serde-bound generic RETURN on a METHOD (`Doc::get<T: DeserializeOwned>
+-- (&self) -> T`, the firestore `DocumentReference::get` shape) and on a STATIC fn
+-- (`Doc::load<T: DeserializeOwned>() -> T`) now BIND (inspector routes a serde-
+-- reducible inherent method through the serde reduction) and the codegen emits the
+-- `::<serde_json::Value>` turbofish on the method + static call sites. Pre-fix the
+-- turbofish was only on the FREE-fn branch → the method/static calls had an
+-- unconstrained `T` → cargo E0283.
+--
 -- Expected output:
 --   [ALL OK]
 
-import Rust.Serde_fixture exposing (put, roundtrip, get_one)
+import Rust.Serde_fixture exposing (put, roundtrip, get_one, new_from_doc, get_from_doc, load_from_doc)
+import Sky.Core.Result as Result
 import Std.Log exposing (println)
 
 
@@ -27,7 +36,18 @@ main =
         goResult =
             get_one ()
 
-        -- Verify all three succeeded
+        -- DEFECT-2 method: Doc::get<T: DeserializeOwned>(&self) -> T over a Doc.
+        -- Returns serde_json::to_string of the deserialised Value → "42".
+        getResult =
+            new_from_doc ()
+                |> Result.andThen get_from_doc
+
+        -- DEFECT-2 static: Doc::load<T: DeserializeOwned>() -> T.
+        -- Returns serde_json::to_string of "loaded" → "\"loaded\"".
+        loadResult =
+            load_from_doc ()
+
+        -- Verify all five succeeded
         ok =
             case putResult of
                 Err _ -> False
@@ -38,11 +58,20 @@ main =
                             case goResult of
                                 Err _ -> False
                                 Ok _ ->
-                                    -- put: fixture calls serde_json::to_string then format!("{}", s.len())
-                                    -- "[1,2,3]" → serialised back as "[1,2,3]" (7 chars) → "7"
-                                    putStr == "7"
-                                        -- roundtrip: deserialise then re-serialise
-                                        && (String.length rtStr > 0)
+                                    case getResult of
+                                        Err _ -> False
+                                        Ok getStr ->
+                                            case loadResult of
+                                                Err _ -> False
+                                                Ok loadStr ->
+                                                    -- put: "[1,2,3]" → 7 chars → "7"
+                                                    putStr == "7"
+                                                        -- roundtrip: non-empty re-serialised JSON
+                                                        && (String.length rtStr > 0)
+                                                        -- Doc::get → serialised "42"
+                                                        && getStr == "42"
+                                                        -- Doc::load → serialised "loaded" (quoted)
+                                                        && loadStr == "\"loaded\""
     in
     if ok then
         println "[ALL OK]"

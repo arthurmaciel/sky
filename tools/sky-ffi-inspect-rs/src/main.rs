@@ -1074,6 +1074,22 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                             // existing path unchanged.
                             let generic_bearing = method_is_generic_bearing(
                                 fn_data, impl_generics, struct_generics);
+                            // [#47(a) methods / DEFECT-2] A generic-bearing method/
+                            // static whose every used type-param is method-declared,
+                            // serde-bounded, and used only in admissible positions is
+                            // reducible by the serde `T → serde_json::Value` arm of
+                            // `resolve_generics`. The parametric-stub path has NO
+                            // serde arm (it would drop the method — the firestore
+                            // `DocumentReference::get<T: DeserializeOwned>(&self) -> T`
+                            // shape), so route a serde-reducible INHERENT method
+                            // through `parse_fn_item` instead. Codegen then emits the
+                            // `::<serde_json::Value>` turbofish on the method/static
+                            // call site (DEFECT-2). Inherent-only on purpose:
+                            // concrete-Self serde TRAIT methods stay on the UFCS path
+                            // (out of this defect's scope — over-conservative).
+                            let serde_reducible_method = is_inherent_impl
+                                && method_all_serde_reducible(
+                                    fn_data, impl_generics, struct_generics);
                             // #21: a TRAIT-impl method over a GENERIC Self can
                             // never be monomorphised — drop
                             // `trait-method-generic-self` BEFORE the parametric
@@ -1124,8 +1140,9 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                             let is_concrete_trait_method =
                                 !is_inherent_impl && trait_self_concrete;
                             let take_parametric =
-                                (generic_bearing && is_inherent_impl)
-                                || is_concrete_trait_method;
+                                ((generic_bearing && is_inherent_impl)
+                                    || is_concrete_trait_method)
+                                && !serde_reducible_method;
                             if take_parametric {
                                 // [C-1] Resolve the BoundSource FIRST. For a trait
                                 // impl this builds the Q2-A trait-def method
@@ -7130,6 +7147,78 @@ fn method_is_generic_bearing(
         .flat_map(type_param_order)
         .collect();
     used.iter().any(|u| declared.contains(u))
+}
+
+/// [#47(a) methods] True when a generic-bearing METHOD/STATIC is fully reducible
+/// by the serde monomorphisation `T → serde_json::Value` — i.e. EVERY used type
+/// param is declared on the METHOD itself (not the impl/struct — `resolve_generics`
+/// only reduces method-level params), its bounds are all serde-or-marker, and its
+/// every occurrence sits in an admissible position (by-value param / owned return
+/// / `Result`/`Vec`/`Option`, never `&T`/tuple/map-value). Such a method must be
+/// routed through `parse_fn_item` (whose `resolve_generics` performs the serde
+/// reduction) INSTEAD of the parametric-stub path (which has no serde arm and
+/// would drop it). This is the method/static counterpart of the free-fn serde
+/// reduction landed in #47(a). Concrete firestore shape: `DocumentReference::get
+/// <T: DeserializeOwned>(&self) -> T` / `Collection::load<T>() -> T`. The codegen
+/// then emits the `::<serde_json::Value>` turbofish on the method/static call
+/// (DEFECT-2). CONSERVATIVE: if ANY used param is impl/struct-declared, or any
+/// bound is non-serde, or any occurrence inadmissible → false (stays on the
+/// existing parametric/drop path).
+fn method_all_serde_reducible(
+    fn_data: &serde_json::Value,
+    impl_generics: Option<&serde_json::Value>,
+    struct_generics: Option<&serde_json::Value>,
+) -> bool {
+    let sig = match fn_data.get("sig").or_else(|| fn_data.get("decl")) {
+        Some(s) => s,
+        None => return false,
+    };
+    // Every USED type-param name in the sig (self receiver collected too, but a
+    // `Self` node is never a declared method/impl/struct param so it's harmless).
+    let mut used: HashSet<String> = HashSet::new();
+    if let Some(inputs) = sig["inputs"].as_array() {
+        for input in inputs {
+            collect_generic_names(&input[1], &mut used);
+        }
+    }
+    collect_generic_names(&sig["output"], &mut used);
+    if used.is_empty() {
+        return false;
+    }
+
+    // Method-level declared type params + their bounds (incl. method where-clause).
+    let mut method_bounds: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
+    collect_param_bounds_into(&fn_data["generics"], &mut method_bounds);
+    let method_params: HashSet<String> =
+        type_param_order(&fn_data["generics"]).into_iter().collect();
+
+    // Any used param declared on the impl OR struct (NOT the method) → not
+    // method-reducible (resolve_generics can't see those).
+    let outer_params: HashSet<String> = [impl_generics, struct_generics]
+        .into_iter()
+        .flatten()
+        .flat_map(type_param_order)
+        .collect();
+
+    let mut saw_method_serde = false;
+    for u in &used {
+        if outer_params.contains(u) && !method_params.contains(u) {
+            return false; // impl/struct param used → can't serde-reduce here
+        }
+        if !method_params.contains(u) {
+            continue; // `Self` / a non-declared name → handled elsewhere
+        }
+        let bounds = method_bounds.get(u).map(|v| v.as_slice()).unwrap_or(&[]);
+        if !bounds_are_all_serde_or_marker(bounds) {
+            return false; // a non-serde bound on a used method param
+        }
+        if !fn_serde_param_all_admissible(fn_data, u) {
+            return false; // an inadmissible occurrence (&T / tuple / map-value)
+        }
+        saw_method_serde = true;
+    }
+    saw_method_serde
 }
 
 /// Build the FFI `Function` for a parametric generic stub: the Sky-facing sig
