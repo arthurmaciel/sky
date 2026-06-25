@@ -8,4 +8,4 @@ backend = "rust"
 # delivered as a file:// git dep. setup.sh git-inits ./opaque-crate into the
 # cache path below.
 ["rust.dependencies"]
-opaqueffi74 = { git = "file:///home/arthur/.cache/sky/74-ffi-opaque-crate", branch = "master" }
+opaqueffi74 = { git = "file:///home/arthur/.cache/sky/74-ffi-opaque-client-crate", branch = "master" }

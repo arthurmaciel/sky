@@ -917,8 +917,13 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     TRAIT_CONCRETE_IMPLS.with(|c| *c.borrow_mut() = collect_trait_concrete_impls(index));
     SEND_SUPERTRAIT_TRAIT_IDS.with(|c| *c.borrow_mut() = collect_send_supertrait_trait_ids(index));
     EXPLICIT_SEND_TYPE_IDS.with(|c| *c.borrow_mut() = collect_explicit_send_type_ids(index));
+    SYNTHETIC_SEND_TYPE_IDS.with(|c| *c.borrow_mut() = collect_synthetic_send_type_ids(index));
     ALL_FIELDS_SEND_TYPE_IDS.with(|c| *c.borrow_mut() = collect_all_fields_send_type_ids(index));
     PROVABLY_SEND_OPAQUE_NAMES.with(|c| c.borrow_mut().clear());
+    // [DEFECT-1] RENDERED names of crate-local concrete struct receivers proven
+    // Send. Reuses the three #52 Send-proof sources just populated above. Must run
+    // AFTER those three sets are filled.
+    PROVABLY_SEND_RECV_NAMES.with(|c| *c.borrow_mut() = collect_provably_send_recv_names(index));
 
     for (item_id, item) in index {
         // Only items from this crate (crate_id == 0); deps have crate_id > 0
@@ -1809,6 +1814,53 @@ fn collect_explicit_send_type_ids(
         // proof we should rely on — it's rustdoc's derivation, and a negative one
         // would wrongly admit). Require non-synthetic AND non-negative.
         if impl_data.get("is_synthetic").and_then(|b| b.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        if impl_data.get("is_negative").and_then(|b| b.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let for_val = impl_data.get("for").or_else(|| impl_data.get("for_"));
+        if let Some(fid) = for_val
+            .and_then(|v| v.get("resolved_path"))
+            .and_then(|rp| rp.get("id"))
+        {
+            out.insert(item_id_to_str(fid));
+        }
+    }
+    out
+}
+
+/// [DEFECT-1] Crate-local type ids that rustdoc's OWN auto-trait derivation marks
+/// `Send` — a SYNTHETIC, NON-NEGATIVE `impl Send for T`. Unlike the param Send-proof
+/// (which deliberately rejects synthetics — see `collect_explicit_send_type_ids`),
+/// the RECEIVER proof CAN trust rustdoc's synthetic auto-trait impl: it is the
+/// compiler's own correct, private-field-aware computation of a type's Send-ness
+/// (a `!Send` type carries a synthetic NEGATIVE `impl !Send` instead, which we
+/// exclude). This avoids over-dropping every async method whose receiver has
+/// PRIVATE fields (the normal case — firestore/stripe clients) that the
+/// all-fields-Send proof cannot see. Sound: a synthetic positive Send means the
+/// receiver IS Send, so capturing it by-move into the async future is safe.
+fn collect_synthetic_send_type_ids(
+    index: &serde_json::Map<String, serde_json::Value>,
+) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    for (_id, item) in index {
+        if item["crate_id"].as_u64().unwrap_or(1) != 0 {
+            continue;
+        }
+        let Some(impl_data) = item["inner"].get("impl") else { continue };
+        let Some(trait_node) = impl_data.get("trait") else { continue };
+        let tname = trait_node
+            .get("path")
+            .or_else(|| trait_node.get("name"))
+            .and_then(|p| p.as_str())
+            .unwrap_or("");
+        if tname.rsplit("::").next().unwrap_or(tname) != "Send" {
+            continue;
+        }
+        // Require a SYNTHETIC, NON-negative Send impl (rustdoc's positive
+        // auto-derivation). A negative synthetic (`impl !Send`) → NOT Send.
+        if !impl_data.get("is_synthetic").and_then(|b| b.as_bool()).unwrap_or(false) {
             continue;
         }
         if impl_data.get("is_negative").and_then(|b| b.as_bool()).unwrap_or(false) {
@@ -3090,6 +3142,33 @@ fn parse_fn_item(
             }
             return None;
         }
+
+        // C1c — RECEIVER-level Send check (DEFECT-1). The async wrapper is
+        //   `tokio::task::spawn(async move { arg0.method(args…).await })`
+        // where `arg0` is the receiver, captured BY-MOVE into the `async move`
+        // block (it IS captured, not merely the dispatch target). `spawn` requires
+        // the future to be `Send`, hence the receiver must be `Send`. An async
+        // instance method on a `Clone + !Send` (Rc/Cell-backed) receiver yields a
+        // non-Send future → E0277 at cargo build (type-checks in `sky build`,
+        // fails `cargo`). Drop it. Sync methods are unaffected — no spawn, no
+        // captured-future Send requirement. Reuses the #52 Send-proof machinery
+        // (`recv_provably_async_send` → PROVABLY_SEND_RECV_NAMES built from the
+        // same three sources + primitives/String); an UNPROVABLE receiver drops.
+        let is_instance_method = recv.is_some()
+            && params.first().map(|p| p.name == "self").unwrap_or(false);
+        if is_instance_method {
+            let recv_rt = recv.map(|(_, r)| r).unwrap_or("");
+            if !recv_provably_async_send(recv_rt) {
+                if tail_audit_enabled() {
+                    record_tail_drop(
+                        "async-future-not-send",
+                        drop_is_valuable(name, recv),
+                        recv_rt,
+                    );
+                }
+                return None;
+            }
+        }
     }
 
     let (recv_sky, recv_rust) = recv.unwrap_or(("", ""));
@@ -3230,6 +3309,14 @@ thread_local! {
     static EXPLICIT_SEND_TYPE_IDS: std::cell::RefCell<HashSet<String>> =
         std::cell::RefCell::new(HashSet::new());
 
+    // [DEFECT-1] CRATE-LOCAL type ids that rustdoc's OWN auto-trait derivation
+    // marks `Send` (a SYNTHETIC, NON-negative `impl Send for T`). Used ONLY by the
+    // async RECEIVER Send-proof — it correctly accounts for PRIVATE fields, so it
+    // does not over-drop async methods on receivers with private fields. (The
+    // param gate deliberately does NOT use this; see collect_synthetic_send_type_ids.)
+    static SYNTHETIC_SEND_TYPE_IDS: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+
     // [#52 Step 3] RENDERED rust-type names of concrete opaque handles PROVEN
     // `Send` (via Send-supertrait bound / explicit impl Send / all-fields-Send)
     // that were monomorphized into an async-threaded param. The async Send gate
@@ -3245,6 +3332,20 @@ thread_local! {
     // third source. A struct with an `Rc`/raw-pointer/`RefCell` field is NOT in the
     // closed set → absent here → not provably-Send → the async gate drops it.
     static ALL_FIELDS_SEND_TYPE_IDS: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+
+    // [DEFECT-1] RENDERED rust-type names of crate-local CONCRETE struct RECEIVERS
+    // proven `Send` (explicit `impl Send` / all-fields-Send / a Send-supertrait
+    // trait impl'd for them). The async wrapper captures the receiver by-MOVE into
+    // the `async move { arg0.method(…).await }` block, so an async instance method
+    // on a `!Send` receiver (Rc/Cell-backed) yields a non-Send future → E0277 at
+    // `tokio::task::spawn`. The async receiver Send-proof (in parse_fn_item)
+    // consults this set + primitives/String; a receiver absent from it (an
+    // UNPROVABLE `!Send` concrete) → the async instance method is DROPPED
+    // (`async-future-not-send`). Sync methods are unaffected (no spawn). Reset per
+    // crate. Reuses the SAME three #52 Send-proof sources (EXPLICIT_SEND_TYPE_IDS /
+    // ALL_FIELDS_SEND_TYPE_IDS / SEND_SUPERTRAIT_TRAIT_IDS) — no duplicate proof.
+    static PROVABLY_SEND_RECV_NAMES: std::cell::RefCell<HashSet<String>> =
         std::cell::RefCell::new(HashSet::new());
 }
 
@@ -3300,6 +3401,126 @@ fn collect_all_fields_send_type_ids(
 /// `Send` by auto-derivation (all fields Send).
 fn concrete_type_all_fields_send(type_id: &str) -> bool {
     ALL_FIELDS_SEND_TYPE_IDS.with(|s| s.borrow().contains(type_id))
+}
+
+/// The RENDERED rust-type name for a crate-local item id — the reachable public
+/// path when known (`REACHABLE_PATHS`), else the bare last-segment item name.
+/// Mirrors the rendering `CLONE_OPAQUE_NAMES` uses so the recorded name matches
+/// what the async receiver gate sees in `recv_rust`.
+fn rendered_name_for_id(index: &serde_json::Map<String, serde_json::Value>, id: &str) -> Option<String> {
+    index.get(id).and_then(|it| it["name"].as_str()).map(|nm| {
+        REACHABLE_PATHS
+            .with(|c| c.borrow().get(id).cloned())
+            .unwrap_or_else(|| nm.to_string())
+    })
+}
+
+/// [DEFECT-1] RENDERED names of crate-local CONCRETE struct receivers proven
+/// `Send`, reusing the THREE #52 Send-proof sources already populated:
+///
+/// 1. explicit `impl Send for T` → `EXPLICIT_SEND_TYPE_IDS`
+/// 2. all-fields-Send auto-derivation → `ALL_FIELDS_SEND_TYPE_IDS`
+/// 3. a `T: Send`-supertrait trait impl'd for the struct → walk impls whose
+///    resolved trait id is in `SEND_SUPERTRAIT_TRAIT_IDS` and record the `for`
+///    type's rendered name.
+///
+/// The async receiver Send-proof admits a method's receiver iff its rendered name
+/// is in this set (or it is a primitive/String). An UNPROVABLE `!Send` receiver
+/// (e.g. an `Rc`-bearing struct) is NEVER recorded → the async instance method is
+/// dropped (`async-future-not-send`). CONSERVATIVE by construction.
+fn collect_provably_send_recv_names(
+    index: &serde_json::Map<String, serde_json::Value>,
+) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+
+    // Record a rendered name AND its bare last `::` segment, so the gate matches
+    // whether the receiver renders crate-prefixed (`opaqueffi74::SendClient`, the
+    // `rustdoc_type_to_rust_str` self form) or bare (`SendClient`, a reachable-path
+    // form).
+    let insert_name = |out: &mut HashSet<String>, nm: &str| {
+        if nm.is_empty() {
+            return;
+        }
+        out.insert(nm.to_string());
+        if let Some(last) = nm.rsplit("::").next() {
+            out.insert(last.to_string());
+        }
+    };
+
+    // Sources 1 + 2 + (receiver-only) rustdoc synthetic-Send — type-id keyed sets
+    // → rendered names. The synthetic source closes the private-field over-drop.
+    let mut direct_ids: HashSet<String> = EXPLICIT_SEND_TYPE_IDS
+        .with(|s| s.borrow().clone())
+        .union(&ALL_FIELDS_SEND_TYPE_IDS.with(|s| s.borrow().clone()))
+        .cloned()
+        .collect();
+    direct_ids.extend(SYNTHETIC_SEND_TYPE_IDS.with(|s| s.borrow().clone()));
+    for id in &direct_ids {
+        if let Some(nm) = rendered_name_for_id(index, id) {
+            insert_name(&mut out, &nm);
+        }
+    }
+
+    // Source 3 — a struct impl'ing a Send-supertrait trait. Walk crate-local impl
+    // blocks; when the impl's resolved trait id is in SEND_SUPERTRAIT_TRAIT_IDS,
+    // record the rendered name of the `for` type.
+    for (_id, item) in index {
+        if item["crate_id"].as_u64().unwrap_or(1) != 0 {
+            continue;
+        }
+        let Some(impl_data) = item["inner"].get("impl") else { continue };
+        let Some(trait_node) = impl_data.get("trait") else { continue };
+        let Some(trait_id) = trait_node.get("id").map(item_id_to_str) else { continue };
+        if !SEND_SUPERTRAIT_TRAIT_IDS.with(|s| s.borrow().contains(&trait_id)) {
+            continue;
+        }
+        let for_val = impl_data.get("for").or_else(|| impl_data.get("for_"));
+        if let Some(fid) = for_val
+            .and_then(|v| v.get("resolved_path"))
+            .and_then(|rp| rp.get("id"))
+        {
+            if let Some(nm) = rendered_name_for_id(index, &item_id_to_str(fid)) {
+                insert_name(&mut out, &nm);
+            }
+        }
+    }
+    out
+}
+
+/// [DEFECT-1] True when an async wrapper's RECEIVER type `recv_rust` is provably
+/// `Send`, so the receiver may be captured by-move into the `async move { … }`
+/// block. Primitives / `String` / `&str` / `&String` are trivially Send; a single
+/// leading `&` is stripped (`&Db` → `Db`) and the base looked up in the proven-Send
+/// receiver-name set; `&mut` / nested borrows are rejected. Reuses the SAME
+/// `PROVABLY_SEND_OPAQUE_NAMES` set as the param gate too, so a #52-monomorphized
+/// opaque receiver is also admitted.
+fn recv_provably_async_send(recv_rust: &str) -> bool {
+    let rt = recv_rust.trim();
+    if rt.is_empty() {
+        return false;
+    }
+    if rt == "&str" || rt == "&String" {
+        return true;
+    }
+    if is_async_send_output(rt) {
+        return true;
+    }
+    let base = match rt.strip_prefix("&mut ") {
+        Some(_) => return false, // &mut receiver → never admit
+        None => rt.strip_prefix('&').unwrap_or(rt).trim(),
+    };
+    if base.is_empty() || base.starts_with('&') {
+        return false;
+    }
+    // Match on the full rendered name OR its bare last `::` segment — the recv
+    // renders crate-prefixed (`opaqueffi74::SendClient`) while the proof set may
+    // hold either form (the collector inserts both).
+    let last = base.rsplit("::").next().unwrap_or(base);
+    let in_recv_set = PROVABLY_SEND_RECV_NAMES
+        .with(|c| c.borrow().contains(base) || c.borrow().contains(last));
+    let in_opaque_set = PROVABLY_SEND_OPAQUE_NAMES
+        .with(|c| c.borrow().contains(base) || c.borrow().contains(last));
+    in_recv_set || in_opaque_set
 }
 
 /// Canonical std/core/alloc trait paths that the modellable-5 + the Display/
@@ -11227,6 +11448,80 @@ mod tests {
         assert!(
             parse_fn_item("sync_non_send", &fd_sync_non_send, &HashMap::new(), None).is_some(),
             "sync fn with a non-Send opaque param must NOT be affected by the async Send gate"
+        );
+    }
+
+    // ── DEFECT-1 unit test: async RECEIVER Send gate ─────────────────────────
+    //
+    // An `async fn m(&self) -> Result<i64, String>` on a `Clone + !Send`
+    // (Rc-backed) receiver MUST be dropped: the async wrapper captures the
+    // receiver by-MOVE into `async move { arg0.m().await }`, so a !Send receiver
+    // → non-Send future → E0277 at `tokio::task::spawn` (type-checks in
+    // `sky build`, fails `cargo`). NO non-self params here — the param gate can't
+    // catch it; the receiver gate must. A provably-Send receiver still binds; a
+    // SYNC method on a !Send receiver is unaffected (no spawn).
+    //
+    // In this unit-test context PROVABLY_SEND_RECV_NAMES / PROVABLY_SEND_OPAQUE_NAMES
+    // are empty, so an opaque receiver name is NOT provably Send → drops. A
+    // primitive/String receiver is trivially Send (`is_async_send_output`). To
+    // exercise the proven-opaque path we insert a name into the recv-name set.
+    #[test]
+    fn async_send_gate_covers_receiver() {
+        // self input: `&self` (borrowed_ref to the recv type).
+        let self_input = serde_json::json!([
+            "self",
+            { "borrowed_ref": { "lifetime": null, "mutable": false,
+              "type": { "resolved_path": { "name": "DbHandle", "path": "DbHandle", "id": 0, "args": null } } } }
+        ]);
+        // Result<i64, String> output — the Send-Output check unwraps to i64 (Send).
+        let fallible_i64 = serde_json::json!({
+            "resolved_path": {
+                "name": "Result", "path": "Result", "id": 0,
+                "args": { "angle_bracketed": { "args": [
+                    { "type": { "primitive": "i64" } },
+                    { "type": { "resolved_path": { "name": "String", "path": "String", "id": 0, "args": null } } }
+                ], "constraints": [] } }
+            }
+        });
+        let async_method = |out: &serde_json::Value| serde_json::json!({
+            "header": { "is_async": true, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ self_input ], "output": out }
+        });
+
+        // (1) RED→GREEN: async instance method on a !Send opaque receiver MUST drop.
+        //     Pre-fix this returned Some (self skipped, no recv check) → E0277.
+        PROVABLY_SEND_RECV_NAMES.with(|c| c.borrow_mut().clear());
+        PROVABLY_SEND_OPAQUE_NAMES.with(|c| c.borrow_mut().clear());
+        assert!(
+            parse_fn_item("m", &async_method(&fallible_i64), &HashMap::new(),
+                          Some(("DbHandle", "DbHandle"))).is_none(),
+            "async instance method on a !Send receiver MUST be dropped (async-future-not-send)"
+        );
+
+        // (2) No over-drop: a PROVEN-Send opaque receiver still binds.
+        PROVABLY_SEND_RECV_NAMES.with(|c| { c.borrow_mut().insert("SendDb".to_string()); });
+        assert!(
+            parse_fn_item("m", &async_method(&fallible_i64), &HashMap::new(),
+                          Some(("SendDb", "SendDb"))).is_some(),
+            "async instance method on a PROVEN-Send receiver must still bind"
+        );
+        PROVABLY_SEND_RECV_NAMES.with(|c| c.borrow_mut().clear());
+
+        // (3) Control: SYNC method on a !Send receiver is unaffected (no spawn).
+        let sync_method = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ serde_json::json!([
+                "self",
+                { "borrowed_ref": { "lifetime": null, "mutable": false,
+                  "type": { "resolved_path": { "name": "DbHandle", "path": "DbHandle", "id": 0, "args": null } } } }
+            ]) ], "output": { "primitive": "i64" } }
+        });
+        assert!(
+            parse_fn_item("sync_m", &sync_method, &HashMap::new(),
+                          Some(("DbHandle", "DbHandle"))).is_some(),
+            "sync method on a !Send receiver must NOT be affected by the async receiver gate"
         );
     }
 

@@ -3,7 +3,7 @@
 # sky.toml file:// dep points at. Run before `sky build --backend rust`.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-dest="$HOME/.cache/sky/74-ffi-opaque-crate"
+dest="$HOME/.cache/sky/74-ffi-opaque-client-crate"
 rm -rf "$dest"
 mkdir -p "$dest"
 cp -r "$here/opaque-crate/." "$dest/"

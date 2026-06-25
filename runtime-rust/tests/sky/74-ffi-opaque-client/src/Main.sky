@@ -14,6 +14,15 @@ module Main exposing (main)
 -- NEGATIVE (must be ABSENT from the bindings — coverage-dropped):
 --   send_ambiguous  -- C: Transport has TWO impls (Db, Db2) → ambiguous → DROP
 --   recv            -- C: Held over NotSend (Rc) → async future !Send → DROP
+--
+-- DEFECT-1 — async SELF-RECEIVER Send proof:
+--   pong  -- SendClient::pong(&self) async; SendClient is Send (rustdoc synthetic
+--            positive) → BINDS. Captures the receiver by-move into the async future
+--            soundly. Exercised end-to-end below.
+--   ping  -- RcClient::ping(&self) async on a Clone + !Send (Rc) receiver → the
+--            receiver is captured by-move → !Send future → E0277 if bound. The
+--            receiver Send-proof DROPS it (`async-future-not-send`). Must be ABSENT.
+--            Pre-fix it BOUND and cargo-failed (the self-receiver Send hole).
 
 import Sky.Core.Prelude exposing (..)
 import Sky.Core.Task as Task
@@ -48,7 +57,29 @@ checkSend =
             Task.fail (Error.unexpected "opaque ctor failed")
 
 
+-- DEFECT-1 positive: an async instance method on a PROVABLY-Send receiver still
+-- binds and runs. `SendClient::pong(&self) -> Result<i64, String>` over a Send
+-- receiver → the async wrapper captures it by-move soundly. `new 7` → pong → 8.
+checkPong : Task Error ()
+checkPong =
+    case O.new_from_sendClient 7 of
+        Ok sc ->
+            O.pong_from_sendClient sc
+                |> Task.andThen
+                    (\n ->
+                        if n == 8 then
+                            println "pong=8"
+
+                        else
+                            Task.fail (Error.unexpected ("pong=UNEXPECTED " ++ String.fromInt n))
+                    )
+
+        Err e ->
+            Task.fail e
+
+
 main : Task Error ()
 main =
     checkSend
+        |> Task.andThen (\_ -> checkPong)
         |> Task.andThen (\_ -> println "[ALL OK]")

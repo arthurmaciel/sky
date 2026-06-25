@@ -117,3 +117,66 @@ impl Req {
         Ok("recv".to_string())
     }
 }
+
+// ── DEFECT-1: async SELF-RECEIVER Send hole ─────────────────────────────────
+// The async wrapper captures the receiver BY-MOVE into `async move { arg0.m()
+// .await }`, so an async instance method on a `Clone + !Send` (Rc-backed)
+// receiver yields a non-Send future → E0277 at `tokio::task::spawn`. The param-
+// Send gate explicitly SKIPPED `self` (WRONG — it IS captured), so pre-fix such a
+// method BOUND and cargo-failed. Post-fix the receiver Send-proof drops it.
+
+/// A `Clone + !Send` opaque (Rc-backed). NOT in any Send-proof source → the async
+/// receiver gate refuses it.
+#[derive(Clone)]
+pub struct RcClient {
+    _shared: Rc<u8>,
+}
+
+impl RcClient {
+    /// Opaque ctor — returns the !Send handle by value.
+    pub fn new() -> RcClient {
+        RcClient { _shared: Rc::new(0) }
+    }
+
+    /// NEGATIVE (DEFECT-1): async instance method on a !Send receiver, NO non-self
+    /// params. The receiver is captured by-move into the spawned future → !Send →
+    /// E0277. The param gate can't catch it (no non-self params); the RECEIVER
+    /// gate must → DROP (`async-future-not-send`). Output `Result<i64, String>`.
+    pub async fn ping(&self) -> Result<i64, String> {
+        tokio::time::sleep(std::time::Duration::ZERO).await;
+        Ok(7)
+    }
+}
+
+impl Default for RcClient {
+    fn default() -> Self {
+        RcClient::new()
+    }
+}
+
+/// A PROVABLY-Send opaque (all fields Send: a single `pub u64`). The async
+/// receiver gate ADMITS it (all-fields-Send source) → the async method below still
+/// binds (no over-drop). The field is `pub` so rustdoc does not strip it — the
+/// all-fields-Send proof refuses a struct with stripped (private) fields.
+pub struct SendClient {
+    pub seed: u64,
+}
+
+impl SendClient {
+    pub fn new(seed: u64) -> SendClient {
+        SendClient { seed }
+    }
+
+    /// POSITIVE (DEFECT-1 control): async instance method on a Send receiver →
+    /// still binds. Output `Result<i64, String>`.
+    pub async fn pong(&self) -> Result<i64, String> {
+        tokio::time::sleep(std::time::Duration::ZERO).await;
+        Ok(self.seed as i64 + 1)
+    }
+}
+
+impl Default for SendClient {
+    fn default() -> Self {
+        SendClient::new(0)
+    }
+}
