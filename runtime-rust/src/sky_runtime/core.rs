@@ -486,6 +486,200 @@ pub fn install_panic_classifier() {
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // SkyMaybe<T> Deserialize regressions (#50)
+    // Guardian-proven correct in #42; now pinned in-tree for every T.
+    // -----------------------------------------------------------------------
+
+    // --- SkyMaybe<i64> ---
+
+    #[test]
+    fn sky_maybe_i64_tagged_just() {
+        let v: SkyMaybe<i64> = serde_json::from_str(r#"{"Just":5}"#).unwrap();
+        assert_eq!(v, SkyMaybe::Just(5_i64));
+    }
+
+    #[test]
+    fn sky_maybe_i64_bare_int_becomes_just() {
+        let v: SkyMaybe<i64> = serde_json::from_str("5").unwrap();
+        assert_eq!(v, SkyMaybe::Just(5_i64));
+    }
+
+    #[test]
+    fn sky_maybe_i64_nothing_string() {
+        let v: SkyMaybe<i64> = serde_json::from_str(r#""Nothing""#).unwrap();
+        assert_eq!(v, SkyMaybe::Nothing);
+    }
+
+    #[test]
+    fn sky_maybe_i64_null_becomes_nothing() {
+        let v: SkyMaybe<i64> = serde_json::from_str("null").unwrap();
+        assert_eq!(v, SkyMaybe::Nothing);
+    }
+
+    #[test]
+    fn sky_maybe_i64_round_trip() {
+        let original = SkyMaybe::Just(42_i64);
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SkyMaybe<i64> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, original);
+
+        let nothing: SkyMaybe<i64> = SkyMaybe::Nothing;
+        let json2 = serde_json::to_string(&nothing).unwrap();
+        let decoded2: SkyMaybe<i64> = serde_json::from_str(&json2).unwrap();
+        assert_eq!(decoded2, nothing);
+    }
+
+    // --- SkyMaybe<bool> ---
+
+    #[test]
+    fn sky_maybe_bool_bare_true_becomes_just() {
+        let v: SkyMaybe<bool> = serde_json::from_str("true").unwrap();
+        assert_eq!(v, SkyMaybe::Just(true));
+    }
+
+    #[test]
+    fn sky_maybe_bool_tagged_just() {
+        let v: SkyMaybe<bool> = serde_json::from_str(r#"{"Just":false}"#).unwrap();
+        assert_eq!(v, SkyMaybe::Just(false));
+    }
+
+    #[test]
+    fn sky_maybe_bool_null_becomes_nothing() {
+        let v: SkyMaybe<bool> = serde_json::from_str("null").unwrap();
+        assert_eq!(v, SkyMaybe::Nothing);
+    }
+
+    // --- SkyMaybe<f64> ---
+
+    #[test]
+    fn sky_maybe_f64_bare_float_becomes_just() {
+        let v: SkyMaybe<f64> = serde_json::from_str("1.5").unwrap();
+        assert_eq!(v, SkyMaybe::Just(1.5_f64));
+    }
+
+    #[test]
+    fn sky_maybe_f64_tagged_just() {
+        let v: SkyMaybe<f64> = serde_json::from_str(r#"{"Just":2.5}"#).unwrap();
+        assert_eq!(v, SkyMaybe::Just(2.5_f64));
+    }
+
+    #[test]
+    fn sky_maybe_f64_round_trip() {
+        let original = SkyMaybe::Just(0.25_f64);
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SkyMaybe<f64> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    // --- SkyMaybe<SmallStruct> ---
+    //
+    // The guardian confirmed that a bare map `{...}` is REJECTED (Err), NOT
+    // mis-decoded as Just(struct).  A bare object arrives via visit_map; the
+    // visitor matches on the first key — if it is not "Just"/"Nothing" it
+    // returns unknown_variant Err, which is the correct safe behaviour.
+
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct SmallPoint {
+        x: i32,
+        y: i32,
+    }
+
+    #[test]
+    fn sky_maybe_struct_tagged_just() {
+        let v: SkyMaybe<SmallPoint> =
+            serde_json::from_str(r#"{"Just":{"x":1,"y":2}}"#).unwrap();
+        assert_eq!(v, SkyMaybe::Just(SmallPoint { x: 1, y: 2 }));
+    }
+
+    #[test]
+    fn sky_maybe_struct_bare_map_is_rejected_not_mis_just() {
+        // A bare `{"x":1,"y":2}` must NOT decode as Just(SmallPoint{1,2}).
+        // The visitor's map arm checks the first key: "x" is not "Just"/"Nothing"
+        // → unknown_variant error.  Correct, safe behaviour confirmed by guardian.
+        let result: Result<SkyMaybe<SmallPoint>, _> =
+            serde_json::from_str(r#"{"x":1,"y":2}"#);
+        assert!(result.is_err(), "bare struct map must not silently decode as Just");
+    }
+
+    #[test]
+    fn sky_maybe_struct_null_becomes_nothing() {
+        let v: SkyMaybe<SmallPoint> = serde_json::from_str("null").unwrap();
+        assert_eq!(v, SkyMaybe::Nothing);
+    }
+
+    #[test]
+    fn sky_maybe_struct_round_trip() {
+        let original = SkyMaybe::Just(SmallPoint { x: 10, y: 20 });
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SkyMaybe<SmallPoint> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    // --- SkyMaybe<Vec<i64>> ---
+
+    #[test]
+    fn sky_maybe_vec_i64_tagged_just() {
+        let v: SkyMaybe<Vec<i64>> = serde_json::from_str(r#"{"Just":[1,2,3]}"#).unwrap();
+        assert_eq!(v, SkyMaybe::Just(vec![1_i64, 2, 3]));
+    }
+
+    #[test]
+    fn sky_maybe_vec_i64_null_becomes_nothing() {
+        let v: SkyMaybe<Vec<i64>> = serde_json::from_str("null").unwrap();
+        assert_eq!(v, SkyMaybe::Nothing);
+    }
+
+    #[test]
+    fn sky_maybe_vec_i64_round_trip() {
+        let original = SkyMaybe::Just(vec![10_i64, 20, 30]);
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SkyMaybe<Vec<i64>> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    // --- SkyMaybe<SkyMaybe<i64>> (nested) ---
+
+    #[test]
+    fn sky_maybe_nested_just_just() {
+        // {"Just":{"Just":5}} → Just(Just(5))
+        let v: SkyMaybe<SkyMaybe<i64>> =
+            serde_json::from_str(r#"{"Just":{"Just":5}}"#).unwrap();
+        assert_eq!(v, SkyMaybe::Just(SkyMaybe::Just(5_i64)));
+    }
+
+    #[test]
+    fn sky_maybe_nested_just_nothing() {
+        // {"Just":"Nothing"} → Just(Nothing)
+        let v: SkyMaybe<SkyMaybe<i64>> =
+            serde_json::from_str(r#"{"Just":"Nothing"}"#).unwrap();
+        assert_eq!(v, SkyMaybe::Just(SkyMaybe::Nothing));
+    }
+
+    #[test]
+    fn sky_maybe_nested_nothing() {
+        let v: SkyMaybe<SkyMaybe<i64>> = serde_json::from_str(r#""Nothing""#).unwrap();
+        assert_eq!(v, SkyMaybe::Nothing);
+    }
+
+    #[test]
+    fn sky_maybe_nested_null_becomes_nothing() {
+        let v: SkyMaybe<SkyMaybe<i64>> = serde_json::from_str("null").unwrap();
+        assert_eq!(v, SkyMaybe::Nothing);
+    }
+
+    #[test]
+    fn sky_maybe_nested_round_trip() {
+        let original: SkyMaybe<SkyMaybe<i64>> = SkyMaybe::Just(SkyMaybe::Just(99_i64));
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: SkyMaybe<SkyMaybe<i64>> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    // -----------------------------------------------------------------------
+    // Existing panic-classifier tests
+    // -----------------------------------------------------------------------
+
     #[test]
     fn classify_and_log_panic_returns_8hex_errid_and_never_panics() {
         // &str, String, and a non-string payload all yield an 8-hex errId — and
