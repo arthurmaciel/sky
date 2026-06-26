@@ -1,0 +1,14 @@
+[package]
+name = "req-crate"
+version = "0.1.0"
+edition = "2021"
+
+# req-crate mirrors async-stripe-client-core: it defines `Wire` (StripeClient analog,
+# with an assoc-type Err), the EXTERNAL decode-bound trait `Decode`
+# (miniserde::Deserialize analog), and the generic-Self `Customizable<T>` carrying the
+# async `send<C: Wire>` / sync `send_blocking<C: BlockingWire>`. NO concrete
+# instantiation of `Customizable<Resp>` lives here — exactly like client-core, where the
+# concrete response type only arrives via `.customize()` in a resource sub-crate. The
+# concrete `Wire` impl lives in the sibling client-crate (WALL-G resolves `C`).
+[dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

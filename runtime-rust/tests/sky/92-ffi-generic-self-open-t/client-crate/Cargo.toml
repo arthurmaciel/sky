@@ -1,0 +1,10 @@
+[package]
+name = "client-crate"
+version = "0.1.0"
+edition = "2021"
+
+# client-crate mirrors the async-stripe facade: the UNIQUE concrete `Wire`/`BlockingWire`
+# clients (WALL-G resolves `C`) plus the concrete response type `Resp` (impl req-crate's
+# `Decode`). Depends on req-crate to impl its traits.
+[dependencies]
+req-crate = { git = "file:///home/arthur/.cache/sky/92-ffi-generic-self-open-t-req", branch = "master" }

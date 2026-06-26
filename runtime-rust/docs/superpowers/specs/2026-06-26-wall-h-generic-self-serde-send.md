@@ -407,3 +407,40 @@ concrete-T ctor), but its STRIPE value is inert until WALL-I. Recommended order:
 3. **B7** miniserde direct-dep + **B8** Err sanitization (with #83).
 4. WALL-I (resource builders / `.customize()` provided-trait-method) realizes usability —
    makes the Ok a concrete JSON `String`; only then is `send` end-to-end useful on real stripe.
+
+---
+
+## 9. Empirical probe (2026-06-26, fixture `92-ffi-generic-self-open-t`) — REFINES the plan
+
+Built a synthetic two-crate fixture (req-crate: generic `impl<T: Decode> Customizable<T>`
+with async `send<C: Wire>` + sync `send_blocking<C: BlockingWire>`, conditionally-Send-on-T
+`PhantomData<T>`, assoc-type Err; client-crate: unique `impl Wire for RealClient` + concrete
+`Resp: Decode`). Ran the inspector via `--manifest`. Findings that CORRECT §0/§3:
+
+1. **`new` + `send_blocking` ALREADY BIND** (sync open-T threading works via existing
+   #45/#24 + WALL-G). Only the **async `send` drops**. The wall is NARROWER than the design
+   feared — most of the threading is already in.
+2. **`T` got MONOMORPHIZED to `client_crate::Resp`**, NOT kept open: my `Decode` has a UNIQUE
+   impl (`Resp`), so WALL-G's cross-crate unique-impl mono fired on `T: Decode` (guardian B2
+   manifesting). `send_blocking` bound as `Customizable<Resp>::send_blocking(&BlockingClient)
+   -> Result<Resp, …>`. **Fixture redesign needed:** to replicate stripe's GENUINE open-T
+   (`miniserde::Deserialize` has MANY impls → unresolvable), `Decode` must have ≥2 impls so
+   `T` cannot mono — only then does the open-T-stays-open path (and its Sky parametric-FFI
+   call-site T-fixing) get exercised.
+3. **Async `send` drops even with T mono'd to concrete `Resp`.** So the async drop is NOT the
+   open-T issue — it is a **cross-crate async-Send gap**: `Resp` (the cross-crate Ok output)
+   and the moved `Customizable<Resp>` receiver aren't proven Send in req-crate's pass (their
+   Send sets are client-crate's). WALL-G froze `send_ok` for the CLIENT param only; the async
+   `send` ALSO needs the cross-crate Ok-type + receiver Send proof frozen. **This is the real
+   first implementation target** — extend WALL-G's frozen-Send to the mono'd-T output/receiver
+   (or admit a cross-crate concrete output via its frozen owning-crate Send verdict).
+4. **Assoc-type `<C as Wire>::Err` rendered EMPTY** (`Result<client_crate::Resp, >`) after C
+   mono — the qualified-path Err isn't resolved to the concrete `ClientErr`. Needs the #34
+   error-slot normalization to catch the empty/assoc Err → `SkyError` (B8 territory).
+
+**Revised WALL-H first targets (supersede §8 step 1):** (a) cross-crate async-Send freeze for
+the mono'd-T Ok output + moved receiver (the actual `send` drop); (b) assoc-type Err resolution/
+normalization (finding 4); (c) THEN the genuine open-T (multi-impl-Decode) parametric path +
+B1 miniserde allowlist — which is the part that truly needs WALL-I to be usable. Findings (a)+(b)
+are bindable + testable on a unique-impl-Decode fixture WITHOUT WALL-I (T mono's to concrete);
+(c) is the inert-without-WALL-I part.
