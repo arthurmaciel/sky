@@ -6,7 +6,48 @@ verified-against-current-code TDD design for both fixes.
 
 ---
 
-## Status: DESIGN ONLY (no impl, no guardian dispatch yet)
+## Status: WALL 1 guardian-reviewed — APPROVE-WITH-CONSTRAINTS (2026-06-25)
+
+WALL 2 still design-only (vet at P2 implementation; the `BoundCrossImpl`
+reconciliation, §3 lines 627-629, is its real risk surface).
+
+### WALL 1 — guardian constraints (BLOCKING, must hold in the impl)
+
+1. **[LOAD-BEARING] Restore `is_public(it)` on the type-registration arm** of
+   `walk_module_with_path` — the §2 draft (line ~204) DROPPED it; the current
+   code gates at main.rs:4133. A `pub use private::*` re-exports ONLY the public
+   items of `private`; registering a `pub(crate)`/bare child publishes a path
+   that does not resolve from outside the crate → `<mp::Internal as Trait>::m`
+   → **E0603 cargo-fail** (the type-checks-but-cargo-fails class). Arm becomes
+   `if item_is_type(it) && is_public(it)`.
+2. **[LOAD-BEARING] Key `seen` on `(mid, mp)` pairs, not bare `mid`.** Bare-`mid`
+   short-circuits re-registration of a glob target under a SHORTER prefix
+   depending on HashMap seed order → non-deterministic, and can MISS the
+   firestore two-level shortening the fix exists for (if `get` is visited via
+   another chain first, the `crate::T` short path is never registered).
+   `(mid, mp)` terminates: prefixes are bounded by seed module paths, `mp` is
+   passed UNCHANGED through globs (never grows per-hop). Alt: keep bare-`mid` for
+   cycle-break + seed public modules shortest-path-first — but `(mid, mp)` is
+   preferred (robust to the 2-level case).
+3. **Collision fixture (C2).** Add a type reachable BOTH directly and via glob;
+   assert the emitted UFCS qualifier resolves under `cargo build`. Do NOT change
+   `insert_shorter` — shorter-valid-path IS the desired qualifier (valid once C1
+   holds).
+4. **Diff-verify subsumption (C4).** Removing the one-level block (4115-4160)
+   must preserve: (a) the renamed-non-glob arm using `u["name"]`; (b) direct
+   public-type-child registration; (c) NO private module seeded as a walk ROOT
+   (only as a glob-recursion target inheriting a public `mp`). Keep the regex
+   `RegexBuilder` one-level case (comment at 4118-4124) GREEN in the regression set.
+5. **No `[i]`/`unwrap`/`expect`/`panic` in the helper (C6).** Inspector is under
+   `tools/` → the crate deny-lints apply; a panic on a real crate's rustdoc
+   aborts `sky add`. Use `.get()`/`if let`/`match`; keep `if let Some(mp)` on
+   `mpath_from_doc`.
+6. **Make-or-break (C5) — PASS, no change:** `const TYPE_KINDS` (main.rs:3911)
+   includes `"trait"`; `FirestoreGetByIdSupport` registers.
+
+Key current-code anchors: gate 4133 · `insert_shorter` 4071 · seed 4078-4085 ·
+`seen` 4087 · `ufcs_trait_path_with_args` 3795-3837 (emits `base` verbatim →
+E0603 surface) · `TYPE_KINDS` 3911 · `item_is_type` 3914 · `is_public` 1662.
 
 ---
 
