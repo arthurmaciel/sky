@@ -1,6 +1,34 @@
 # WALL-H — Generic-Self serde-T `send` on `CustomizableStripeRequest<T>`
 
-**Status:** DRAFT (pre-guardian)
+**Status:** DESIGN — guardian APPROVE-WITH-CONSTRAINTS (B1–B11 in §7). **Route A** chosen.
+WALL-G (#84) shipped — this is unblocked.
+
+## 0. Guardian outcome (resolves §5 + adds §7 constraints)
+
+- **Q-H1 → Route A** (T-open generic wrapper, `miniserde::Deserialize` bound preserved).
+  Route C (reduce `T → miniserde::json::Value`) is **REJECTED**: `.customize()` returns
+  `CustomizableStripeRequest<Self::Output>` with `Output` fixed per resource — no producer
+  ever yields `CustomizableStripeRequest<Value>`, so the reduced wrapper would accept
+  nothing. **CRITICAL FINDING: WALL-H alone delivers a SOUND-but-INERT `send`** — an open
+  `miniserde::Deserialize`-bounded `T` is unconstructible/undecodable/unprintable on the Sky
+  side (same class as the "FFI Result error slot is unusable" precedent), so the binding
+  type-checks + cargo-builds but its Ok value is unconsumable **until WALL-I** supplies a
+  concrete `CustomizableStripeRequest<ConcreteResp>` AND makes the Ok a Sky-usable type
+  (recommended: WALL-I output-serializes the concrete response to a JSON `String`). ⇒
+  **WALL-H and WALL-I are ONE coupled arc; ship WALL-H's mechanism, realize usability in WALL-I.**
+- **Q-H2 → trait-identity keying** (canonical-path allowlist `SERDE_TRAIT_PATHS`,
+  `main.rs:6109`). Adding `"miniserde::de::Deserialize"` is one line — BUT necessary-not-
+  sufficient: the existing reduce `method_all_serde_reducible` (`main.rs:8750`) covers only
+  METHOD-declared serde params and `return false`s for impl/struct-declared (line 8789).
+  WALL-H's `T` is **impl-declared** → the impl-declared-T-open threading (§3.2) is genuinely
+  NEW code; the allowlist only makes the bound recognized, not threaded.
+- **Verified vs spec:** impl 332 is INHERENT (not a trait impl); items `[330,331]` exactly;
+  `T: miniserde::Deserialize` is impl-declared, the only method generic is `C`. `SkyTask` is
+  `Pin<Box<dyn Future + Send + 'static>>` → the 330 async path needs `T: Send + 'static`.
+
+**Original draft below.**
+
+**Status (draft):** DRAFT (pre-guardian)
 **Epic:** stripe (#70) auto-FFI — the stripe *operation* terminal step. Binds
 `send`/`send_blocking` on the generic-Self `CustomizableStripeRequest<T>`.
 **Date:** 2026-06-26
@@ -330,3 +358,52 @@ for the 330 async path, and interacts with the #59/#65 serde-bound-T machinery
   link, per WALL-G B7).
 - **Real-crate proof:** `send` against async-stripe rc.6 once WALL-G + WALL-I land
   (needs a concrete resource builder to produce the `CustomizableStripeRequest<T>`).
+
+---
+
+## 7. Guardian MUST-hold constraints (B1–B11)
+
+- **B1** — add `"miniserde::de::Deserialize"` to `SERDE_TRAIT_PATHS` (keep the crate-local
+  veto). Implement impl-declared-T-open threading SEPARATELY — `method_all_serde_reducible`
+  (main.rs:8789) does NOT cover impl-declared params.
+- **B2** — discriminate by the bound trait's NATURE, not position: `C: StripeClient`
+  (unique-impl trait) → WALL-G mono; `T: miniserde::Deserialize` (open decode bound) →
+  thread OPEN. `T` must NEVER reach the unique-impl resolver (`Deserialize` has 0/many impls
+  → would ambiguous-drop `send`).
+- **B3** — extend the async output-Send gate to ADMIT an open generic the wrapper declares
+  `+ Send + 'static`; render `where T: miniserde::Deserialize + Send + 'static` on the 330
+  path (without it: non-Send spawn future E0277 + `req.send` E0277).
+- **B4** *(deferred hole — hard WALL-I precondition)* — WALL-I MUST prove the concrete
+  response `Send + 'static` AND `CustomizableStripeRequest<ConcreteT>: Send` before binding
+  the resource→send chain; over-drop if unprovable (else Sky type-checks, cargo fails).
+- **B5** *(fixture fidelity)* — the synthetic fixture's Self struct must be
+  CONDITIONALLY-Send-on-T (`PhantomData<T>` + Send fields); an unconditionally-Send model is
+  a FALSE GREEN on the spawn's `Customizable<T>: Send` obligation.
+- **B6** — WALL-G's concrete client Sky surface must be the OWNED `Client` via the
+  `isOwnRefTy` case-(A) path (Ffi.hs:794); the fixture must combine async-send + owned
+  cross-crate client (a combination no shipped fixture yet exercises).
+- **B7** — `miniserde` becomes a DIRECT generated-Cargo.toml `[dependencies]` (else E0433),
+  version from the invocation set; DROP on version skew vs what async-stripe-client-core
+  resolves (path-equal but type-incompatible → E0277).
+- **B8** *(SECURITY — top priority)* — `sky_error_from_foreign`: (i) the concrete Err must
+  impl Debug or over-drop (#83); (ii) the user-facing `SkyError` message MUST NOT embed the
+  raw foreign Debug (stripe error bodies echo bearer/API-key/request body) — emit a fixed
+  generic message + correlation id, detail server-side-log only. Fold into #83's scope.
+- **B9** — bind ONLY items [330,331]; gate the open-Self threading to INHERENT impl + a
+  Deserialize-only-bounded Self so it can't widen to `ListPaginator<T>` (impl 129).
+- **B10** — `send_blocking` (331, sync) binds as a plain Sky `Result`: apply B1/B2/B7/B8
+  identically, SKIP the async-Send admission (B3) + the spawn.
+- **B11** — fixture green under `SKY_DCE=0` + REAL cargo; document it does NOT retire
+  B4/B5's residual nor the `.customize()` producer (Q-H5 → WALL-I).
+
+## 8. Implementation sequencing (post-guardian)
+
+WALL-H's mechanism is independently testable (synthetic conditionally-Send fixture with a
+concrete-T ctor), but its STRIPE value is inert until WALL-I. Recommended order:
+1. **B1** allowlist + **impl-declared-T-open threading** (the new core) + **B3** async-Send
+   admission for a wrapper-declared open `Send` generic + **B9** scope gate.
+2. Synthetic fixture `92-ffi-generic-self-open-t` (two-crate, conditionally-Send Self,
+   external decode-bound trait, assoc-type Err, concrete-T ctor) → GREEN under SKY_DCE=0.
+3. **B7** miniserde direct-dep + **B8** Err sanitization (with #83).
+4. WALL-I (resource builders / `.customize()` provided-trait-method) realizes usability —
+   makes the Ok a concrete JSON `String`; only then is `send` end-to-end useful on real stripe.
