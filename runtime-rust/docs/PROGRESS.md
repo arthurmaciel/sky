@@ -17,6 +17,35 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — Phase 2 firebase measurement: token-verify works; 5 NEW general codegen walls block CRUD
+
+firebase (rs-firebase-admin-sdk 4.x), all firestore walls in (HEAD 77b6dccd):
+**106/962 bound (11%).** The general walls covered the inspector side — token
+verification (`TokenValidator::validate`) BINDS + the emulator auth handle mints
+(`App::emulated` + `App::auth`). But a real firebase mint+op program does NOT yet
+cargo-build: **14 errors in 5 NEW GENERAL codegen wall classes** (affect EVERY crate;
+likely also close firestore's #73 SKY_DCE=0 residuals):
+
+| wall | error | cause | task |
+|---|---|---|---|
+| A | E0308 ×5 | `Vec<StructType>` field setter emits `Vec<String>` (collapses non-primitive elem) | #75 (HIGH) |
+| B | E0433 ×6 | generic wrappers emit `::http::`/`::google_cloud_auth::` transitive-dep paths not in generated Cargo.toml | #76 |
+| C | E0603 ×1 | HashMap return emits private `::std::collections::hash::map::HashMap` not `::std::collections::HashMap` | #77 |
+| D | E0425 ×1 | `Default` emits free-fn `crate::default()` not `<T as Default>::default()` | #78 |
+| E | E0277 ×1 | `Into<&'static str>` static-lifetime arg (owned-String #67 doesn't cover String→&'static str) | #79 |
+
+**Structural blocker for firebase CRUD** (create_user/get_user/delete_user): they're
+trait methods on `FirebaseAuthService<C: ApiHttpClient>` for `FirebaseAuth<ApiHttpClientT>`
+— a generic-param-bearing concrete receiver the inspector can't self-resolve
+(`trait-method-generic-self`, 48 drops). Needs a generic-concrete-receiver
+monomorphization wall (à la #52 concrete-impl) OR a thin shim. → #80. Same shape
+blocks `App::live`/`live_with_project_id` (`App<C>` PhantomData-generic → undeclared
+type-var Self).
+
+**Lesson holds:** the general walls (async_trait/serde/String/turbofish/Result-alias)
+DID pre-pay firebase's inspector coverage, but firebase exercised CODEGEN-side wall
+classes the firestore happy-path never hit. Measure-live caught them.
+
 ## 2026-06-26 — #67 owned-String ctor + 🎉 FIRESTORE PHASE 1 COMPLETE: real mint+CRUD cargo-builds shim-free
 
 #67: an owned-`String` host param (firestore `FirestoreDbOptions::new(project:
