@@ -213,3 +213,62 @@ real `send` needs:
 
 WALL-J needs a guardian DESIGN before implementation (new sibling-impl assoc resolution +
 multi-crate client manifest). It is the genuine terminal stripe wall; multi-session.
+
+## 10. WALL-J guardian DESIGN verdict (2026-06-26): APPROVE-WITH-CONSTRAINTS (B1–B8)
+
+The approach (Self-subst → sibling-trait-impl assoc resolution → cross-crate `C: StripeClient`
+via WALL-G `--manifest` → receiver Send → JSON-String return) is the correct terminal wall.
+**Composition-safety CONFIRMED SOUND in code:** if the facade is absent from the manifest, `C`
+stays a tyvar → `classify_param_bound` returns `Err(UnmodellableBound("StripeClient"))`
+(`main.rs:7109`) propagated by `?` (`8191`) → the whole method DROPS. No path emits an
+unresolved `<C: StripeClient>`. Every partial failure is fail-closed.
+
+### Constraints (each: property protected → fail-closed condition)
+- **B1** — do NOT apply a whole-sig `contains_qualified_path` drop on the inherent path; it would
+  wrongly kill `send` on its OWN legit error-slot `<C as StripeClient>::Err` (normalized to
+  SkyError at codegen, `7461-7481`). Rely on `type_to_typeref`'s per-position `?` (Ok payload
+  `7475`; surviving qualified_path → Err `7550`) + error-slot swallow (`7477`).
+- **B2 (soundness hole)** — `subst_assoc_json` (`7298`) keys ONLY on projection NAME (`7303`),
+  trait-BLIND. Safe in the trait-impl caller, UNSOUND inherent (a same-named `<Self as
+  OtherTrait>::Output` in a payload would mis-resolve). Match the sibling impl by **(trait
+  resolved-id, for-type resolved-id)**; require the single foreign-trait payload projection ==
+  the matched trait.
+- **B3** — gate Self-subst on `collect_generic_names(for_val).is_empty()` (≡ concrete named self,
+  `8712`); whole-sig subst on a generic `impl<T> Foo<T>` reinjects unbound `T`. The `8047`
+  undeclared-tyvar gate is the backstop.
+- **B4** — sibling candidate must be CONCRETE (exclude free-tyvar `for` = blanket impl) AND
+  UNIQUE (count==1). Cross-crate sibling → `impl_assoc_bindings` (`8656`) reads THIS crate's
+  index → empty → drop. Orphan rule guarantees the real sibling is crate-local.
+- **B5** — keep the inherent empty-bound exemption as-is (Q2-A backstop `8200` is
+  `trait_ctx.is_some()`-gated). Don't let an inherent foreign-trait-bound tyvar emit bare.
+  Negative test: facade absent → `send` dropped.
+- **B6 (arch)** — `parse_generic_method_fn`/`try_parametric_stub` lack `for_val`+`index` on the
+  inherent path (recv is a rendered STRING). Compute the sibling match + `impl_assoc_bindings` at
+  the `route_concrete_method` call site (`1731`, for_val/index/impl_data in scope), mirror
+  `TraitCtx.assoc_bindings` (`8588`), pass via a new optional `InherentSelfCtx`. `None` ctx MUST
+  be byte-identical to today.
+- **B7** — receiver-Send is the `collect_provably_send_recv_names` SYNTHETIC/ALL_FIELDS source
+  (`4335`→`4416`), NOT `is_generic_instantiation_send` (`CreateCustomer` has no `<>`). Sound
+  fail-closed (Rc-bearing recv → no synthetic Send → drop); verify rustdoc emits a synthetic
+  `impl Send` empirically + add an Rc-recv negative fixture.
+- **B8 (BLOCKING SECURITY)** — the design assumed "Err → fixed msg + correlation id, server-log
+  only" already holds. **It does NOT.** `sky_error_from_foreign` (`runtime-rust/src/sky_runtime/
+  core.rs:44`) = `format!("{e:?}").into()` → the RAW foreign Debug becomes the Sky-visible Error
+  message. WALL-J is the FIRST wall routing a real network/auth client error (reqwest/hyper
+  transport — can echo URL/headers/bearer) through it. The correlation-id machinery (`core.rs:387`)
+  is wired ONLY to the panic hook. MUST implement: server-log the Debug under a fresh corr-id,
+  return a fixed generic msg + id to Sky. **Subsumes task #83.** (Ok-JSON path does NOT leak the
+  API key — `Customer` is the response, the key lives in `&C` — but surfaces PII as plain JSON.)
+
+### Decomposition (ship RED single-crate first, mirror fixture 93)
+- **Stage 0 (BLOCKING, do FIRST):** B8 — fix `sky_error_from_foreign` to redact (corr-id +
+  server-log). In-boundary `runtime-rust/`; its own guardian-final.
+- **Stage 1:** single-crate, sync, non-generic — inherent `fn out(&self) -> <Self as
+  LocalTrait>::Output` + `impl LocalTrait for Thing { type Output = Payload }`. Isolates
+  Self-subst + sibling-assoc + (trait-id, self-id) match (B2/B3/B4/B6).
+- **Stage 2:** + async + `Result<_, ConcreteErr>` — exercises the Send gate (`8244`) + B1 error-slot.
+- **Stage 3:** + `<C: LocalClient>` single in-crate impl → then cross-crate via `--manifest`.
+- **Stage 4:** real async-stripe behind features (fixtures 89/93 visibility). **Reorder so the
+  error-slot (B1) lands BEFORE the cross-crate-`C` work.**
+
+Full memo: guardian memory `rust-ffi-wall-j-inherent-self-output-gate`.
