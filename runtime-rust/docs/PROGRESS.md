@@ -17,6 +17,55 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — WALL 4 (#64, KEYSTONE): #[async_trait] desugar recognition → ALL firestore CRUD binds 🎉
+
+The keystone. firestore CRUD trait methods dropped `not-bindable: dyn_trait`
+because firestore uses `#[async_trait]`, which desugars every trait `async fn m()
+-> T` into a PLAIN `fn m() -> Pin<Box<dyn Future<Output=T> + Send + 'async_trait>>`
+(`header.is_async=false`), dropped at TWO sites (`type_to_typeref:6529` concrete-Self
+CRUD path + the #26 `parse_fn_item:2825` inherent/free-fn gate) before the #44 async
+path runs.
+
+Fix (inspector-only, `main.rs` +443): `async_trait_future_output` peels
+`Pin→Box→dyn_trait`, gates the principal trait on canonical `core::future::Future`
+(#25-safe — `Box<dyn Stream>`/`Iterator`/crate-local-Future NOT recognized),
+REQUIRES `+Send` (else drop async-future-not-send), and extracts `Output=T` via
+`constraints[].binding.equality.type` (the modern rustdoc key — NOT the stale
+`bindings`/`equality`-wrapper, which would silently de-async everything to `Task
+Error ()`; that defect was the §8 make-or-break, disproven). `de_async_clone`
+rewrites `sig.output=T` + forces `is_async=true` on a CLONE (shared index node
+untouched). Runs at both sites BEFORE the dyn-trait drop; non-Future dyn still drops.
+Composes: the de-async'd T flows through the existing param/return machinery so
+#65 serde-&I + #54 self-receiver-Send + #44 async wrapper all apply on the SAME
+method. Adjacent in-boundary fix: `parametric_function` non-mono return hardcoded
+`effect:"pure"` (silently de-async'd a concrete-Self async-trait CRUD method to sync
+Result) → `mono_effect` (sync stays pure byte-identical, async lifts effectful).
+Also fixed the shared `extract_binding_type` to read `constraints`+`.equality.type`
+(1 caller, was already broken/unreached on modern rustdoc — strict fix, live-diff
+itertools/url/semver IDENTICAL).
+
+**🎉 REAL firestore: 1052→1077 fns bound; ALL 6 CRUD ops bind as Task** —
+create_obj/update_obj → `Task Error (FirestoreResult String)`, get_obj →
+`FirestoreResult String`, get_doc → `FirestoreResult Document`, query_obj →
+`FirestoreResult (Vec String)`, delete_by_id → `FirestoreResult ()`. A
+mint+CRUD Sky program (`for_default_project_id`) cargo-builds shim-free.
+
+**Proof:** fixture `82-ffi-async-trait` — `op : Db -> String -> Task Error Int`
+(real i64, not `()`), `put` composes serde-&I + the desugar; negatives
+(non-Future dyn, Future-without-Send) drop. 28 ffi-fixtures ok, 191 inspector unit
+tests (9 new), SKY_DCE=0 + clippy clean. Guardian-final APPROVE (live old-vs-new
+diff: 0 regressions, +25 CRUD bindings).
+
+**`#[async_trait]` recognition is GENERAL** — firebase + async-stripe are async-trait
+SDKs too, so #64 will carry into Phase 2/3. Remaining firestore follow-ons (narrow
+call-path gaps, NOT blockers — create/delete call clean + handle mints): #72
+(get_obj<T,S> mixed-generic turbofish E0107), #67 (owned-String ctor), #68 (fluent
+API), #66 (WALL5 hardening).
+
+**Affected:** `tools/sky-ffi-inspect-rs/src/main.rs` ·
+`runtime-rust/tests/sky/82-ffi-async-trait/` · `ffi-fixtures-test.sh` · spec
+`2026-06-26-rust-ffi-wall4-async-trait-desugar-design.md`.
+
 ## 2026-06-26 — WALL 3a-&I (#65): serde `&I` (Serialize input) param binds via owned-clone-at-boundary
 
 firestore `create_obj<I: Serialize>(&self, obj: &I)` / `update_obj` dropped

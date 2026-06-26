@@ -1122,6 +1122,22 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                                 };
                             let fn_data: &serde_json::Value =
                                 mono_owned.as_ref().unwrap_or(fn_data_raw);
+                            // [WALL 4 / #64] De-async the `#[async_trait]` desugar
+                            // BEFORE the generic-bearing / serde-reducibility /
+                            // take_parametric decisions (C6/C8), so every
+                            // downstream consumer — `method_is_generic_bearing`,
+                            // `method_all_serde_reducible`, `try_parametric_stub`,
+                            // `parse_fn_item` — sees the unwrapped `sig.output = T`
+                            // + `is_async = true`. Composes with `mono_owned`
+                            // (de-async runs on whatever it produced). `None` →
+                            // unchanged. The firestore CRUD trait methods land
+                            // here (concrete-Self trait method → take_parametric);
+                            // de-async lifts the `Pin<Box<dyn Future>>` so
+                            // `type_to_typeref` binds the unwrapped Result instead
+                            // of dropping `not-bindable: dyn_trait`.
+                            let de_async_owned = de_async_clone(fn_data);
+                            let fn_data: &serde_json::Value =
+                                de_async_owned.as_ref().unwrap_or(fn_data);
                             // Wall #3: if this method is GENERIC-BEARING (its
                             // own / the impl's / the struct's generics declare a
                             // type param used in the sig), retire Alt-1's concrete
@@ -2752,6 +2768,17 @@ fn parse_fn_item(
     aliases: &HashMap<String, String>,
     recv: Option<(&str, &str)>,
 ) -> Option<Function> {
+    // [WALL 4 / #64] `#[async_trait]`-desugar recognition — runs FIRST (C6/C8),
+    // BEFORE `impl_traits_resolvable` (2790) and the #26 dyn-trait gate (2825), so
+    // the de-async'd `T` gets the normal impl-trait / serde / Send treatment and
+    // the dyn-trait gate never sees the (now unwrapped) `Pin<Box<dyn Future>>`.
+    // De-async produces a CLONE with `sig.output = T` + `header.is_async = true`
+    // (C5 — shared index node untouched); the rest of the fn proceeds with the
+    // clone. `None` when the output isn't the async_trait shape → byte-identical
+    // to pre-WALL-4 (the original `fn_data` is used).
+    let de_async = de_async_clone(fn_data);
+    let fn_data: &serde_json::Value = de_async.as_ref().unwrap_or(fn_data);
+
     // Signature is under "sig" (format v38+) or "decl" (earlier).
     let sig = fn_data.get("sig").or_else(|| fn_data.get("decl"))?;
 
@@ -3664,6 +3691,19 @@ const STD_TRAIT_CANONICAL: &[(&str, &str)] = &[
     ("core::marker::Sized", "Sized"),
     ("core::marker::Copy", "Copy"),
     ("core::marker::Unpin", "Unpin"),
+    // [WALL 4 / #64] `core::future::Future` — the principal trait of an
+    // `#[async_trait]`-desugared `Pin<Box<dyn Future<Output=T> + Send>>` return.
+    // rustdoc's `doc["paths"]` records the trait under its INTERNAL module path
+    // `core::future::future::Future` (the double `future` segment is the private
+    // defining module); the INLINE `trait.path` node renders it as the public
+    // `::core::future::Future`. Register BOTH joined forms (+ the `std::` re-export)
+    // so `std_trait_tag` resolves the trait's id canonically (crate_id > 0), and
+    // the test-world last-segment fallback maps the bare `Future` segment too. A
+    // crate-local `trait Future` (crate_id 0) is excluded by `std_trait_tag`'s
+    // LOCAL_TYPE_IDS gate (#25 class) — it can never match.
+    ("core::future::future::Future", "Future"),
+    ("core::future::Future", "Future"),
+    ("std::future::Future", "Future"),
 ];
 
 /// Build the `STD_TRAIT_BY_ID` map: for every `doc["paths"]` entry whose `kind`
@@ -5007,20 +5047,41 @@ fn extract_angle_type_args(
         .unwrap_or_default()
 }
 
-/// Extract an associated-type binding (e.g. `Output = T`) from args.
+/// Extract an associated-type binding (e.g. `Output = T`) from args, rendered as
+/// a Sky type string.
+///
+/// [WALL 4 / #64 — C9] The MODERN rustdoc format stores the binding under the
+/// `constraints[]` key as `{ name, binding: { equality: { type: <T> } } }`; the
+/// extracted value is `.equality.TYPE` (the unwrapped T node), NOT the `equality`
+/// wrapper. The pre-WALL-4 implementation read the STALE `bindings[]` key and
+/// returned the `equality` WRAPPER — so on a real (modern) rustdoc it returned
+/// `None` (no `bindings` key) and on the unit-test world it stringified the
+/// wrapper. Route the modern path through the shared `constraint_equality_type`
+/// reader (the single source of truth — same reader the async_trait predicate +
+/// the IntoIterator/iterator-param sites use), keeping a legacy `bindings[]`
+/// fallback for older rustdoc formats. Total over malformed JSON.
 fn extract_binding_type(
     args: Option<&serde_json::Value>,
     binding_name: &str,
     aliases: &HashMap<String, String>,
 ) -> Option<String> {
+    // Modern format: `constraints[].binding.equality.type` (the unwrapped T).
+    if let Some(ty) = constraint_equality_type(args, binding_name) {
+        return Some(rustdoc_type_to_sky(ty, aliases));
+    }
+    // Legacy fallback: `bindings[]`. Read `.binding.equality.type` (the unwrapped
+    // T) — NOT the `equality` wrapper the pre-WALL-4 code returned.
     let bindings = args?
         .get("angle_bracketed")?
         .get("bindings")?
         .as_array()?;
     for b in bindings {
         if b["name"].as_str() == Some(binding_name) {
-            // binding value is under b["binding"]["equality"] in newer formats
-            if let Some(ty) = b.get("binding").and_then(|bv| bv.get("equality")) {
+            if let Some(ty) = b
+                .get("binding")
+                .and_then(|bv| bv.get("equality"))
+                .and_then(|eq| eq.get("type"))
+            {
                 return Some(rustdoc_type_to_sky(ty, aliases));
             }
             // older format: b["value"] or b["type"]
@@ -8143,7 +8204,16 @@ fn parametric_function(
         name: emitted_name,
         params,
         results,
-        effect: "pure".into(),
+        // [WALL 4 / #64] Honour the host's async-ness here, exactly as the
+        // `is_wall2_mono` branch above does via `mono_effect`. The non-mono path
+        // (a non-generic concrete-Self trait method, OR a still-parametric stub)
+        // previously HARDCODED `pure`, which silently de-async'd an
+        // `#[async_trait]`-desugared NON-generic CRUD method (`delete_by_id` /
+        // `get_doc` shape — no serde generic) to a SYNC `Result` instead of the
+        // `Task` the #44 wrapper emits. `mono_effect` reads `generic.call.is_async`
+        // (set from the de-async'd `header.is_async`), so a sync method stays
+        // `pure` (byte-identical) and an async one lifts to `effectful` → `Task`.
+        effect: mono_effect.into(),
         exported: true,
         recv_type: out_recv_type,
         recv_rust_type: out_recv_rust,
@@ -8674,6 +8744,123 @@ fn impl_traits_resolvable(val: &serde_json::Value, pos: BoundPos) -> bool {
         serde_json::Value::Array(arr) => arr.iter().all(|v| impl_traits_resolvable(v, pos)),
         _ => true,
     }
+}
+
+/// [WALL 4 / #64] Peel a single-type-arg `resolved_path` whose LAST `::` segment
+/// is `name` (`Pin<T>` / `Box<T>`), returning a reference to the inner type node
+/// `T`. Fail-closed (`None`) on: not a `resolved_path`, wrong last segment, no
+/// angle-bracketed args, more than one type arg, or a lifetime/const arg in the
+/// sole position (an async_trait future box has EXACTLY one type arg; a lifetime
+/// there is a deviation → drop). Total over malformed JSON — no panic/index.
+fn peel_resolved_path<'a>(val: &'a serde_json::Value, name: &str) -> Option<&'a serde_json::Value> {
+    let rp = val.get("resolved_path")?;
+    let path = rp.get("path").or_else(|| rp.get("name")).and_then(|p| p.as_str())?;
+    if path.rsplit("::").next().unwrap_or(path) != name {
+        return None;
+    }
+    let args = rp.get("args")?.get("angle_bracketed")?.get("args")?.as_array()?;
+    // Exactly one arg, and it MUST be a type (not a lifetime/const).
+    let [only] = args.as_slice() else { return None };
+    only.get("type")
+}
+
+/// [WALL 4 / #64] Read the `Output = T` associated-type binding from a trait's
+/// angle-bracketed `constraints[]` (the MODERN rustdoc key — NOT the stale
+/// `bindings`). Walks `args.angle_bracketed.constraints[]`, matches
+/// `name == "Output"`, and returns `binding.equality.type` (the unwrapped T node,
+/// NOT the `equality` wrapper). Mirrors the working readers at the IntoIterator
+/// (5781) and iterator-param (6797) sites. Fail-closed (`None`) on any shape
+/// deviation. Total over malformed JSON.
+fn constraint_equality_type<'a>(
+    trait_args: Option<&'a serde_json::Value>,
+    binding_name: &str,
+) -> Option<&'a serde_json::Value> {
+    trait_args?
+        .get("angle_bracketed")?
+        .get("constraints")?
+        .as_array()?
+        .iter()
+        .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(binding_name))?
+        .get("binding")?
+        .get("equality")?
+        .get("type")
+}
+
+/// [WALL 4 / #64] Recognise the `#[async_trait]` desugar shape and return the
+/// future's `Output = T` type node — the de-async'd return T — IFF `node` is the
+/// canonical async-trait future box, else `None`.
+///
+/// The proc-macro rewrites every `async fn m(..) -> T` into a PLAIN (non-async)
+/// `fn m(..) -> Pin<Box<dyn Future<Output = T> + Send + 'async_trait>>`. This
+/// predicate matches that exact shape so the two existing dyn-trait drop gates
+/// (`parse_fn_item` #26 gate; `type_to_typeref`'s NotBindable(dyn_trait)) can be
+/// SUPERSEDED for it and the method re-flagged `is_async` to flow through the #44
+/// async→Task machinery exactly like a native `async fn`.
+///
+/// FAIL-CLOSED (C1): any deviation returns `None`, leaving every existing drop
+/// intact (default-drop is safe; default-bind is the bug). The gates:
+///   * Pin<…> peel (C7: the `'async_trait` lifetime lives in `dyn_trait.lifetime`,
+///     OUTSIDE the trait array — it is never threaded into a typeref because the
+///     whole `dyn_trait` node is consumed here).
+///   * Box<…> peel — REQUIRED (a heap future); a bare `dyn Future` (unboxed) is
+///     not the async_trait shape and stays dropped.
+///   * principal trait (traits[0]) is canonically `core::future::Future` by
+///     RESOLVED IDENTITY via `std_trait_tag` (C2, #25 class) — a crate-local
+///     `trait Future` (crate_id 0) is rejected; `Box<dyn Stream>` / `dyn Iterator`
+///     / any other dyn object is rejected.
+///   * `+ Send` REQUIRED among the auto-trait bounds traits[1..] (C3) — matched
+///     canonically via `std_trait_tag`. A `Pin<Box<dyn Future>>` WITHOUT Send
+///     (the `#[async_trait(?Send)]` case) → `None` → drop `async-future-not-send`
+///     (a multi-thread tokio Task spawn needs `Output: Send`; binding it would be
+///     a host E0277).
+///   * Output extracted from `constraints[]` via `constraint_equality_type`
+///     (C4 — the single make-or-break; the stale `bindings`-reading
+///     `extract_binding_type` is NEVER used here).
+fn async_trait_future_output(node: &serde_json::Value) -> Option<&serde_json::Value> {
+    let inner = peel_resolved_path(node, "Pin")?;
+    let boxed = peel_resolved_path(inner, "Box")?;
+    let dt = boxed.get("dyn_trait")?;
+    let traits = dt.get("traits")?.as_array()?;
+    let principal = traits.first()?.get("trait")?;
+    // C2: principal MUST be canonical std `core::future::Future` (by resolved id).
+    if std_trait_tag(principal) != Some("Future") {
+        return None;
+    }
+    // C3: REQUIRE `+ Send` among the auto-trait bounds (multi-thread Task spawn).
+    let send_present = traits
+        .iter()
+        .skip(1)
+        .filter_map(|t| t.get("trait"))
+        .any(|tr| std_trait_tag(tr) == Some("Send"));
+    if !send_present {
+        return None;
+    }
+    // C4: Output from `constraints[].binding.equality.type` — never `bindings`.
+    constraint_equality_type(principal.get("args"), "Output")
+}
+
+/// [WALL 4 / #64] If `fn_data`'s `sig.output` is the `#[async_trait]` future box,
+/// produce a CLONE (C5 — never mutate the shared index node) whose `sig.output`
+/// is the unwrapped `Output = T` and whose `header.is_async = true`, so the rest
+/// of the inspector treats it as a native `async fn -> T`. Every other field
+/// (`is_unsafe` — C11, `abi`, inputs, generics) is preserved unchanged. Returns
+/// `None` when the output is NOT the async_trait shape (the caller then uses the
+/// original `fn_data` verbatim — byte-identical to pre-WALL-4 behaviour).
+fn de_async_clone(fn_data: &serde_json::Value) -> Option<serde_json::Value> {
+    let output = fn_data.get("sig").or_else(|| fn_data.get("decl"))?.get("output")?;
+    let unwrapped = async_trait_future_output(output)?.clone();
+    let mut owned = fn_data.clone();
+    // Rewrite sig.output (or decl.output for the older format) to the unwrapped T.
+    if owned.get("sig").is_some() {
+        owned["sig"]["output"] = unwrapped;
+    } else {
+        owned["decl"]["output"] = unwrapped;
+    }
+    // Force is_async = true on the CLONE so classify_effect → effectful and the
+    // #44 / #54 / #61 Send gates fire (sound: the desugar's `+ Send` bound is the
+    // same Send guarantee a native `async fn` carries — C3 already proved it).
+    owned["header"]["is_async"] = serde_json::Value::Bool(true);
+    Some(owned)
 }
 
 /// The last `::` segment of a `dyn_trait`'s FIRST trait reference (the principal
@@ -13511,5 +13698,253 @@ mod tests {
         // Rendered with Self intact (subst_self maps it to the receiver downstream).
         assert_eq!(rustdoc_type_to_rust_str(&use_site), "Result<Self, DbError>");
         assert_eq!(subst_self(&rustdoc_type_to_rust_str(&use_site), "Db"), "Result<Db, DbError>");
+    }
+
+    // ── WALL 4 / #64 — `#[async_trait]` desugar recognition ──────────────────
+    //
+    // The proc-macro rewrites `async fn m(..) -> T` into a PLAIN (non-async)
+    // `fn m(..) -> Pin<Box<dyn Future<Output=T> + Send + 'async_trait>>`. The
+    // tests encode the empirically-confirmed §1 rustdoc node verbatim and prove:
+    // recognition, Output extraction via `constraints[]` (the make-or-break),
+    // Send requirement, canonical-Future gate (#25 class), is_async-on-CLONE.
+
+    /// A `resolved_path` node with a single angle-bracketed TYPE arg.
+    fn rp1(path_name: &str, id: u64, inner: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "resolved_path": {
+            "path": path_name, "name": path_name, "id": id,
+            "args": { "angle_bracketed": { "args": [ { "type": inner } ], "constraints": [] } }
+        } })
+    }
+
+    /// A `dyn Trait` node: principal `trait_principal`, optional auto-trait bounds
+    /// (each `(path, id)`), and an `Output = out` constraint on the principal.
+    fn dyn_future_node(
+        principal_path: &str,
+        principal_id: u64,
+        out: serde_json::Value,
+        autos: &[(&str, u64)],
+    ) -> serde_json::Value {
+        let mut traits = vec![serde_json::json!({
+            "trait": {
+                "path": principal_path, "name": principal_path, "id": principal_id,
+                "args": { "angle_bracketed": {
+                    "args": [],
+                    "constraints": [ {
+                        "name": "Output", "args": null,
+                        "binding": { "equality": { "type": out } }
+                    } ]
+                } }
+            },
+            "generic_params": []
+        })];
+        for (p, id) in autos {
+            traits.push(serde_json::json!({
+                "trait": { "path": p, "name": p, "id": id, "args": null },
+                "generic_params": []
+            }));
+        }
+        serde_json::json!({ "dyn_trait": { "traits": traits, "lifetime": "'async_trait" } })
+    }
+
+    /// `Pin<Box<dyn Future<Output=out> + <autos>>>` — the async_trait return box.
+    fn async_trait_box(
+        out: serde_json::Value,
+        principal_path: &str,
+        principal_id: u64,
+        autos: &[(&str, u64)],
+    ) -> serde_json::Value {
+        let dt = dyn_future_node(principal_path, principal_id, out, autos);
+        rp1("::core::pin::Pin", 2, rp1("Box", 3, dt))
+    }
+
+    /// `Result<i64, String>` — the canonical async_trait Output of the §1 probe.
+    fn result_i64_string() -> serde_json::Value {
+        serde_json::json!({ "resolved_path": {
+            "path": "Result", "name": "Result", "id": 5,
+            "args": { "angle_bracketed": { "args": [
+                { "type": { "primitive": "i64" } },
+                { "type": { "resolved_path": { "path": "String", "name": "String", "id": 1, "args": null } } }
+            ], "constraints": [] } }
+        } })
+    }
+
+    /// A desugared (`is_async=false`) function item whose `sig.output` is `output`.
+    fn desugared_fn(output: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "header": { "is_const": false, "is_unsafe": false, "is_async": false, "abi": "Rust" },
+            "sig": {
+                "inputs": [ [ "self", { "borrowed_ref": { "lifetime": null, "mutable": false,
+                    "type_": { "generic": "Self" } } } ] ],
+                "output": output
+            }
+        })
+    }
+
+    #[test]
+    fn wall4_positive_recognises_and_extracts_output_from_constraints() {
+        // §1 shape: Pin<Box<dyn Future<Output=Result<i64,String>> + Send>>.
+        let boxed = async_trait_box(
+            result_i64_string(), "::core::future::Future", 4,
+            &[("::core::marker::Send", 6)],
+        );
+        let out = async_trait_future_output(&boxed)
+            .expect("canonical async_trait future box must be recognised");
+        // C4 / make-or-break: Output is the UNWRAPPED Result<i64,String>, NOT `()`
+        // and NOT the `equality` wrapper. Render to the Sky type and assert it is
+        // `Result String i64` (so de-async → `Task String i64`, never `Task Error ()`).
+        let sky = rustdoc_type_to_sky(out, &HashMap::new());
+        assert_eq!(sky, "Result String Int", "Output must be the real T, not (): {sky}");
+    }
+
+    #[test]
+    fn wall4_de_async_clone_forces_is_async_and_rewrites_output_without_mutation() {
+        let boxed = async_trait_box(
+            result_i64_string(), "::core::future::Future", 4,
+            &[("::core::marker::Send", 6)],
+        );
+        let fn_data = desugared_fn(boxed);
+        // Pre-condition: shared node is is_async=false with a Pin output.
+        assert_eq!(fn_data["header"]["is_async"], serde_json::json!(false));
+        let clone = de_async_clone(&fn_data).expect("async_trait fn must de-async");
+        // C5: the CLONE has is_async=true and the unwrapped output …
+        assert_eq!(clone["header"]["is_async"], serde_json::json!(true));
+        assert_eq!(
+            rustdoc_type_to_sky(&clone["sig"]["output"], &HashMap::new()),
+            "Result String Int"
+        );
+        // … and the SHARED index node is UNMUTATED (C5 — clone isolation).
+        assert_eq!(fn_data["header"]["is_async"], serde_json::json!(false));
+        assert!(fn_data["sig"]["output"].get("resolved_path").is_some());
+        assert_eq!(fn_data["sig"]["output"]["resolved_path"]["path"], "::core::pin::Pin");
+    }
+
+    #[test]
+    fn wall4_parse_fn_item_binds_async_trait_method_as_effectful_task() {
+        // End-to-end through parse_fn_item: the desugared method binds as an
+        // EFFECTFUL fn whose result Sky type is `Task String i64`, with NO drop.
+        let boxed = async_trait_box(
+            result_i64_string(), "::core::future::Future", 4,
+            &[("::core::marker::Send", 6)],
+        );
+        let fn_data = desugared_fn(boxed);
+        // The de-async'd method routes through the async Send gates (C1c): the
+        // receiver MUST be provably Send. Register `Db` as provably-Send for the
+        // call (mirrors what `collect_provably_send_recv_names` proves from a real
+        // `Send + Sync` struct like firestore's `FirestoreDb`), then restore.
+        PROVABLY_SEND_RECV_NAMES.with(|c| { c.borrow_mut().insert("Db".to_string()); });
+        let f = parse_fn_item("op", &fn_data, &HashMap::new(), Some(("Db", "Db")));
+        PROVABLY_SEND_RECV_NAMES.with(|c| c.borrow_mut().clear());
+        let f = f.expect("async_trait method must bind");
+        assert_eq!(f.effect, "effectful", "is_async must be forced → effectful");
+        let ret = f.results.first().expect("a result param");
+        // The de-async'd output is the REAL `Result<i64,String>` (rendered Sky
+        // `Result String Int`); effect=effectful means the codegen lifts it to
+        // `Task String Int`. The make-or-break: it is the real T, NEVER `()`
+        // (which would mean the stale `bindings` reader silently de-async'd to
+        // `Task Error ()`).
+        assert_eq!(ret.sky_type, "Result String Int",
+            "Output must be the real Result<i64,String>, not (): {:?}", ret.sky_type);
+        assert_ne!(ret.sky_type, "()", "C4: must not silently collapse to unit");
+    }
+
+    #[test]
+    fn wall4_parse_fn_item_async_trait_with_non_send_receiver_drops() {
+        // §7 check #4: is_async=true actually FIRES the receiver Send gate (C1c).
+        // A receiver NOT in PROVABLY_SEND_RECV_NAMES drops `async-future-not-send`
+        // (would be E0277 at spawn) — proving de-async re-routes through the gate.
+        let boxed = async_trait_box(
+            result_i64_string(), "::core::future::Future", 4,
+            &[("::core::marker::Send", 6)],
+        );
+        let fn_data = desugared_fn(boxed);
+        // No Send registration for `RcDb` → must drop.
+        let f = parse_fn_item("op", &fn_data, &HashMap::new(), Some(("RcDb", "RcDb")));
+        assert!(f.is_none(), "a non-Send receiver async_trait method must drop");
+    }
+
+    #[test]
+    fn wall4_negative_a_non_future_dyn_object_stays_dropped() {
+        // Box<dyn OtherTrait + Send> (no Pin) — principal is not Future.
+        let dt = dyn_future_node("OtherTrait", 99, serde_json::json!({ "primitive": "i64" }),
+            &[("::core::marker::Send", 6)]);
+        let boxed = rp1("Box", 3, dt);
+        assert!(async_trait_future_output(&boxed).is_none(),
+            "a non-Future dyn object must NOT be recognised");
+        // And the #26 gate still sees a dyn object to drop.
+        assert!(is_dyn_trait_object_including_fn(&boxed));
+    }
+
+    #[test]
+    fn wall4_negative_b_stream_and_iterator_stay_dropped() {
+        // Pin<Box<dyn Stream<Item=i64> + Send>> — principal Stream, NOT Future.
+        let stream = async_trait_box(
+            serde_json::json!({ "primitive": "i64" }), "::futures::Stream", 70,
+            &[("::core::marker::Send", 6)],
+        );
+        assert!(async_trait_future_output(&stream).is_none(),
+            "dyn Stream must NOT be treated as a future");
+        // Box<dyn Iterator<Item=i64>> — principal Iterator, NOT Future.
+        let dt = dyn_future_node("::core::iter::Iterator", 71,
+            serde_json::json!({ "primitive": "i64" }), &[]);
+        let iter_box = rp1("Box", 3, dt);
+        assert!(async_trait_future_output(&iter_box).is_none(),
+            "dyn Iterator must NOT be treated as a future");
+    }
+
+    #[test]
+    fn wall4_negative_c_future_without_send_is_dropped() {
+        // Pin<Box<dyn Future<Output=i64>>> — NO Send among the bounds → drop
+        // `async-future-not-send` (fail-closed; a multi-thread Task spawn needs Send).
+        let boxed = async_trait_box(
+            serde_json::json!({ "primitive": "i64" }), "::core::future::Future", 4,
+            &[],  // no Send
+        );
+        assert!(async_trait_future_output(&boxed).is_none(),
+            "a Future without +Send must NOT bind (E0277-prone)");
+    }
+
+    #[test]
+    fn wall4_negative_d_crate_local_future_is_dropped() {
+        // A `dyn Trait` whose principal `path` last segment is `Future` but whose
+        // id (10) resolves to a CRATE-LOCAL trait (crate_id 0). `std_trait_tag`
+        // must reject it (#25 class) → not recognised. Send carried by the real
+        // external core::marker::Send (id 6) so ONLY the Future gate distinguishes.
+        let doc = serde_json::json!({
+            "index": { "10": { "crate_id": 0, "inner": { "trait": {} } } },
+            "paths": {
+                "10": { "crate_id": 0, "kind": "trait", "path": ["mycrate", "Future"] },
+                "6":  { "crate_id": 2, "kind": "trait", "path": ["core", "marker", "Send"] }
+            }
+        });
+        let boxed = async_trait_box(
+            result_i64_string(), "mycrate::Future", 10,
+            &[("::core::marker::Send", 6)],
+        );
+        with_doc_provenance(&doc, || {
+            assert!(async_trait_future_output(&boxed).is_none(),
+                "a crate-local `Future` (crate_id 0) must NOT be treated as std Future");
+        });
+    }
+
+    #[test]
+    fn wall4_canonical_future_gate_resolves_by_id_in_real_doc() {
+        // With provenance: id 4 → external core::future::future::Future (the
+        // INTERNAL rustdoc path) → STD_TRAIT_BY_ID tag "Future". Confirms the
+        // STD_TRAIT_CANONICAL registration of the double-`future` path.
+        let doc = serde_json::json!({
+            "index": {},
+            "paths": {
+                "4": { "crate_id": 2, "kind": "trait", "path": ["core", "future", "future", "Future"] },
+                "6": { "crate_id": 2, "kind": "trait", "path": ["core", "marker", "Send"] }
+            }
+        });
+        let boxed = async_trait_box(
+            result_i64_string(), "::core::future::Future", 4,
+            &[("::core::marker::Send", 6)],
+        );
+        with_doc_provenance(&doc, || {
+            assert!(async_trait_future_output(&boxed).is_some(),
+                "id 4 must resolve to canonical std Future via doc paths");
+        });
     }
 }

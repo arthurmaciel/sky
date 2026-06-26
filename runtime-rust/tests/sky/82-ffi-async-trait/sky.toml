@@ -1,0 +1,13 @@
+[project]
+name = "82-ffi-async-trait"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local asynctraitcrate82 crate — WALL 4 (#64): the `#[async_trait]` PROC-MACRO
+# desugar (the firestore CRUD shape). The macro rewrites `async fn m -> T` into a
+# plain `fn m -> Pin<Box<dyn Future<Output=T> + Send + 'async_trait>>`; the
+# inspector must recognise that box, extract Output=T, force is_async, and route
+# T through the #44 async→Task machinery. Staged via setup.sh; file:// git dep.
+["rust.dependencies"]
+asynctraitcrate82 = { git = "file:///home/arthur/.cache/sky/82-ffi-async-trait-crate", branch = "master" }
