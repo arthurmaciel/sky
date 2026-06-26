@@ -177,6 +177,13 @@ struct Call {
     /// and every arg renders as the bare identifier ([C6] default = direct).
     #[serde(rename = "iterAdapters", skip_serializing_if = "Vec::is_empty")]
     iter_adapters: Vec<usize>,
+    /// [Wall-3b] Value-arg indices whose `&str`/`&Path`/`&OsStr` param was
+    /// lowered to Sky `String` (all three implement `AsRef<str>`, `AsRef<Path>`,
+    /// `AsRef<OsStr>`): the call site passes `argJ.as_ref()` so the owned
+    /// `String` coerces to the correct borrowed type expected by the foreign fn.
+    /// Empty ⇒ omitted from the wire (pre-Wall-3b stubs are byte-identical).
+    #[serde(rename = "borrowAsRefArgs", skip_serializing_if = "Vec::is_empty")]
+    borrow_as_ref_args: Vec<usize>,
     /// #21 UFCS trait qualifier `(selfPath, traitPath)`. When `Some`, the codegen
     /// renders the callee as `<selfPath as traitPath>::method(recv, args)` (a
     /// trait method on a concrete type — disambiguated, no `use Trait;` needed).
@@ -6065,7 +6072,35 @@ fn type_to_typeref(
         }
         return Ok(TypeRef::Ctor(path, trefs));
     }
-    // borrowed_ref / dyn_trait / impl_trait / function_pointer / tuple / slice /
+    // [Wall-3b] borrowed_ref{mutable:false, inner: str / String / Path / OsStr /
+    // OsString / PathBuf} → lower to `String` on the Sky side; the call site
+    // adds `.as_ref()` via `borrow_as_ref_args` so the owned `String` coerces to
+    // the correct borrowed type (`String: AsRef<str> + AsRef<Path> + AsRef<OsStr>`).
+    // Mutable refs and all other inner types are outside the bindable subset.
+    if let Some(br) = val.get("borrowed_ref") {
+        if !is_mutable(br) {
+            let inner = inner_type(br);
+            let is_str_prim =
+                inner.get("primitive").and_then(|p| p.as_str()) == Some("str");
+            let is_str_path = inner
+                .get("resolved_path")
+                .and_then(|rp| rp.get("name").or_else(|| rp.get("path")))
+                .and_then(|n| n.as_str())
+                .map_or(false, |name| {
+                    let last = name.rsplit("::").next().unwrap_or(name);
+                    matches!(
+                        last,
+                        "String" | "Path" | "OsStr" | "OsString" | "PathBuf"
+                    )
+                });
+            if is_str_prim || is_str_path {
+                return Ok(TypeRef::Prim("String".to_string()));
+            }
+        }
+        // Mutable refs and non-string-coercible borrowed refs → not bindable.
+        return Err(GenericDrop::NotBindable(describe_type_shape(val)));
+    }
+    // dyn_trait / impl_trait / function_pointer / tuple / slice /
     // array / qualified_path / raw_pointer → outside the bindable subset.
     Err(GenericDrop::NotBindable(describe_type_shape(val)))
 }
@@ -6795,6 +6830,9 @@ fn try_parametric_stub(
     // Value-arg indices whose iterator param needs `arg.into_iter()` at the call
     // site (`Iterator` kind); `IntoIterator` passes the `Vec` directly (C6).
     let mut iter_adapters: Vec<usize> = Vec::new();
+    // [Wall-3b] Value-arg indices whose non-mut borrowed_ref inner type was
+    // lowered to `String` by `type_to_typeref`; the call site adds `.as_ref()`.
+    let mut borrow_as_ref_args: Vec<usize> = Vec::new();
     for input in &inputs {
         if input[0].as_str() == Some("self") {
             continue;
@@ -6824,7 +6862,18 @@ fn try_parametric_stub(
                 // (no new TypeRef variant); `Vec<T>: IntoIterator<Item=T>`.
                 TypeRef::Ctor("::Vec".to_string(), vec![item_tr])
             }
-            (None, None) => type_to_typeref(&input[1], &param_idx)?,
+            (None, None) => {
+                let tref = type_to_typeref(&input[1], &param_idx)?;
+                // [Wall-3b] If the original was a non-mut borrowed_ref and
+                // type_to_typeref accepted it (only possible via the Wall-3b
+                // String-coercible arm), record for `.as_ref()` at the call site.
+                if let Some(br) = input[1].get("borrowed_ref") {
+                    if !is_mutable(br) {
+                        borrow_as_ref_args.push(next_arg);
+                    }
+                }
+                tref
+            }
         };
         arg_types.push(tref);
         args.push(next_arg);
@@ -6851,6 +6900,7 @@ fn try_parametric_stub(
             arg_types,
             ret,
             iter_adapters,
+            borrow_as_ref_args,
             // #21: the UFCS qualifier for a trait-impl method; `None` for an
             // inherent impl (byte-identical to a pre-#21 stub).
             trait_qualifier: trait_ctx.map(|tc| tc.qualifier.clone()),
@@ -9729,6 +9779,7 @@ mod tests {
                 arg_types: vec![TypeRef::Param(0)],
                 ret: TypeRef::Ctor("::c::T".into(), vec![TypeRef::Param(0)]),
                 iter_adapters: vec![],
+                borrow_as_ref_args: vec![],
                 trait_qualifier: None,
             },
             mono_resolved: false,

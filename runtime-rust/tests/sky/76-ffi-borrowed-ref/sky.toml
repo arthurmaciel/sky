@@ -1,0 +1,11 @@
+[project]
+name = "76-ffi-borrowed-ref"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local borrowed-ref-crate: tests Wall-3b (non-mut borrowed_ref with str-coercible
+# inner types lowered to Sky String with .as_ref() at the call site).
+# setup.sh git-inits ./borrowed-ref-crate into the cache path below.
+["rust.dependencies"]
+borrowed-ref-crate = { git = "file:///home/arthur/.cache/sky/76-ffi-borrowed-ref-crate", branch = "master" }

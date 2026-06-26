@@ -1,0 +1,107 @@
+module Main exposing (main)
+
+-- 76-ffi-borrowed-ref: Wall-3b proof fixture.
+--
+-- The borrowed-ref-crate exposes methods with generic params bounded by
+-- AsRef<str> and AsRef<Path> — the exact shape that caused 169
+-- "not-bindable borrowed_ref" drops for Firestore's get_doc/delete_by_id family.
+--
+-- Wall-3b fix: type_to_typeref now accepts non-mut borrowed_ref whose inner
+-- type is str / String / Path / OsStr / OsString / PathBuf, lowers it to Sky
+-- `String`, and records the arg index in `borrowAsRefArgs` so the call site
+-- emits `argJ.as_ref()`.
+--
+-- Coverage (all bound via Wall-3b):
+--   new     — constructor taking &str (lowered to String, first Wall-3b hit)
+--   get     — generic AsRef<str> param, single-arg instance method
+--   put     — generic AsRef<str> param, two-arg instance method
+--   resolve — generic AsRef<Path> param (Path variant of the Wall-3b set)
+--
+-- Note: from_key (static constructor returning Self) is dropped by a
+-- pre-existing undeclared-Self limitation unrelated to Wall-3b.
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Borrowed_ref_crate as B
+import Std.Log exposing (println)
+
+checkNew : Task Error ()
+checkNew =
+    case B.new_from_store "mystore" of
+        Ok store ->
+            case B.get_from_store store "probe" of
+                Ok result ->
+                    if result == "mystore:probe" then
+                        println "new=ok"
+
+                    else
+                        Task.fail (Error.unexpected ("new=UNEXPECTED " ++ result))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+checkGet : Task Error ()
+checkGet =
+    case B.new_from_store "s" of
+        Ok store ->
+            case B.get_from_store store "hello" of
+                Ok result ->
+                    if result == "s:hello" then
+                        println "get=ok"
+
+                    else
+                        Task.fail (Error.unexpected ("get=UNEXPECTED " ++ result))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+checkPut : Task Error ()
+checkPut =
+    case B.new_from_store "db" of
+        Ok store ->
+            case B.put_from_store store "key" "val" of
+                Ok result ->
+                    if result == "db:key=val" then
+                        println "put=ok"
+
+                    else
+                        Task.fail (Error.unexpected ("put=UNEXPECTED " ++ result))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+checkResolve : Task Error ()
+checkResolve =
+    case B.new_from_store "root" of
+        Ok store ->
+            case B.resolve_from_store store "a/b.txt" of
+                Ok result ->
+                    if result == "root/a/b.txt" then
+                        println "resolve=ok"
+
+                    else
+                        Task.fail (Error.unexpected ("resolve=UNEXPECTED " ++ result))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+main : Task Error ()
+main =
+    checkNew
+        |> Task.andThen (\_ -> checkGet)
+        |> Task.andThen (\_ -> checkPut)
+        |> Task.andThen (\_ -> checkResolve)
+        |> Task.andThen (\_ -> println "[ALL OK]")

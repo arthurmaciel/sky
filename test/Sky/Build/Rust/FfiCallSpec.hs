@@ -57,6 +57,7 @@ spec = do
                 , _call_ret      = TRCtor "::box1::Box1" [TRParam 0]
                 , _call_assocOnType = True
                 , _call_iterAdapters = []
+                , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
                 }
         it "decodes a method call with a ref receiver `left : Pair a b -> a`" $ do
@@ -86,6 +87,7 @@ spec = do
                 , _call_ret      = TRParam 0
                 , _call_assocOnType = True
                 , _call_iterAdapters = []
+                , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
                 }
         it "decodes a prim TypeRef leaf in ret (`count : Keyed a -> Int`)" $ do
@@ -201,6 +203,7 @@ spec = do
                 , _call_ret      = TRCtor "::c::T" [TRParam 0]
                 , _call_assocOnType = True
                 , _call_iterAdapters = []
+                , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
                 }
         it "accepts a valid single-param call" $
@@ -237,6 +240,7 @@ spec = do
                     , _call_ret      = TRCtor "Vec" [TRParam 1]
                     , _call_assocOnType = False
                     , _call_iterAdapters = []
+                    , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     }
             -- C-A: real params ["a","b"] → TRParam 0 → A, TRParam 1 → B
@@ -255,6 +259,7 @@ spec = do
                     , _call_ret      = TRPrim "i64"
                     , _call_assocOnType = False
                     , _call_iterAdapters = []
+                    , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     }
             -- C-B: a closure nested inside Vec<_> must be rejected by validateCall
@@ -273,6 +278,7 @@ spec = do
                     , _call_ret      = TRCtor "::box1::Box1" [TRParam 0]
                     , _call_assocOnType = True
                     , _call_iterAdapters = []
+                    , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     }
             renderCall c ["a"]    `shouldBe` "::box1::Box1::<A>::make(arg0)"
@@ -290,6 +296,7 @@ spec = do
                     , _call_ret      = TRParam 0
                     , _call_assocOnType = True
                     , _call_iterAdapters = []
+                    , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     }
             renderCall c ["k", "v"] `shouldBe`
@@ -315,6 +322,7 @@ spec = do
                     , _call_ret      = TRCtor "Vec" [TRParam 1]
                     , _call_assocOnType = False
                     , _call_iterAdapters = []
+                    , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     }
             renderCall c ["a", "b"] `shouldBe`
@@ -336,6 +344,7 @@ spec = do
                 , _call_ret      = TRPrim "i64"
                 , _call_assocOnType = False
                 , _call_iterAdapters = adapters
+                , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
                 }
         it "an Iterator-kind arg (in iterAdapters) renders arg0.into_iter()" $
@@ -356,6 +365,7 @@ spec = do
                     , _call_ret      = TRPrim "i64"
                     , _call_assocOnType = False
                     , _call_iterAdapters = [1]
+                    , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     }
             renderCall c [] `shouldBe` "::iter::zip2(arg0, arg1.into_iter())"
@@ -371,6 +381,7 @@ spec = do
                     , _call_ret      = TRPrim "i64"
                     , _call_assocOnType = False
                     , _call_iterAdapters = [3]   -- arity is 1 → out of range
+                    , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     }
             isLeft' (validateCall 0 bad) `shouldBe` True
@@ -386,6 +397,7 @@ spec = do
                     , _call_ret      = TRPrim "i64"
                     , _call_assocOnType = False
                     , _call_iterAdapters = [0]
+                    , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     }
             isLeft' (validateCall 0 bad) `shouldBe` True
@@ -401,6 +413,7 @@ spec = do
                     , _call_ret      = TRPrim "i64"
                     , _call_assocOnType = False
                     , _call_iterAdapters = [0]
+                    , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     }
             isRight (validateCall 0 ok) `shouldBe` True
@@ -423,6 +436,7 @@ spec = do
                 , _call_ret      = TRCtor "Vec" [TRParam 0]
                 , _call_assocOnType = False
                 , _call_iterAdapters = []
+                , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
                 }
         it "byRef closure arg passes an owned-clone bridge, not arg1 directly" $
@@ -446,6 +460,7 @@ spec = do
                     , _call_ret      = TRParam 0
                     , _call_assocOnType = False
                     , _call_iterAdapters = []
+                    , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     }
             renderCall zipCall ["a", "b"] `shouldContain`

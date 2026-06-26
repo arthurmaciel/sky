@@ -102,6 +102,13 @@ data Call = Call
       --   @"iterAdapters"@ ⇒ no arg needs the adapter) keeps every pre-iterators
       --   stub byte-identical — an un-tagged arg renders exactly as today
       --   (guardian C6). Rust-backend-only; the Go pipeline never reads it.
+    , _call_borrowAsRefArgs :: ![Int]
+      -- ^ [Wall-3b] Value-arg indices whose @\&str@\/@\&Path@\/@\&OsStr@ param
+      --   was lowered to Sky @String@ by the inspector; the call site renders
+      --   @argJ.as_ref()@ instead of bare @argJ@ so the owned @String@ coerces
+      --   to the expected borrowed type (@String: AsRef\<str\> + AsRef\<Path\> +
+      --   AsRef\<OsStr\>@). DEFAULT @[]@ (omitted from wire) ⇒ byte-identical to
+      --   pre-Wall-3b stubs. Rust-backend-only; the Go pipeline never reads it.
     , _call_traitQualifier :: !(Maybe (String, String))
       -- ^ #21 UFCS trait qualifier @(selfPath, traitPath)@. @Just@ ⇒ the method
       --   comes from @impl Trait for ConcreteType@; the callee renders as
@@ -382,8 +389,12 @@ renderCall c params =
     -- in the set) passes the bare `Vec` directly. Total: `.into_iter()` is
     -- infallible (no `.unwrap()`/panic).
     renderValueArg j _
-        | j `elem` _call_iterAdapters c = argName j ++ ".into_iter()"
-        | otherwise                     = argName j
+        | j `elem` _call_iterAdapters c    = argName j ++ ".into_iter()"
+        -- [Wall-3b] borrowed &str/&Path/&OsStr param lowered to String; the call
+        -- site must borrow it back so the foreign fn's type is satisfied.
+        -- `String: AsRef<str> + AsRef<Path> + AsRef<OsStr>` → one adapter form.
+        | j `elem` _call_borrowAsRefArgs c = argName j ++ ".as_ref()"
+        | otherwise                        = argName j
 
 
 -- | Render the wrapper RETURN type (the @_@ inside @SkyResult<SkyError, _>@)
@@ -607,6 +618,10 @@ parseCall nParams = A.withObject "Call" $ \o -> do
     -- pre-iterators stub. Only an `Iterator`-kind (not `IntoIterator`) param
     -- carries an entry here.
     iterAdapters <- o .:? "iterAdapters" .!= []
+    -- Wall-3b: default [] ⇒ no arg needs `.as_ref()` ⇒ byte-identical to a
+    -- pre-Wall-3b stub. Only a `&str`/`&Path`/`&OsStr`-param lowered to String
+    -- carries an entry here.
+    borrowAsRefArgs <- o .:? "borrowAsRefArgs" .!= []
     -- #21: default Nothing ⇒ no qualifier ⇒ byte-identical to a pre-#21 stub.
     -- A trait-impl method carries @"traitQualifier": [selfPath, traitPath]@.
     traitQualifier <- o .:? "traitQualifier"
@@ -621,6 +636,7 @@ parseCall nParams = A.withObject "Call" $ \o -> do
             , _call_ret      = ret
             , _call_assocOnType = assocOnType
             , _call_iterAdapters = iterAdapters
+            , _call_borrowAsRefArgs = borrowAsRefArgs
             , _call_traitQualifier = traitQualifier
             }
     case validateCall nParams c of
