@@ -39,10 +39,16 @@ resource TYPES). `async-stripe-client-core@1.0.0-rc.6` → 57 fns, 16/119 generi
 `trait-method-generic-self ×18` + `trait-bounded-param-ambiguous ×4` +
 `trait-method-trait-unreachable ×54`.
 
-**Scoped remainder (stripe is a multi-session arc, larger than firebase):** (1) the
-Haskell side must thread a crates.io version from `sky.toml`'s
-`["rust.dependencies"] name = "X"` to the inspector (today only `--git`/`*` flow), so
-a real `sky build` can use a prerelease dep; (2) the `StripeClient`/`StripeRequest`
+**(1) DONE — Haskell sky.toml version threading.** `regenMissingRustBindings`
+(app/Main.hs) now passes `name@version` to the inspector for a `RustVersion` dep with
+a non-`*` version (was: `_ver` ignored → `*`); the inspector strips the `@version`
+back to a clean PkgInfo name + binding slug (`inspect_crate`). END-TO-END PROVEN: a
+Sky project with `async-stripe-types = "1.0.0-rc.6"` in sky.toml now `sky build`s
+clean — `async-stripe-types: 180 bindings`, clean slug, cargo-compiles `v1.0.0-rc.6`.
+So a real `sky build` can now use ANY prerelease crates.io dep. Inspector 206 tests.
+
+**Scoped remainder (stripe is a multi-session arc, larger than firebase):** (2) the
+`StripeClient`/`StripeRequest`
 send pattern — UNLIKE firebase's unique-impl `ApiHttpClient`, `StripeClient` likely
 has MULTIPLE impls (blocking + async) → the WALL-F unique-impl-Self-mono can't fire
 (ambiguous → the `trait-bounded-param-ambiguous` drop); needs a different

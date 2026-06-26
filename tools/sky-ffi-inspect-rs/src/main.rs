@@ -623,16 +623,21 @@ struct GitSource {
 }
 
 fn inspect_crate(crate_name: &str, features: &[String], git: Option<&GitSource>) -> PkgInfo {
+    // [#70 stripe] The arg may carry a `name@version` pin (handled in run_rustdoc).
+    // Strip the version HERE so the PkgInfo name + the binding-file slug derived from
+    // it stay CLEAN (`async-stripe-shared`, not `async-stripe-shared@1.0.0-rc.6` — an
+    // `@` in the slug would mismatch the Haskell copy step's clean-name slug).
+    let clean_name = crate_name.split_once('@').map(|(n, _)| n).unwrap_or(crate_name);
     match run_rustdoc(crate_name, features, git) {
         Ok((json_content, version, transitive_deps)) => match serde_json::from_str::<serde_json::Value>(&json_content) {
             Ok(doc) => {
-                let mut pkg = parse_rustdoc(&doc, crate_name, &version);
+                let mut pkg = parse_rustdoc(&doc, clean_name, &version);
                 pkg.transitive_deps = transitive_deps;
                 pkg
             }
-            Err(e) => pkg_error(crate_name, &format!("rustdoc JSON parse error: {}", e)),
+            Err(e) => pkg_error(clean_name, &format!("rustdoc JSON parse error: {}", e)),
         },
-        Err(e) => pkg_error(crate_name, &e),
+        Err(e) => pkg_error(clean_name, &e),
     }
 }
 

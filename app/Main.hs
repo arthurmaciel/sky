@@ -1379,8 +1379,14 @@ regenMissingRustBindings deps = do
         not <$> doesFileExist (".skycache/ffi/rust/" ++ slug ++ ".kernel.json")
         ) deps
     forM_ missing $ \(name, spec) -> case spec of
-        RustVersion _ver feats -> do
-            r <- RustFfi.runRustInspector name feats
+        RustVersion ver feats -> do
+            -- [#70 stripe] Thread the sky.toml crates.io version to the inspector as
+            -- `name@version` (a no-op `*`/empty stays the bare name → latest stable).
+            -- Required for a PRERELEASE dep: `cargo add name` adds `= "*"` which
+            -- cargo refuses to match against a prerelease (every async-stripe rc.6).
+            -- The inspector strips the `@version` back to a clean PkgInfo name.
+            let nameSpec = if not (null ver) && ver /= "*" then name ++ "@" ++ ver else name
+            r <- RustFfi.runRustInspector nameSpec feats
             handleInspectorResult name r
         RustGitDep url mr mb mt -> do
             r <- RustFfi.runRustInspectorGit name url mr mb mt []
