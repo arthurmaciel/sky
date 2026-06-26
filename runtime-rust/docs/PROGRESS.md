@@ -17,6 +17,43 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — stripe (#70) GATING wall: inspector accepts `name@version` (prerelease pin) + live measurement
+
+**The first stripe blocker: every async-stripe 1.0.0-rc.6 crate is PRERELEASE-ONLY,
+and the inspector's `cargo add <name>` emits `= "*"` — cargo REFUSES to match a `*`
+requirement against a prerelease (`candidate versions found which didn't match:
+1.0.0-rc.6`). So stripe was entirely unmeasurable.** Fix: `run_rustdoc` now parses a
+`name@version` spec (mirrors `cargo add name@version`); `build_dep_entry` emits an
+EXACT pin `name = "=1.0.0-rc.6"` when a version is given (None → the historical `*`,
+byte-identical). The version is charset-gated to semver chars
+(`[A-Za-z0-9.\-+*=><~^, ]`) — same TOML-injection defense as the existing name gate
+(`"`/newline/`]` excluded; spliced inside quotes). Unit test
+`build_dep_entry_version_emits_exact_pin`; inspector 206 tests.
+
+**Live measurement (now possible):** the facade `async-stripe` is a re-export shell
+(`pub use stripe_client_core::{…}`, `pub use stripe_shared::{…}`) and resolves to the
+STABLE 0.41.0 (which needs a `runtime-*` feature) unless pinned — the real API lives
+in the rc.6 sub-crates. `async-stripe-shared@1.0.0-rc.6` → bound 4/20 generic (mostly
+resource TYPES). `async-stripe-client-core@1.0.0-rc.6` → 57 fns, 16/119 generic;
+`customize`/`request_strategy` bind. The `.send(&client)` operations drop as
+`trait-method-generic-self ×18` + `trait-bounded-param-ambiguous ×4` +
+`trait-method-trait-unreachable ×54`.
+
+**Scoped remainder (stripe is a multi-session arc, larger than firebase):** (1) the
+Haskell side must thread a crates.io version from `sky.toml`'s
+`["rust.dependencies"] name = "X"` to the inspector (today only `--git`/`*` flow), so
+a real `sky build` can use a prerelease dep; (2) the `StripeClient`/`StripeRequest`
+send pattern — UNLIKE firebase's unique-impl `ApiHttpClient`, `StripeClient` likely
+has MULTIPLE impls (blocking + async) → the WALL-F unique-impl-Self-mono can't fire
+(ambiguous → the `trait-bounded-param-ambiguous` drop); needs a different
+monomorphization (user-chosen concrete, or bind the inherent builder + a concrete
+send); (3) the facade `--all-features` / runtime-feature selection. Tracked on #70.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (`run_rustdoc` name@version split
++ semver gate, `build_dep_entry` version param, the version-pin unit test).
+
+---
+
 ## 2026-06-26 — WALL-F (#81) COMPLETE: 🎉 firebase auth CRUD binds shim-free + cargo-compiles
 
 `App::emulated() → app.auth(url) → fauth.create_user(NewUser …)` now works from Sky

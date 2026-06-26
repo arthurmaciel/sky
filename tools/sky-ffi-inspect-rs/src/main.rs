@@ -644,6 +644,14 @@ fn inspect_crate(crate_name: &str, features: &[String], git: Option<&GitSource>)
 /// if the first rustdoc run produces 0 functions, we scan the JSON for glob
 /// `pub use other_crate::*` re-exports and re-run on the underlying crate.
 fn run_rustdoc(crate_name: &str, features: &[String], git: Option<&GitSource>) -> Result<(String, String, Vec<TransitiveDep>), String> {
+    // [#70 stripe] Accept a `name@version` spec (mirrors `cargo add name@version`)
+    // so a PRERELEASE crate can be requested. Split the version off BEFORE the name
+    // charset check; the version is validated separately to its own semver charset.
+    // None → the historical latest-stable `*`.
+    let (crate_name, req_version): (&str, Option<&str>) = match crate_name.split_once('@') {
+        Some((n, v)) => (n, Some(v)),
+        None => (crate_name, None),
+    };
     // Reject any crate name outside the crates.io charset BEFORE it is spliced into
     // the generated Cargo.toml (the `[package] name` field and the dependency
     // entry). A name containing `"`, newline, `]`, etc. could otherwise inject a
@@ -658,12 +666,28 @@ fn run_rustdoc(crate_name: &str, features: &[String], git: Option<&GitSource>) -
             crate_name
         ));
     }
+    // A version requirement is spliced into the same TOML value position, so gate it
+    // to the semver charset (digits, letters, `.`, `-`, `+`, `*`, comparison ops,
+    // spaces, commas) — closes the same TOML-injection vector as the name check.
+    if let Some(v) = req_version {
+        if v.is_empty()
+            || !v.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '.' | '-' | '+' | '*' | '=' | '>' | '<' | '~' | '^' | ',' | ' ')
+            })
+        {
+            return Err(format!(
+                "invalid version requirement {:?} for crate {:?}: only semver chars allowed",
+                v, crate_name
+            ));
+        }
+    }
 
     let tmp = tempfile::tempdir().map_err(|e| format!("tempdir: {}", e))?;
     let dir = tmp.path();
 
     let safe_name = crate_name.replace('-', "_");
-    let dep_entry = build_dep_entry(crate_name, features, git);
+    let dep_entry = build_dep_entry(crate_name, features, git, req_version);
 
     let toml_content = format!(
         r#"[package]
@@ -1012,8 +1036,19 @@ fn toml_escape(s: &str) -> String {
     out
 }
 
-fn build_dep_entry(crate_name: &str, features: &[String], git: Option<&GitSource>) -> String {
+fn build_dep_entry(
+    crate_name: &str,
+    features: &[String],
+    git: Option<&GitSource>,
+    version: Option<&str>,
+) -> String {
     let crate_name = toml_escape(crate_name);
+    // [#70 stripe] A requested version → EXACT pin `=X.Y.Z`. Required to inspect a
+    // PRERELEASE crate: `cargo add name` adds `= "*"`, and cargo refuses to match a
+    // `*` requirement against a prerelease-only crate (every async-stripe rc.6
+    // sub-crate). An exact `= "=1.0.0-rc.6"` opts in to the prerelease explicitly.
+    // None → the historical `*` (latest stable).
+    let ver_req = version.map(|v| format!("={}", toml_escape(v)));
     // Common fields: features list (rendered as Cargo TOML array).
     let feats_field = if features.is_empty() {
         None
@@ -1027,10 +1062,13 @@ fn build_dep_entry(crate_name: &str, features: &[String], git: Option<&GitSource
     };
 
     match git {
-        None => match feats_field {
-            None    => format!("{} = \"*\"", crate_name),
-            Some(f) => format!("{} = {{ version = \"*\", {} }}", crate_name, f),
-        },
+        None => {
+            let vr = ver_req.as_deref().unwrap_or("*");
+            match feats_field {
+                None    => format!("{} = \"{}\"", crate_name, vr),
+                Some(f) => format!("{} = {{ version = \"{}\", {} }}", crate_name, vr, f),
+            }
+        }
         Some(g) => {
             let mut fields = vec![format!("git = \"{}\"", toml_escape(&g.url))];
             if let Some(r) = &g.rev    { fields.push(format!("rev = \"{}\"", toml_escape(r))); }
@@ -9731,6 +9769,29 @@ mod tests {
 
     fn prim(s: &str) -> serde_json::Value {
         serde_json::json!({ "primitive": s })
+    }
+
+    // ── #70 stripe: prerelease version-pin in the probe dep entry ──────────
+    #[test]
+    fn build_dep_entry_version_emits_exact_pin() {
+        // No version → historical `*` (latest stable), byte-identical to pre-#70.
+        assert_eq!(build_dep_entry("uuid", &[], None, None), r#"uuid = "*""#);
+        // A version → EXACT pin `=X` so a PRERELEASE resolves (cargo refuses to
+        // match `*` against a prerelease-only crate — every async-stripe rc.6 sub).
+        assert_eq!(
+            build_dep_entry("async-stripe-shared", &[], None, Some("1.0.0-rc.6")),
+            r#"async-stripe-shared = "=1.0.0-rc.6""#
+        );
+        // Version + features → inline table with both.
+        assert_eq!(
+            build_dep_entry("foo", &["bar".to_string()], None, Some("2.0.0")),
+            r#"foo = { version = "=2.0.0", features = ["bar"] }"#
+        );
+        // Features without a version → the historical `version = "*"` table.
+        assert_eq!(
+            build_dep_entry("foo", &["bar".to_string()], None, None),
+            r#"foo = { version = "*", features = ["bar"] }"#
+        );
     }
 
     // ── WALL-B (#75): transitive-dep cargo-metadata extraction ─────────────
