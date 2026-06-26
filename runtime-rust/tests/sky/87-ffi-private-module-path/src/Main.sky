@@ -1,0 +1,68 @@
+module Main exposing (main)
+
+-- 87-ffi-private-module-path: Sky #76 (WALL-C) — a type's rustdoc DEFINITION
+-- path routes through a PRIVATE internal module, but the type is publicly
+-- re-exported at a shorter path. The inspector emitted the private def path
+-- verbatim → cargo E0603 `module X is private`.
+--
+-- STD case (must BIND + cargo-clean): `make_map : () -> HashMap<String,String>`.
+--   rustdoc def path = `std::collections::hash::map::HashMap` (private hash::map).
+--   The wrapper must emit `::std::collections::HashMap` (public re-export) so
+--   cargo accepts it. The value is opaque to Sky; the proof is "binds + builds,
+--   no E0603", not value inspection. We just force the ctor Task and print OK.
+--
+-- http NON-std cases (`make_headers` / `make_extensions`): the inspector cannot
+-- resolve http's crate-root re-export without http's own rustdoc, so these are
+-- FAIL-CLOSED DROPPED (a dropped wrapper is sound; a private-module-path emission
+-- is NOT). They must be ABSENT from the bindings — never cargo-fail with E0603.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Sky.Core.Dict as Dict
+import Rust.Privmodffi87 as P
+import Std.Log exposing (println)
+
+
+-- STD positive (free fn): the opaque HashMap handle binds (`Result Error _`).
+checkMap : Task Error ()
+checkMap =
+    case P.make_map () of
+
+        Ok _ ->
+            println "map=ok"
+
+        Err e ->
+            Task.fail e
+
+
+-- STD positive (opaque-receiver method param) — the WALL-C trigger. `Store` is
+-- an opaque handle; `.merge` takes a `Dict String String` (Rust HashMap). The
+-- wrapper sig renders the external `HashMap` param via `type_to_typeref` →
+-- `::std::collections::HashMap` (public, post-fix; private `hash::map` pre-fix).
+checkMerge : Task Error ()
+checkMerge =
+    case P.new_from_store () of
+
+        Ok store ->
+            case P.merge_from_store store (Dict.fromList [( "a", "1" )]) of
+
+                Ok n ->
+                    if n == 1 then
+                        println "merge=1"
+
+                    else
+                        Task.fail
+                            (Error.unexpected
+                                ("merge=UNEXPECTED " ++ String.fromInt n))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+
+main : Task Error ()
+main =
+    checkMap |> Task.andThen (\_ -> checkMerge)
+        |> Task.andThen (\_ -> println "[ALL OK]")

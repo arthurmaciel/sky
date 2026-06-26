@@ -3978,15 +3978,82 @@ fn collect_external_type_paths(doc: &serde_json::Value) -> HashMap<String, Strin
             continue;
         };
         if !joined.is_empty() {
-            let public_path = if let Some(rest) = joined.strip_prefix("alloc::") {
-                format!("std::{rest}")
-            } else {
-                joined
-            };
-            out.insert(id.clone(), public_path);
+            // [WALL-C / #76] `joined` is the rustdoc DEFINITION path, which for
+            // many external types routes through a PRIVATE internal module
+            // (`std::collections::hash::map::HashMap`, `http::header::map::
+            // HeaderMap`). Emitting that verbatim → cargo E0603 `module X is
+            // private`. Normalize to the PUBLIC re-export; FAIL-CLOSED (skip the
+            // insert → `type_to_typeref` drops the wrapper) when no sound public
+            // path is determinable. A dropped wrapper is sound; a private-module
+            // path emission is NOT.
+            if let Some(public_path) = external_type_public_path(&joined) {
+                out.insert(id.clone(), public_path);
+            }
         }
     }
     out
+}
+
+/// [WALL-C / #76] Map an external type's rustdoc DEFINITION path (which may run
+/// through PRIVATE internal modules) to a PUBLIC re-export path that compiles,
+/// or `None` when no sound public path can be determined WITHOUT the dep's own
+/// rustdoc (→ caller fail-closed drops the wrapper).
+///
+/// Rules (soundness over coverage):
+///   1. `alloc::…` → `std::…` (alloc is not importable in a std-linked crate).
+///   2. `std::collections::<…private…>::Type` → `std::collections::Type`. The
+///      std `collections` re-export contract is stable: every container is
+///      re-exported at `std::collections::<Type>` (the def path threads private
+///      `hash::map` / `btree::map` / `vec_deque` / … internals).
+///   3. A root-public def path (`crate::Type`, ZERO intermediate modules, e.g.
+///      `uuid::Uuid`) is already the public path → keep verbatim.
+///   4. A `std::`/`core::` def path with intermediate modules that is NOT a
+///      collections container is kept verbatim: std/core public paths
+///      (`core::time::Duration`, `core::net::Ipv4Addr`) coincide with their def
+///      path, and the genuinely-private-internal std cases (`core::ops::range::
+///      RangeInclusive`) are already excluded downstream by the nameability
+///      filter, so keeping them here is harmless.
+///   5. Any OTHER external crate whose def path runs through ≥1 intermediate
+///      module (`http::header::map::HeaderMap`, `chrono::naive::date::NaiveDate`)
+///      → `None`. The public re-export (`http::HeaderMap`, `chrono::NaiveDate`)
+///      lives at an ancestor whose module-visibility we cannot read without the
+///      dep's own rustdoc, so we FAIL CLOSED rather than emit a path that may
+///      E0603. (Pre-fix these already emitted the private def path and
+///      cargo-failed; dropping is strictly sounder.)
+fn external_type_public_path(joined: &str) -> Option<String> {
+    // (1) alloc → std re-export.
+    let path = remap_alloc_to_std(joined);
+
+    let segs: Vec<&str> = path.split("::").collect();
+    // A bare type with no crate/module qualifier (shouldn't happen for an
+    // external path, but be defensive) — keep as-is.
+    if segs.len() < 2 {
+        return Some(path);
+    }
+    let root = segs[0];
+    let last = *segs.last()?;
+
+    // (2) std collections container — collapse private internals to the public
+    // `std::collections::<Type>` re-export.
+    if (root == "std" || root == "core") && segs.get(1) == Some(&"collections") {
+        return Some(format!("std::collections::{last}"));
+    }
+
+    // (3) Root-public def path (`crate::Type`) — already public.
+    if segs.len() == 2 {
+        return Some(path);
+    }
+
+    // (4) std/core multi-segment non-collections path — kept verbatim (public
+    // path coincides with def path; private-internal exceptions are dropped
+    // downstream by the nameability filter).
+    if root == "std" || root == "core" {
+        return Some(path);
+    }
+
+    // (5) Non-std external crate with intermediate modules — public re-export
+    // is unresolvable without the dep's rustdoc → fail closed.
+    None
 }
 
 /// [#48-R1] Fully-qualified public path of an external type by its rustdoc id,
@@ -10047,6 +10114,78 @@ mod tests {
         EXTERNAL_TYPE_PATH_BY_ID.with(|c| c.borrow_mut().clear());
         REACHABLE_PATHS.with(|c| c.borrow_mut().clear());
         out
+    }
+
+    // ── WALL-C / #76 — external type DEFINITION path → PUBLIC re-export ──────
+
+    #[test]
+    fn wallc_std_collections_private_internal_collapses_to_public() {
+        // The firebase E0603 case: `std::collections::hash::map::HashMap` (private
+        // `hash::map`) must normalize to the PUBLIC `std::collections::HashMap`.
+        assert_eq!(
+            external_type_public_path("std::collections::hash::map::HashMap"),
+            Some("std::collections::HashMap".to_string())
+        );
+        assert_eq!(
+            external_type_public_path("std::collections::hash::set::HashSet"),
+            Some("std::collections::HashSet".to_string())
+        );
+        assert_eq!(
+            external_type_public_path("std::collections::btree::map::BTreeMap"),
+            Some("std::collections::BTreeMap".to_string())
+        );
+        assert_eq!(
+            external_type_public_path("std::collections::vec_deque::VecDeque"),
+            Some("std::collections::VecDeque".to_string())
+        );
+        // `alloc::` collections root remaps to `std::` THEN collapses.
+        assert_eq!(
+            external_type_public_path("alloc::collections::btree::set::BTreeSet"),
+            Some("std::collections::BTreeSet".to_string())
+        );
+    }
+
+    #[test]
+    fn wallc_root_public_external_kept_verbatim() {
+        // `uuid::Uuid` def path IS the public path (zero intermediate modules).
+        assert_eq!(
+            external_type_public_path("uuid::Uuid"),
+            Some("uuid::Uuid".to_string())
+        );
+    }
+
+    #[test]
+    fn wallc_std_core_multisegment_noncollections_kept() {
+        // std/core public paths coincide with their def path → keep.
+        assert_eq!(
+            external_type_public_path("core::time::Duration"),
+            Some("core::time::Duration".to_string())
+        );
+        assert_eq!(
+            external_type_public_path("core::net::Ipv4Addr"),
+            Some("core::net::Ipv4Addr".to_string())
+        );
+    }
+
+    #[test]
+    fn wallc_nonstd_intermediate_module_fails_closed() {
+        // The firebase http E0603 cases: re-export lives at an ancestor whose
+        // visibility we cannot read without http's own rustdoc → DROP (None),
+        // never emit the private-module def path.
+        assert_eq!(
+            external_type_public_path("http::header::map::HeaderMap"),
+            None
+        );
+        assert_eq!(
+            external_type_public_path("http::extensions::Extensions"),
+            None
+        );
+        // A foreign crate with one intermediate private module also fails closed
+        // (`chrono::naive::date::NaiveDate` — public is `chrono::NaiveDate`).
+        assert_eq!(
+            external_type_public_path("chrono::naive::date::NaiveDate"),
+            None
+        );
     }
 
     /// A rustdoc `doc` whose `paths` table carries:

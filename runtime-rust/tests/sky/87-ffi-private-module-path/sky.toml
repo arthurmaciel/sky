@@ -1,0 +1,12 @@
+[project]
+name = "87-ffi-private-module-path"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local privmodffi87 crate — free fns returning types whose rustdoc DEFINITION
+# path runs through a PRIVATE internal module (std HashMap via hash::map; http
+# HeaderMap/Extensions via header::map / extensions). setup.sh git-inits
+# ./private-mod-crate into the cache path below.
+["rust.dependencies"]
+privmodffi87 = { git = "file:///home/arthur/.cache/sky/87-ffi-private-module-path-crate", branch = "master" }
