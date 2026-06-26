@@ -879,7 +879,8 @@ emitRustFile kernelName pkg =
                         -- The JSON is deserialized in `serdePrelude` and bound to `sv_j`;
                         -- `argCall` just names that local (to be used at the call site).
                         | rawTy == "serde_json::Value" -> "sv_" ++ show j
-                        | declTy == "String" -> "&" ++ base          -- Sky String → &str
+                        | declTy == "String" && rawTy == "&str" -> base ++ ".as_ref()" -- Sky String → &str/&Path/&OsStr via AsRef
+                        | declTy == "String" -> "&" ++ base          -- Sky String → &str (deref coercion fallback)
                         | null rawTy || rawTy == declTy -> base      -- same type, pass through
                         | isNumericRust rawTy && (declTy == "i64" || declTy == "f64")
                             -> base ++ " as " ++ rawTy               -- narrowing cast (e.g. i64 → u32)

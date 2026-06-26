@@ -6086,7 +6086,7 @@ fn type_to_typeref(
                 .get("resolved_path")
                 .and_then(|rp| rp.get("name").or_else(|| rp.get("path")))
                 .and_then(|n| n.as_str())
-                .map_or(false, |name| {
+                .is_some_and(|name| {
                     let last = name.rsplit("::").next().unwrap_or(name);
                     matches!(
                         last,
@@ -7460,11 +7460,21 @@ fn parametric_function(
         let pname = input[0].as_str().unwrap_or("_").to_string();
         let tref = generic.call.arg_types.get(at)?;
         let sky = sky_of(tref);
+        // [Wall-3b] If this arg position is in borrow_as_ref_args, it was a
+        // non-mut borrowed ref (e.g. `&str`, `&Path`) hidden behind an AsRef<T>
+        // bound that the mono pre-pass erased.  Record "&str" so Ffi.hs
+        // `argCall` can emit `.as_ref()` instead of a bare `arg` (String does
+        // not auto-deref to Path; `.as_ref()` works for &str, &Path, &OsStr).
+        let rust_type = if generic.call.borrow_as_ref_args.contains(&at) {
+            "&str".to_string()
+        } else {
+            String::new()
+        };
         params.push(Param {
             name: pname,
             ty: sky.clone(),
             sky_type: sky,
-            rust_type: String::new(),
+            rust_type,
         });
         at += 1;
     }

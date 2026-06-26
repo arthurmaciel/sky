@@ -40,4 +40,21 @@ impl Store {
     pub fn from_key<S: AsRef<str>>(key: S) -> Self {
         Self { label: key.as_ref().to_string() }
     }
+
+    /// THE firestore `get_doc<S: AsRef<str>>(&self, collection_id: &str,
+    /// document_id: S)` shape EXACTLY: a CONCRETE `&str` sibling (`collection`)
+    /// alongside a GENERIC param (`doc`). The generic forces the parametric
+    /// stub; inside it `doc: S` is WALL-2-mono'd to String and `collection:
+    /// &str` flows through type_to_typeref's NEW borrowed_ref arm → recorded in
+    /// `borrowAsRefArgs` → call site emits `collection.as_ref()`. THIS is the
+    /// Wall-3b path that no prior fixture exercised.
+    pub fn get_doc<S: AsRef<str>>(&self, collection: &str, doc: S) -> String {
+        format!("{}/{}/{}", self.label, collection, doc.as_ref())
+    }
+
+    /// The &Path variant of the concrete-sibling shape (generic param forces
+    /// the parametric stub; `p: &Path` flows through the new arm → `.as_ref()`).
+    pub fn at<S: AsRef<str>>(&self, p: &Path, key: S) -> String {
+        format!("{}@{}:{}", self.label, p.display(), key.as_ref())
+    }
 }

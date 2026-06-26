@@ -98,10 +98,52 @@ checkResolve =
         Err e ->
             Task.fail e
 
+-- THE firestore get_doc shape: concrete &str sibling (collection) + generic
+-- doc → parametric stub → borrowAsRefArgs non-empty → collection.as_ref().
+-- This is the path no prior fixture exercised (guardian-flagged coverage trap).
+checkGetDoc : Task Error ()
+checkGetDoc =
+    case B.new_from_store "fs" of
+        Ok store ->
+            case B.get_doc_from_store store "users" "u1" of
+                Ok result ->
+                    if result == "fs/users/u1" then
+                        println "get_doc=ok"
+
+                    else
+                        Task.fail (Error.unexpected ("get_doc=UNEXPECTED " ++ result))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+-- &Path concrete sibling + generic param variant.
+checkAt : Task Error ()
+checkAt =
+    case B.new_from_store "fs" of
+        Ok store ->
+            case B.at_from_store store "/tmp/x" "k" of
+                Ok result ->
+                    if result == "fs@/tmp/x:k" then
+                        println "at=ok"
+
+                    else
+                        Task.fail (Error.unexpected ("at=UNEXPECTED " ++ result))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
 main : Task Error ()
 main =
     checkNew
         |> Task.andThen (\_ -> checkGet)
         |> Task.andThen (\_ -> checkPut)
         |> Task.andThen (\_ -> checkResolve)
+        |> Task.andThen (\_ -> checkGetDoc)
+        |> Task.andThen (\_ -> checkAt)
         |> Task.andThen (\_ -> println "[ALL OK]")

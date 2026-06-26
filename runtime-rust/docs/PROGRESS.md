@@ -17,6 +17,29 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — WALL 3b (#60): concrete borrowed-ref sibling binds in a generic method
+
+firestore `get_doc<S: AsRef<str>>(&self, collection: &str, doc: S)` was dropping
+`not-bindable borrowed_ref` (169-drop family). Fix (composes with #58 WALL-2
+mono): `type_to_typeref` lowers a non-mut `borrowed_ref` of
+str/String/Path/OsStr/OsString/PathBuf → Sky `String`, records the value-arg
+index in `borrow_as_ref_args`; the generic param `doc:S` WALL-2-monos to String so
+the method becomes inherent-mono; `parametric_function` marks the borrowed sibling
+`rust_type="&str"` and Ffi.hs `argCall` emits `collection.as_ref()` (the owned
+`String: AsRef<str>+AsRef<Path>+AsRef<OsStr>`, target inferred from the callee
+param). Mutable/non-str-Path refs still DROP (fail-closed). Guardian-final APPROVE
+(index alignment proven, SKY_DCE=0 clean, 23 ffi-fixtures ok, 166 unit tests).
+
+**Cost 3 attempts to a STALE-INSPECTOR TRAP** (now a CLAUDE.md learning): `sky
+build` finds a gitignored dev-local `./bin/sky-ffi-inspect-rs` FIRST, shadowing the
+rebuilt inspector — every inspector rebuild was a no-op on the real path until the
+fix was forced via `SKY_FFI_INSPECTOR_RS`. The inspector logic was correct from
+attempt 1.
+
+**Affected:** `tools/sky-ffi-inspect-rs/src/main.rs` (rust_type marker + clippy
+fix) · `src/Sky/Build/Rust/Ffi.hs` (argCall `.as_ref()` arm) ·
+`runtime-rust/tests/sky/76-ffi-borrowed-ref/` (the real get_doc/at shape).
+
 ## 2026-06-25 — firestore coverage measurement (post-walls) + WALL-3 worklist
 
 Empirical re-measure on firestore 0.49.0 (pre-wall inspector `dfea217a` vs both
