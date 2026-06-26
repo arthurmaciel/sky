@@ -78,8 +78,35 @@ checkPong =
             Task.fail e
 
 
+-- DEFECT-3 positive: a SYNC generic method on a provably-Wire receiver (Db)
+-- still binds and runs. `tag req db` → "tag hi". Sync, `Result Error String`.
+checkTag : Task Error ()
+checkTag =
+    case ( O.new_from_db "u", O.new_from_req () ) of
+        ( Ok db, Ok req0 ) ->
+            case O.with_field_from_req req0 "hi" of
+                Ok req ->
+                    case O.tag_from_req req db of
+                        Ok s ->
+                            if s == "tag hi" then
+                                println "tag=tag hi"
+
+                            else
+                                Task.fail (Error.unexpected ("tag=UNEXPECTED " ++ s))
+
+                        Err e ->
+                            Task.fail e
+
+                Err e ->
+                    Task.fail e
+
+        _ ->
+            Task.fail (Error.unexpected "opaque ctor failed for tag")
+
+
 main : Task Error ()
 main =
     checkSend
         |> Task.andThen (\_ -> checkPong)
+        |> Task.andThen (\_ -> checkTag)
         |> Task.andThen (\_ -> println "[ALL OK]")

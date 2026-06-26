@@ -723,31 +723,49 @@ emitRustFile kernelName pkg =
             paramTypesRaw = [ resolveRustType crateImport st
                                 (if j < nRawRustParam then rawRustParamTypes !! j else "")
                             | (j, st) <- zip [0::Int ..] (take nParams paramSkyTypes) ]
-            -- [#52 Step 1] Async-threaded opaque BORROW param → OWN-BY-VALUE.
-            -- An effectful (async) wrapper captures every non-self param in the
-            -- `async move { … }` block tokio::task::spawn drives, which requires
-            -- `'static`. A `&Opaque` param (the monomorphized `client: &C` → `&Db`)
-            -- would then ESCAPE the wrapper body (E0521 borrowed-data-escapes). So
-            -- for an effectful wrapper, declare such a param as the OWNED type
-            -- (strip the single leading `&`) — the Sky value already owns the
-            -- handle and moves it in — and re-borrow it at the call site (`&argN`,
-            -- handled in `argCall`). Restricted to a single non-`&mut`, non-`&str`/
-            -- `&String`/`&[…]` borrow of an opaque (the slice/str/Option arms own
-            -- their own coercion paths and are untouched). Sync wrappers are
-            -- unchanged (no spawn, no escape).
-            isAsyncOwnRefTy t =
-                _fnEffect fn == "effectful"
-                && "&" `isPrefixOf` t
+            -- [#52 Step 1] Opaque BORROW param → OWN-BY-VALUE.
+            -- Two cases require the wrapper to declare an opaque by owned value
+            -- even though the foreign fn takes `&C` (→ `&Db` after monomorphization):
+            --
+            -- (A) ASYNC / effectful: the `async move { … }` block drives by
+            --     tokio::task::spawn, which requires `'static`. A `&Opaque` param
+            --     would ESCAPE the wrapper body (E0521). Strip the leading `&` in
+            --     the wrapper declaration; re-borrow at the call site (`&argN`).
+            --
+            -- (B) SYNC / non-effectful + mono-produced owned-opaque Sky surface:
+            --     The concrete-impl monomorphizer (inspector, #52) substitutes
+            --     C=Db so the Rust param becomes `&Db` but the SKY surface type
+            --     is the OWNED `Db` (rustdoc_type_to_sky strips the outer `&` on
+            --     borrowed_ref). The wrapper therefore receives owned `Db` from
+            --     Sky and must re-borrow at the call site — same transform as (A).
+            --     Gate: wrapper param starts with `&`, AND the corresponding
+            --     paramSkyTypes entry is a bare owned opaque (no `&` prefix, not a
+            --     known-Sky primitive). Genuinely-borrowed sync params (`&str`,
+            --     `&String`, `&[…]`, `&mut T`) either fail the non-`&` Sky-surface
+            --     check or the non-known-Sky check — all are excluded.
+            isOwnRefTy j t =
+                "&" `isPrefixOf` t
                 && not ("&mut " `isPrefixOf` t)
                 && (let rest = trimStr (drop 1 t)
                     in rest /= "str" && rest /= "String"
                        && not ("&" `isPrefixOf` rest)
                        && not ("[" `isPrefixOf` rest)
                        && not (null rest))
-            asyncOwnRefIdx = [ j | (j, t) <- zip [0::Int ..] paramTypesRaw, isAsyncOwnRefTy t ]
-            -- The declared wrapper param types: owned form for async-threaded
-            -- opaque borrows, raw form otherwise.
-            paramTypes = [ if j `elem` asyncOwnRefIdx then trimStr (drop 1 t) else t
+                && (_fnEffect fn == "effectful"
+                    || -- SYNC: Sky surface is owned opaque (mono-produced `&Db` wrapper
+                       -- param but Sky surface is `Db`).
+                       -- `paramSkyTypes` is infinite (`_fnParamSkyTypes fn ++
+                       -- repeat ""`), so `!! j` is TOTAL for the finite `j <
+                       -- nParams` here — NEVER `length` it (forcing the infinite
+                       -- spine = non-terminating codegen, guardian BLOCK).
+                       let skySurface = paramSkyTypes !! j
+                       in not (null skySurface)
+                          && not ("&" `isPrefixOf` skySurface)
+                          && not (isKnownSky skySurface))
+            ownRefIdx = [ j | (j, t) <- zip [0::Int ..] paramTypesRaw, isOwnRefTy j t ]
+            -- The declared wrapper param types: owned form for own-ref params
+            -- (async-escape or sync-mono), raw form otherwise.
+            paramTypes = [ if j `elem` ownRefIdx then trimStr (drop 1 t) else t
                          | (j, t) <- zip [0::Int ..] paramTypesRaw ]
             -- Display bridge on a generic receiver type (e.g. DateTime<Tz>):
             -- emit `arg0: impl std::fmt::Display` so the wrapper accepts any
@@ -828,11 +846,11 @@ emitRustFile kernelName pkg =
                 let rawTy  = if j < nRawRustParam then rawRustParamTypes !! j else ""
                     declTy = paramTypes !! j
                     base   = arg j
-                in if j `elem` asyncOwnRefIdx
-                    -- [#52 Step 1] async-threaded opaque owned by-value in the
-                    -- wrapper sig → re-borrow at the call site so the foreign
-                    -- `&C` (→ `&Db`) param is satisfied while the owned value
-                    -- stays moved into the async block (no escape).
+                in if j `elem` ownRefIdx
+                    -- [#52 Step 1] Opaque owned by-value in the wrapper sig →
+                    -- re-borrow at the call site so the foreign `&C` (→ `&Db`)
+                    -- param is satisfied. Covers both async (escape) and sync
+                    -- (mono-produced owned-surface behind `&` wrapper param).
                     then "&" ++ base
                     else case seqKind rawTy of
                     Just (SeqKind Slice    ElemU8) -> "&to_u8_vec(&" ++ base ++ ")"

@@ -180,3 +180,17 @@ impl Default for SendClient {
         SendClient::new(0)
     }
 }
+
+// ── DEFECT-3: sync concrete-impl-mono'd opaque param (`&C` → `&Db`) ─────────
+// A SYNC method bounded by a single-impl trait `Wire` (`impl Wire for Db`)
+// monomorphizes to `C = Db`. The raw Rust param type is `&Db` (borrowed), but
+// the Sky surface is the OWNED `Db`. Pre-fix the codegen keeps `&Db` in the
+// wrapper sig → Sky passes owned `Db` → E0308. Post-fix: owned param + reborrow.
+
+impl Req {
+    /// POSITIVE (DEFECT-3): sync generic method; `C: Wire` has ONE impl (Db) →
+    /// monomorphize C = Db. Returns `"tag <field>"`. Pure/fallible return.
+    pub fn tag<C: Wire>(&self, _client: &C) -> String {
+        format!("tag {}", self.field)
+    }
+}

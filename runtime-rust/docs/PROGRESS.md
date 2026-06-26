@@ -17,6 +17,36 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-25 — #52 FFI keystone: opaque-handle threading + concrete-impl monomorphization
+
+**Unlock:** a realistic async-generic op over a NOT-Clone opaque client handle binds shim-free — the firestore/stripe shape. Composes on #44 async / #45 generic-Self / #46 UFCS / #47 serde / #51 --all-features.
+
+**Three coupled mechanisms:**
+
+1. **Opaque-by-value threading** (`Ffi.hs` — `isAsyncOwnRefTy`). An effectful async wrapper must `'static`-capture all params; a `&Opaque` param escapes (E0521). For a non-`&mut`/non-`&str`/non-`&[…]` opaque borrow in an effectful wrapper, declare the param OWNED (strip `&`) and re-borrow at the call site (`&argN`). Move-by-value only — no `.to_owned()` (non-Clone → E0599). Sync wrappers untouched.
+
+2. **Concrete-impl monomorphization** (`main.rs` — `TRAIT_CONCRETE_IMPLS`). New index: crate-local trait id → concrete non-generic nameable reachable `for` types. `monomorphize_concrete_impl_params` runs BEFORE the generic-bearing / serde census. A param `C: Trait` bounded by a crate-local trait with EXACTLY ONE concrete impl is substituted to that concrete and stripped from generics, flowing through the ordinary monomorphized path. 0 / >1 / blanket / generic-T → DROP `trait-bounded-param-ambiguous`. Same-crate only (cross-crate facade absent from entry rustdoc → sound miss). Ordering: subst before census so the substituted type is classified correctly.
+
+3. **Send-proof for threaded opaque** (`main.rs`). Async arg-Send gate (closed primitives+String) would over-drop a legitimately-Send opaque. Admit a concrete opaque when Send is PROVABLE via any of 4 sources: (a) bound trait carries `Send` supertrait, (b) real (non-synthetic, non-negative) `unsafe impl Send for T`, (c) all fields in Send-coercible closed set, (d) private-field-aware synthetic-Send. Conservative: private/doc-stripped fields → can't prove → refuse. rustdoc's synthetic auto-`impl !Send` excluded. Rc-bearing `!Send` row still DROPS `async-future-not-send`.
+
+**Audit-found defects closed in follow-up commits:**
+
+- **DEFECT-1** (commit `70551eb4`): async self-receiver `&self` is also a borrow → same E0277 Send hole. Fix: `isAsyncOwnRefTy` covers the `self` receiver; guardian-found pre-commit.
+- **DEFECT-2** (commit `f14108e6`): serde-Value turbofish `serde_json::from_value::<T>` missing on method + static branches (only the fn-item branch had it) → E0283 ambiguous type. Fix: inject turbofish on all three branches; guardian-found pre-commit.
+- **DEFECT-3** (sync mono'd-opaque `&C`→E0308): a single-impl-trait-bounded SYNC method monomorphizes `C=Db` so the Rust param is `&Db` but the Sky surface is owned `Db` → E0308. Fix: generalize `isAsyncOwnRefTy`→`isOwnRefTy` so the owned-by-value + reborrow transform ALSO fires on the sync path when the Sky surface is a bare owned opaque (case B), gated to exclude `&str`/`&String`/`&[…]`/`&mut`/known-Sky surfaces. Guardian-final caught a **BLOCK** in the first cut: the case-B gate did `length paramSkyTypes` over the infinite `_fnParamSkyTypes fn ++ repeat ""` → non-terminating codegen on every sync opaque-param fn; fixed by dropping the redundant guard (`!! j` is total for `j < nParams`). Proof: fixture 74 `tag<C: Wire>` sync row → `tag=tag hi`.
+
+**Proof:** fixture `74-ffi-opaque-client` (opaque `Db` + `Transport` + async `send<C: Wire>` + ambiguous/!Send negatives) `[ALL OK]`; cargo build passes; 21 ffi-fixtures ok; 166 inspector unit tests green.
+
+**Residual (firestore/stripe full shim-free still needs):** cross-crate concrete-impl index, `sky add name@version` prerelease pin, stripe builder-params (#54/#55/#56-area), opaque-value Sky-Result ergonomics.
+
+**Affected:**
+- `src/Sky/Build/Rust/Ffi.hs` — `isAsyncOwnRefTy` owned-borrow gate (commits `55d6d42d`, `70551eb4`)
+- `tools/sky-ffi-inspect-rs/src/main.rs` — `TRAIT_CONCRETE_IMPLS`, `monomorphize_concrete_impl_params`, Send-proof (4-source), serde turbofish all branches (commits `55d6d42d`, `f14108e6`)
+- `runtime-rust/tests/sky/74-ffi-opaque-client/` — fixture + wiring into ffi-fixtures gate (commits `6edce6bc`, `9492c631`)
+- `runtime-rust/docs/superpowers/specs/2026-06-25-rust-ffi-opaque-handle-and-concrete-impl-master.md` — spec
+
+---
+
 ## 2026-06-23 13:30 — #44: auto async→Task FFI for foreign `async fn` (keystone)
 
 **Mission:** bind a foreign `async fn` / `-> impl Future<Output=T>` as a Sky
