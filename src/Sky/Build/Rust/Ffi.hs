@@ -21,10 +21,12 @@ module Sky.Build.Rust.Ffi
     , wrapperEndSentinel     -- :: String
     , wrapperSentinelPrefix  -- :: String
     , translateRustRet       -- :: String -> (String, String -> String)  (#22 — exposed for unit tests)
+    , genericHasTraitQualifier  -- :: FnInfo -> Bool  (WALL-D — exposed for unit tests)
     , cargoProfilePanicIsUnwind  -- :: String -> Bool  (#28 B2 — closure-wrapper catch_unwind guard)
     ) where
 
 import qualified Data.Aeson as A
+import qualified Data.Aeson.Types as AT
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isAlpha, isAlphaNum, isDigit, isLower, isUpper, toUpper)
 import Data.List (intercalate, isPrefixOf, stripPrefix)
@@ -1356,6 +1358,7 @@ emitRustFile kernelName pkg =
                 else if _fnIsFieldSet fn
                 then if setFieldWellFormed then setFieldLines else []
                 else if isDegenerateMethod || ((isInstance || isStaticFn) && hasGenericRecvParam)
+                        || genericHasTraitQualifier fn
                 then []
                 else [ "// [" ++ _fnEffect fn ++ "] " ++ wrapper
                      , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> " ++ retType ++ " {"
@@ -1370,6 +1373,35 @@ emitRustFile kernelName pkg =
            else [ wrapperBeginSentinel (wrapperRefName fn) ]
                 ++ bodyLines
                 ++ [ wrapperEndSentinel ]
+
+
+-- | [WALL-D] True when a function's inspector @generic@ block carries a UFCS
+-- @traitQualifier@ — i.e. it is a TRAIT associated function / method whose ONLY
+-- correct render is @\<Self as Trait\>::m(..)@, emitted by the Call-AST /
+-- @sky_ffi_generics.rs@ path. For such a fn the flat-field @_bindings.rs@
+-- wrapper is ALWAYS wrong: at best a duplicate (E0659 ambiguous-glob), at worst
+-- a non-existent free-function call (E0425 — the no-self, no-arg
+-- @Default::default()@ shape, which the @isDegenerateMethod@ self-param gate
+-- misses). The fully-mono trait case (FfiInstance @<M>@ recv) is ALREADY skipped
+-- via @hasGenericRecvParam@; this closes the non-mono + no-self gap with the SAME
+-- intent. Reads @generic.call.traitQualifier@; @False@ (no @generic@, an inherent
+-- generic method with no qualifier, or a non-array/short qualifier) ⇒ the
+-- existing emission path is unchanged. FAIL-CLOSED on shape: only a
+-- two-element @[selfPath, traitPath]@ array counts as a trait fn.
+genericHasTraitQualifier :: FnInfo -> Bool
+genericHasTraitQualifier fn =
+    case _fnGeneric fn of
+        Nothing -> False
+        Just v  -> AT.parseMaybe parser v == Just True
+  where
+    parser :: A.Value -> AT.Parser Bool
+    parser = A.withObject "generic" $ \o -> do
+        call <- o AT..: "call"
+        flip (A.withObject "call") call $ \c -> do
+            mq <- c AT..:? "traitQualifier" :: AT.Parser (Maybe [String])
+            pure $ case mq of
+                Just (_ : _ : _) -> True   -- [selfPath, traitPath, …] — a trait fn
+                _                -> False
 
 
 -- | Convert a pkg path to a Rust crate import path.

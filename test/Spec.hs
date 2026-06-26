@@ -89,6 +89,7 @@ import qualified Sky.Build.FfiTypeParserSpec
 import qualified Sky.Build.FfiTypeResolveSpec
 import qualified Sky.Build.Rust.FfiInstanceSpec
 import qualified Sky.Build.Rust.FfiCallSpec
+import qualified Sky.Build.Rust.FfiDefaultAssocFnSpec
 import qualified Sky.Generate.Rust.TypeRendererSpec
 import qualified Sky.Generate.Rust.FormDefaultGateSpec
 import qualified Sky.Generate.Rust.TransitiveDepCrateSpec
@@ -545,6 +546,7 @@ allSpecs fastMode = do
     describeT "Sky.Build.FfiTypeResolve" Sky.Build.FfiTypeResolveSpec.spec
     describeT "Sky.Build.Rust.FfiInstance" Sky.Build.Rust.FfiInstanceSpec.spec
     describeT "Sky.Build.Rust.FfiCall" Sky.Build.Rust.FfiCallSpec.spec
+    describeT "Sky.Build.Rust.FfiDefaultAssocFn" Sky.Build.Rust.FfiDefaultAssocFnSpec.spec
     describeT "Sky.Generate.Rust.TypeRenderer" Sky.Generate.Rust.TypeRendererSpec.spec
     describeT "Sky.Generate.Rust.FormDefaultGate" Sky.Generate.Rust.FormDefaultGateSpec.spec
     describeT "Sky.Generate.Rust.TransitiveDepCrate" Sky.Generate.Rust.TransitiveDepCrateSpec.spec

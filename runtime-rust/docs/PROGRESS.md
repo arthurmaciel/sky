@@ -64,7 +64,7 @@ likely also close firestore's #73 SKY_DCE=0 residuals):
 | A | E0308 ×5 | `Vec<StructType>` field setter emits `Vec<String>` (collapses non-primitive elem) | **#74 ✅ CLOSED** (firebase 5→0; `resolveRustType` List<opaque> arm) |
 | B | E0433 ×6 | generic wrappers emit `::http::`/`::google_cloud_auth::` transitive-dep paths not in generated Cargo.toml | #76 |
 | C | E0603 ×3 | private-internal-module type path (`std::collections::hash::map`, `http::header::map`, `http::extensions`) | **#76 ✅** (external_type_public_path: std→public, non-std re-export → fail-closed drop) |
-| D | E0425 ×1 | `Default` emits free-fn `crate::default()` not `<T as Default>::default()` | #78 |
+| D | E0425 ×1 | `Default::default` (no-self trait assoc-fn) fell to free-fn `crate::default()` | **#77 ✅** (genericHasTraitQualifier skip → UFCS generics path owns it) |
 | E | E0277 ×1 | `Into<&'static str>` static-lifetime arg (owned-String #67 doesn't cover String→&'static str) | #79 |
 
 **Structural blocker for firebase CRUD** (create_user/get_user/delete_user): they're

@@ -1,0 +1,13 @@
+[project]
+name = "88-ffi-default-assoc-fn"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local default-crate: tests WALL-D (trait associated function with NO self
+# receiver — `Default::default()` — must render via UFCS
+# `<Cfg as ::core::default::Default>::default()` in the bindings, NOT a broken
+# free-function `::default_crate::default()` → E0425).
+# setup.sh git-inits ./default-crate into the cache path below.
+["rust.dependencies"]
+default-crate = { git = "file:///home/arthur/.cache/sky/88-ffi-default-assoc-fn-crate", branch = "master" }

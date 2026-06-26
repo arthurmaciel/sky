@@ -1,0 +1,72 @@
+module Main exposing (main)
+
+-- 88-ffi-default-assoc-fn: WALL-D proof fixture.
+--
+-- The default-crate exposes a `#[derive(Default)] struct Cfg { pub n: i64 }`.
+-- Its derived `Default::default()` is a trait ASSOCIATED FUNCTION with NO `self`
+-- receiver. The bindings codegen historically rendered the callee as a FREE
+-- function `::default_crate::default()` (no such free fn → E0425
+-- `cannot find function default`) instead of the UFCS form
+-- `<Cfg as ::core::default::Default>::default()`.
+--
+-- WALL-D fix: a no-receiver trait associated function renders via UFCS in the
+-- generated bindings, mirroring the receiver-carrying trait-method path.
+--
+-- Coverage:
+--   new     — inherent no-self assoc fn (static-fn control, `Cfg::new()`)
+--   default — trait no-self assoc fn (UFCS target, `<Cfg as Default>::default()`)
+--   read_n  — instance method reading the field (control receiver path)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Default_crate as D
+import Std.Log exposing (println)
+
+
+-- The inherent `Cfg::new()` control: builds a Cfg with n == 0.
+checkNew : Task Error ()
+checkNew =
+    case D.new_from_cfg () of
+        Ok cfg ->
+            case D.read_n_from_cfg cfg of
+                Ok n ->
+                    if n == 0 then
+                        println "new=ok"
+
+                    else
+                        Task.fail (Error.unexpected ("new=UNEXPECTED " ++ String.fromInt n))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+
+-- The trait `Default::default()` — THE WALL-D target. Must render UFCS, not a
+-- free fn. Builds a Cfg with the derived default (n == 0).
+checkDefault : Task Error ()
+checkDefault =
+    case D.default () of
+        Ok cfg ->
+            case D.read_n_from_cfg cfg of
+                Ok n ->
+                    if n == 0 then
+                        println "default=ok"
+
+                    else
+                        Task.fail (Error.unexpected ("default=UNEXPECTED " ++ String.fromInt n))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+
+main : Task Error ()
+main =
+    checkNew
+        |> Task.andThen (\_ -> checkDefault)
+        |> Task.andThen (\_ -> println "[ALL OK]")

@@ -405,6 +405,7 @@ test-suite sky-tests
       Sky.Build.FfiTypeResolveSpec
       Sky.Build.Rust.FfiInstanceSpec
       Sky.Build.Rust.FfiCallSpec
+      Sky.Build.Rust.FfiDefaultAssocFnSpec
       Sky.Generate.Rust.TypeRendererSpec
       Sky.Generate.Rust.FormDefaultGateSpec
       Sky.Generate.Rust.TransitiveDepCrateSpec
