@@ -6,10 +6,71 @@ verified-against-current-code TDD design for both fixes.
 
 ---
 
-## Status: WALL 1 guardian-reviewed — APPROVE-WITH-CONSTRAINTS (2026-06-25)
+## Status: WALL 1 SHIPPED (7b47054f). WALL 2 guardian-reviewed — BLOCK-PLAN-AS-WRITTEN → constrained Approach-B (2026-06-25)
 
-WALL 2 still design-only (vet at P2 implementation; the `BoundCrossImpl`
-reconciliation, §3 lines 627-629, is its real risk surface).
+### WALL 2 — guardian design ruling (SUPERSEDES §3's A-vs-B vacillation)
+
+**§3 as written is BLOCKED.** Approach A (route through `resolve_generics`) is
+STRUCTURALLY UNAVAILABLE for the firestore shape and §3's summary wrongly
+prefers it. The sound fix is **Approach B restructured** (per-param mono
+pre-pass, NOT `classify_param_bound → Ok(None)`). The 9 constraints below are
+BLOCKING for the impl + guardian-final.
+
+**Why A is dead (routing 1140-1145):** `get_doc<S: AsRef<str>+Send>` lives on
+trait `FirestoreGetByIdSupport` over concrete `Self=FirestoreDb` →
+`is_concrete_trait_method=true` → forced to `try_parametric_stub` (the UFCS
+`<Self as Trait>::m` path). The only escape (`serde_reducible_method`) is gated
+`is_inherent_impl` → trait methods never qualify. Routing `get_doc` through
+`resolve_generics`/`parse_fn_item` emits inherent `recv.m()` → **#31 E0599**.
+A is viable ONLY for INHERENT generic methods — so an inherent-only fixture is a
+COVERAGE TRAP (greenlights a fix that leaves firestore red).
+
+**Constraints (BLOCKING):**
+1. **Source-fix `bound_to_concrete` AsRef/Borrow/Into/From arm (~5275)** to gate
+   on `std_trait_tag(tr).is_some()` BEFORE the last-segment name match — mirror
+   the `Display|ToString` arm (~5260-5264). Closes BOTH crate-local (id 0) AND
+   foreign-look-alike (id>0) wrong-admit. The `classify_param_bound`
+   `!is_crate_local` guard is then defense-in-depth, not the sole gate.
+2. **Do NOT model resolve-to-concrete as `classify_param_bound → Ok(None)`** (it
+   overloads "marker, keep tyvar generic" with "eliminate tyvar" → mis-DROPs at
+   the BoundCrossImpl gate 6548-6559, where empty bound-list for a trait-method
+   tyvar drops `BoundCrossImpl`). Instead add a separate **per-PARAM mono
+   pre-pass** in `try_parametric_stub` BEFORE `full_union_bounds`/the gate, using
+   `resolve_param_bounds(ALL bounds of the param, pos)` (markers-skips, picks one
+   concrete, conflict→None).
+3. **Mono'd params are REMOVED from `tyvars`/`order`** so they never reach the
+   BoundCrossImpl gate and never emit a `::<S>` turbofish slot. Genuinely-generic
+   tyvars still hit the gate unchanged → the (a) genuinely-unresolvable-DROP vs
+   (b) resolved-to-concrete-BIND distinction is restored by construction.
+4. **Substitute the mono concrete in ALL positions** — arg types, turbofish
+   `type_args` (6570), return, recv-ctor — with a per-occurrence position census
+   (reuse the #47 `fn_..._all_admissible` walk); DROP if any occurrence is
+   inadmissible (`&S` needing owned, tuple, map-value, nested non-owned,
+   return-position undecidable under `BoundPos::Return`).
+5. **Multi-bound: decide mono per-PARAM over the FULL bound set, never per-bound.**
+   `AsRef<str>+Serialize` → `resolve_param_bounds`=None → method DROPS (never
+   substitute AsRef and silently drop the Serialize obligation). `AsRef<str> +
+   AsRef<Path>` → conflicting concretes → DROP. Both = NEGATIVE fixtures
+   asserting absence (verify the str-vs-Path conflict actually fires, don't assume).
+6. **Fixture must exercise the REAL shape:** the POSITIVE AsRef method on a
+   TRAIT over a concrete Self (mirrors `get_doc` on `FirestoreGetByIdSupport`),
+   NOT only inherent `Sup::op`. Add BOTH: inherent (A-path) AND concrete-Self-trait
+   (B-path, the firestore path). Negative bodies MUST COMPILE (drop at the FFI
+   layer, not crate-compile-fail) — `op_ambig`'s `k.as_ref()` is ambiguous Rust;
+   use `<S as AsRef<str>>::as_ref(&k)` or ignore `k` in the body.
+7. **No new panic/index/unwrap** in the pre-pass (tools deny-lints): `.get()`/
+   `if let`/`match`.
+8. **Call form:** pass the mono'd String param BY VALUE (`String: AsRef<str>`
+   satisfies the host directly); do NOT emit `.as_str()`.
+9. **Guardian-final MUST run with `SKY_DCE=0` + a real `cargo build`** of fixture
+   75 (the #45 lesson — DCE-on hid #46's broken std-trait wrappers).
+
+Line cites (current main.rs): routing 1140-1145 · UFCS rationale 1127-1136 ·
+serde-escape inherent-only 1090 · `bound_to_concrete` last-segment 5246-5247,
+AsRef ungated arm 5275-5291, Display gated arm 5260-5264 · `trait_is_crate_local`
+5344-5349 · `std_trait_tag` 3713-3740 · `classify_param_bound` 5614-5644 ·
+`full_union_bounds` 5798-5807 · **BoundCrossImpl gate 6548-6559** · turbofish
+6570 · `resolve_param_bounds` conflict 7449-7460 · #25 test 8806-8820.
 
 ### WALL 1 — guardian constraints (BLOCKING, must hold in the impl)
 
