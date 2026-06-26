@@ -827,10 +827,14 @@ fn run_rustdoc(crate_name: &str, features: &[String], git: Option<&GitSource>) -
     let dir = tmp.path();
 
     let safe_name = crate_name.replace('-', "_");
-    let dep_entry = build_dep_entry(crate_name, features, git, req_version);
 
-    let toml_content = format!(
-        r#"[package]
+    // Write the probe manifest with a given dep-feature set. Re-used to rewrite
+    // the manifest once the #89 visibility feature set is resolved (and again on
+    // the fallback to default features).
+    let write_manifest = |feats: &[String]| -> Result<(), String> {
+        let dep_entry = build_dep_entry(crate_name, feats, git, req_version);
+        let toml_content = format!(
+            r#"[package]
 name = "_sky_ffi_probe_{safe_name}"
 version = "0.1.0"
 edition = "2021"
@@ -838,12 +842,16 @@ edition = "2021"
 [dependencies]
 {dep_entry}
 "#
-    );
+        );
+        std::fs::write(dir.join("Cargo.toml"), &toml_content)
+            .map_err(|e| format!("write Cargo.toml: {}", e))
+    };
 
     let src_dir = dir.join("src");
     std::fs::create_dir_all(&src_dir).map_err(|e| format!("mkdir src: {}", e))?;
-    std::fs::write(dir.join("Cargo.toml"), &toml_content)
-        .map_err(|e| format!("write Cargo.toml: {}", e))?;
+    // Initial manifest uses the EXPLICIT features (empty for the default path) so
+    // `fetch_dep` + `cargo metadata` resolve; the #89 block rewrites it below.
+    write_manifest(features)?;
     std::fs::write(src_dir.join("lib.rs"), "// placeholder\n")
         .map_err(|e| format!("write lib.rs: {}", e))?;
 
@@ -858,17 +866,36 @@ edition = "2021"
     // Cargo.lock. Done once per crate inspect; fail-soft (empty on any error).
     let transitive_deps = collect_transitive_deps(&manifest_str);
 
-    // [#51] Default to all features for visibility; fall back to default
-    // features if an all-features doc build fails (mutually-exclusive features).
-    let all_features = features.is_empty();
+    // [#51/#89] Maximise API visibility. An explicit `--features` wins verbatim;
+    // otherwise enumerate the crate's OWN features (via `cargo metadata`) and
+    // inject the chosen set THROUGH THE DEP TABLE. We never pass the
+    // `--all-features` CLI flag — cargo rejects it for an external `-p <dep>`
+    // ("cannot specify features for packages outside of workspace"), which is why
+    // the pre-#89 default path silently degraded every external-crate audit to
+    // DEFAULT features and hid every feature-gated API (the firebase #81 + stripe
+    // #89 root cause). Fail-soft: empty enumeration → plain default build.
+    let injected: Vec<String> = if !features.is_empty() {
+        features.to_vec()
+    } else {
+        choose_visibility_features(&enumerate_crate_features(&manifest_str, crate_name))
+    };
+    let injected_nonempty = !injected.is_empty();
+    if injected_nonempty {
+        write_manifest(&injected)?;
+    }
+
     let (json_content, version) =
-        match run_rustdoc_package(crate_name, &manifest_str, &target_dir, &safe_name, all_features) {
+        match run_rustdoc_package(crate_name, &manifest_str, &target_dir, &safe_name, false) {
             Ok(r) => r,
-            Err(e) if all_features => {
+            // A mutually-exclusive injected feature subset can fail the doc build;
+            // fall back to default features (the pre-#89 behaviour) before giving up.
+            Err(e) if injected_nonempty => {
                 eprintln!(
-                    "[sky-ffi] --all-features doc build failed ({}); retrying with default features",
+                    "[sky-ffi] feature set [{}] doc build failed ({}); retrying with default features",
+                    injected.join(","),
                     e.lines().next().unwrap_or("").trim()
                 );
+                write_manifest(&[])?;
                 run_rustdoc_package(crate_name, &manifest_str, &target_dir, &safe_name, false)?
             }
             Err(e) => return Err(e),
@@ -882,7 +909,7 @@ edition = "2021"
         if let Some(underlying) = find_glob_reexport_source(&json_content) {
             let under_safe = underlying.replace('-', "_");
             if let Ok((under_json, under_ver)) =
-                run_rustdoc_package(&underlying, &manifest_str, &target_dir, &under_safe, all_features)
+                run_rustdoc_package(&underlying, &manifest_str, &target_dir, &under_safe, false)
             {
                 if json_has_functions(&under_json) {
                     return Ok((under_json, under_ver, transitive_deps));
@@ -1174,6 +1201,74 @@ fn toml_escape(s: &str) -> String {
         }
     }
     out
+}
+
+/// [#89] Enumerate an audited crate's OWN Cargo features via `cargo metadata`
+/// (resolved from the local cache after `fetch_dep`). Returns every feature key
+/// EXCEPT `default`. Empty on any failure (fail-soft — caller then builds with
+/// default features, the pre-#89 behaviour). `cargo metadata` lists a package's
+/// AVAILABLE features regardless of which are enabled, so the no-feature probe
+/// manifest is sufficient to read them.
+fn enumerate_crate_features(manifest_str: &str, crate_name: &str) -> Vec<String> {
+    let out = Command::new("cargo")
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--quiet",
+            "--manifest-path",
+            manifest_str,
+        ])
+        .output();
+    let Ok(out) = out else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return Vec::new();
+    };
+    let Some(pkgs) = doc.get("packages").and_then(|p| p.as_array()) else {
+        return Vec::new();
+    };
+    for p in pkgs {
+        if p.get("name").and_then(|n| n.as_str()) == Some(crate_name) {
+            if let Some(feats) = p.get("features").and_then(|f| f.as_object()) {
+                return feats.keys().filter(|k| *k != "default").cloned().collect();
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// [#89] Choose the feature set to inject for MAXIMUM API visibility on an
+/// external crate. The `--all-features` CLI flag is REJECTED by cargo for an
+/// external `-p <dep>` ("cannot specify features for packages outside of
+/// workspace"), so it silently degraded every external-crate audit to DEFAULT
+/// features — hiding every feature-gated API (async-stripe's per-resource
+/// `customer`/`checkout` request builders, firebase's auth surface). Injecting
+/// the set through the DEP TABLE instead works for external deps.
+///
+/// Preference order:
+///   * `full` (the common "all resources, no runtime-exclusive flags"
+///     convention — async-stripe, many SDK crates) PLUS any `deserialize` /
+///     `serialize` present (the response-decode surface). This avoids pulling a
+///     `redact`-style feature that suppresses `Debug` (which the error path
+///     needs).
+///   * else EVERY feature — mimics `--all-features` but via the accepted dep
+///     table. A mutually-exclusive subset just fails the build and the caller
+///     falls back to default features (no worse than the pre-#89 behaviour).
+fn choose_visibility_features(avail: &[String]) -> Vec<String> {
+    if avail.iter().any(|f| f == "full") {
+        let mut v = vec!["full".to_string()];
+        for extra in ["deserialize", "serialize"] {
+            if avail.iter().any(|f| f == extra) {
+                v.push(extra.to_string());
+            }
+        }
+        v
+    } else {
+        avail.to_vec()
+    }
 }
 
 fn build_dep_entry(
@@ -15777,5 +15872,40 @@ mod tests {
             assert!(impl_future_output(&imp).is_none(),
                 "a crate-local `Future` (crate_id 0) must NOT be treated as std Future");
         });
+    }
+
+    // [#89] Feature-visibility selection: prefer `full` (+ deser/ser), else ALL.
+    #[test]
+    fn visibility_features_prefers_full_with_decode() {
+        // async-stripe-core shape: `full` present alongside per-resource features.
+        let avail = vec![
+            "balance".to_string(), "charge".to_string(), "customer".to_string(),
+            "deserialize".to_string(), "serialize".to_string(),
+            "full".to_string(), "redact-generated-debug".to_string(),
+        ];
+        let got = choose_visibility_features(&avail);
+        assert_eq!(got, vec!["full", "deserialize", "serialize"],
+            "with `full`, choose full + decode features, NOT every feature (so a \
+             redact-style feature can't suppress Debug)");
+    }
+
+    #[test]
+    fn visibility_features_full_without_decode_features() {
+        let avail = vec!["a".to_string(), "b".to_string(), "full".to_string()];
+        assert_eq!(choose_visibility_features(&avail), vec!["full"],
+            "with `full` but no deserialize/serialize, just `full`");
+    }
+
+    #[test]
+    fn visibility_features_no_full_uses_all() {
+        // No `full` → mimic --all-features via the dep table (every feature).
+        let avail = vec!["x".to_string(), "y".to_string()];
+        assert_eq!(choose_visibility_features(&avail), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn visibility_features_empty_is_empty() {
+        // A crate with no features → empty injection → plain default build.
+        assert!(choose_visibility_features(&[]).is_empty());
     }
 }

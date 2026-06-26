@@ -17,6 +17,41 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 19:10 — Feature-visibility fix (#89): inject crate features via dep table, not `--all-features`
+
+**What.** Re-measured the REAL async-stripe (`async-stripe-core@1.0.0-rc.6`) before scoping the
+stripe real-crate proof — which corrected the spec's framing twice (spec §9):
+1. The real user chain is `CreateCustomer::new(id).send(&client)` DIRECT — `send` is an INHERENT
+   async method returning `<Self as StripeRequest>::Output`; `.customize()` is an internal hop, not
+   the user path. (The synthetic customize-chain fixture 93 is still a valid mechanism proof.)
+2. **Root visibility bug (general):** `cargo rustdoc -p <external-dep> --all-features` is REJECTED by
+   cargo (`cannot specify features for packages outside of workspace`), so the inspector's default
+   path silently degraded EVERY external-crate audit to DEFAULT features — hiding every feature-gated
+   API. This was also firebase #81's workaround root cause.
+
+**Fix.** New `enumerate_crate_features` (via `cargo metadata`) + `choose_visibility_features`
+(prefer `full` + `deserialize`/`serialize`, else all). `run_rustdoc` injects the chosen set through
+the DEP TABLE (which cargo accepts) and never passes `--all-features`; fail-soft to default on
+enumeration failure or a mutually-exclusive subset. RESULT: default `--audit async-stripe-core`
+rose from **92 → 20,358 symbols (3534 bound)** — the whole resource API is now visible by default.
+General win for every feature-gated external crate; retires firebase #81's workaround.
+
+**Verification.** Full FFI gate **39 ok · 0 fail** (no regression); 213 inspector unit tests (4 new
+for `choose_visibility_features`); guardian-final APPROVED (CLEAN — TOML-injection closed via
+`toml_escape` per feature, total/no-panic, strict superset of old behaviour). 3 non-blocking
+fail-safe residuals.
+
+**Still open (WALL-J, #91 — needs guardian design):** the inherent `send` drops `undeclared type-var
+Self`. Binding the real chain needs Self→concrete-impl-type resolution + `<ConcreteSelf as
+StripeRequest>::Output` via the sibling trait-impl assoc binding + cross-crate `C: StripeClient`
+(WALL-G multi-crate manifest with the facade) + `&self` async Send.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (`enumerate_crate_features`,
+`choose_visibility_features`, `run_rustdoc` rewrite, 4 unit tests), spec
+`2026-06-26-wall-i-stripe-resource-builders.md` §9.
+
+---
+
 ## 2026-06-26 18:30 — WALL-I customize-chain GREEN end-to-end (#88): Sky-type-rendering consistency fix
 
 **What.** Closed the one separable gap left after the WALL-I MECHANISM (provided-method

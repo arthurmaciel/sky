@@ -152,3 +152,64 @@ The customize-chain MECHANISM + rendering are proven on the synthetic fixture. T
 async-stripe resource crate still needs its per-resource Cargo feature resolved so
 `Create*` builders + `customize` are visible in rustdoc (§2's KEY SCOPING FINDING — the
 default surface omits them). Re-measure with the resource feature on, then the real-crate proof.
+
+## 9. Real-crate re-measurement (2026-06-26) — the synthetic framing was WRONG; two real walls
+
+Re-measured `async-stripe-core@1.0.0-rc.6` against the ACTUAL source. Two findings correct the
+spec's `.customize()`-chain framing:
+
+### 9.1 The real user chain is `.send()` DIRECT, not `.customize().send()`
+
+`send`/`send_blocking` are **inherent async methods on each request builder** (not on
+`CustomizableStripeRequest<T>`):
+
+```rust
+impl CreateCustomer {
+    pub async fn send<C: StripeClient>(&self, client: &C)
+        -> Result<<Self as StripeRequest>::Output, C::Err> { self.customize().send(client).await }
+}
+impl StripeRequest for CreateCustomer { type Output = stripe_shared::Customer; /* … */ }
+```
+
+So the user writes `CreateCustomer::new(id).send(&client).await` → `Customer`. `.customize()`
+is an INTERNAL hop, never in the user path. The synthetic fixture 93 proved the customize-chain
+mechanism (still valuable — some APIs expose `.customize()`), but the PRIMARY stripe path is the
+inherent `send` returning `<Self as StripeRequest>::Output`.
+
+### 9.2 WALL — feature visibility (SHIPPED #89) — `--all-features` is rejected for external deps
+
+`cargo rustdoc -p <external-dep> --all-features` → `error: cannot specify features for packages
+outside of workspace`. So the inspector's default path silently degraded EVERY external-crate
+audit to DEFAULT features — hiding every feature-gated API (firebase #81 worked around this; it
+was the stripe gating issue too). FIX: enumerate the crate's own features via `cargo metadata`
+and inject the chosen set through the DEP TABLE (cargo accepts that), preferring `full`
+(+`deserialize`/`serialize`). New `enumerate_crate_features` + `choose_visibility_features` in
+the inspector; `run_rustdoc` rewrites the probe manifest with the injected set and never passes
+`--all-features`. Fail-soft: empty enumeration / mutually-exclusive subset → default build.
+RESULT: default `--audit async-stripe-core@1.0.0-rc.6` jumped **92 → 20,358 symbols (3534
+bound)** — the whole resource API is now visible with no explicit `--features`. General win for
+every feature-gated external crate.
+
+### 9.3 WALL-J (the binding half, TO SCOPE) — inherent-method `<Self as ForeignTrait>::Output`
+
+With the surface visible, `send` drops `not-bindable — undeclared type-var Self`: its return
+`Result<<Self as StripeRequest>::Output, C::Err>` carries a `{generic:"Self"}` node, but for an
+INHERENT method on `impl CreateCustomer`, `Self` IS the concrete `CreateCustomer`. Binding the
+real `send` needs:
+1. **Resolve `Self` → the inherent impl's concrete self type** before the type-var collection
+   gate (`main.rs` ~7954) drops it. We KNOW it (`self_rust`/`for_val`).
+2. **Resolve `<CreateCustomer as StripeRequest>::Output`** via the SIBLING `impl StripeRequest
+   for CreateCustomer { type Output = stripe_shared::Customer }` — a DIFFERENT impl block than the
+   inherent one being walked. This extends WALL-I's `subst_assoc_json` + `impl_assoc_bindings` to
+   look up the assoc binding from a sibling trait-impl keyed by (trait, concrete-Self).
+3. **Cross-crate `C: StripeClient`** (WALL-G) — the `StripeClient` impl lives in the facade
+   `async-stripe` (`impl StripeClient for stripe::hyper::client::Client`), a DIFFERENT crate.
+   Needs the `--manifest` multi-crate run with the facade so WALL-G resolves `C`.
+4. **`&self` borrowed receiver + async Send** — #22 owned-copy + WALL-H structural Send on the
+   owned `CreateCustomer` (a `#[derive(Clone)]` builder; fields owned → Send).
+5. **Return `Customer`** is in `async-stripe-shared` (cross-crate) — big serde struct; binds as a
+   JSON String surface (the FFI Result-Ok payload). B8 security still applies (Err → generic msg
+   + correlation id).
+
+WALL-J needs a guardian DESIGN before implementation (new sibling-impl assoc resolution +
+multi-crate client manifest). It is the genuine terminal stripe wall; multi-session.
