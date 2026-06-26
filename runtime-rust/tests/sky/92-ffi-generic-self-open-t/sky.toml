@@ -1,0 +1,12 @@
+[project]
+name = "92-ffi-generic-self-open-t"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# WALL-H (#87): req-crate defines the generic-Self `Customizable<T>` + async `send<C: Wire>`;
+# client-crate holds the unique `impl Wire for RealClient` (WALL-G resolves C) + the concrete
+# `Resp: Decode` (T resolves to it). setup.sh stages both (req first — client git-deps on it).
+["rust.dependencies"]
+req-crate = { git = "file:///home/arthur/.cache/sky/92-ffi-generic-self-open-t-req", branch = "master" }
+client-crate = { git = "file:///home/arthur/.cache/sky/92-ffi-generic-self-open-t-client", branch = "master" }

@@ -17,6 +17,37 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — WALL-H async generic-Self `send` SHIPPED (core) (#87)
+
+The async `send<C: Wire>` on a generic-Self `Customizable<T>` (T resolving to a concrete via
+a unique cross-crate decode impl) now BINDS + cargo-compiles + runs — the stripe
+`CustomizableStripeRequest<T>::send<C: StripeClient>` shape. Root cause (after two missed
+attempts, both reverted): the async-Send gates reject any `<>`-containing type, so the moved
+receiver `Customizable<Resp>` (conditionally-Send-on-T) and the `Resp` Ok output couldn't be
+proven Send. Shipped a STRUCTURAL conditional-Send proof:
+- `register_self_mono_send`: a Self-mono'd concrete's Send (cross-crate WALL-G frozen `send_ok`
+  / same-crate 3-source) → `PROVABLY_SEND_OPAQUE_NAMES`.
+- `SEND_WHEN_ARGS_SEND_NAMES`: crate-local structs with a positive (incl. conditional `where
+  T: Send`) synthetic Send / all-fields-Send, FULL-PATH only (guardian B-1).
+- `is_generic_instantiation_send(Base<A1..An>)`: Send when base ∈ SEND_WHEN_ARGS_SEND AND every
+  arg provably Send (primitive/String, frozen-Send opaque, recursion). Wired into the receiver
+  gate + the async-output gate (which also now consults OPAQUE full-path for a non-generic out).
+The empty assoc `<C as Wire>::Err` normalises to `Task Error Resp` (#34/Task-wrap) — no extra work.
+
+**Verified.** Fixture `92-ffi-generic-self-open-t` (two-crate, conditionally-Send-on-T Self,
+external decode-bound trait, assoc-type Err) GREEN under `SKY_DCE=0`, runs `send=decoded:hi
+[ALL OK]`; full FFI gate **38 ok · 0 fail**; **209** inspector unit tests; guardian-final APPROVE.
+**Remaining (#87 open-T tail / #88 WALL-I):** the GENUINE stripe open-T case (`miniserde` multi-
+impl → T stays open) is inert without WALL-I's concrete-response producer. The shipped mechanism
+covers the unique-impl-decode / firestore-style generic-Self async-send.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (register_self_mono_send,
+SEND_WHEN_ARGS_SEND_NAMES, is_generic_instantiation_send, the two gate wirings + the non-generic
+OPAQUE consult), `runtime-rust/tests/sky/92-ffi-generic-self-open-t/`,
+`runtime-rust/scripts/ffi-fixtures-test.sh`, the WALL-H spec §9.2.
+
+---
+
 ## 2026-06-26 — WALL-G SHIPPED (#84): cross-crate unique-impl monomorphization (stripe `send` gating piece)
 
 **The gating stripe-operation wall is DONE.** A method whose generic param `C: Trait` has

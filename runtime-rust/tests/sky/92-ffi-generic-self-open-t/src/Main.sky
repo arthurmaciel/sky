@@ -1,0 +1,48 @@
+module Main exposing (main)
+
+-- 92-ffi-generic-self-open-t: WALL-H (#87) proof — async `send` on a generic-Self
+-- `Customizable<T>` whose `T` resolves cross-crate to the concrete `Resp` (the stripe
+-- `CustomizableStripeRequest<T>::send<C: StripeClient>` shape). `send` is the async,
+-- generic-Self, generic-C, assoc-type-Err method WALL-H binds: the moved receiver
+-- `Customizable<Resp>` is proven Send STRUCTURALLY (base Send-when-args-Send + Resp
+-- frozen-Send), and the `Resp` Ok output is admitted via the frozen-Send OPAQUE set.
+--
+-- POSITIVE: new "hi" → req ; new RealClient → client ; send req client → Resp ;
+--           shown resp → "decoded:hi".
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Req_crate as W
+import Rust.Client_crate as CC
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    case W.new_from_customizable "hi" of
+        Ok req ->
+            case CC.new_from_realClient () of
+                Ok client ->
+                    -- The async generic-Self open-T send: returns the decoded Resp.
+                    W.send_from_customizable req client
+                        |> Task.andThen
+                            (\resp ->
+                                case CC.shown resp of
+                                    Ok s ->
+                                        if s == "decoded:hi" then
+                                            println "send=decoded:hi [ALL OK]"
+
+                                        else
+                                            println ("send=UNEXPECTED " ++ s)
+
+                                    Err e ->
+                                        println ("shown-failed: " ++ Error.toString e)
+                            )
+                        |> Task.onError
+                            (\e -> println ("send-failed: " ++ Error.toString e))
+
+                Err e ->
+                    println ("client-new-failed: " ++ Error.toString e)
+
+        Err e ->
+            println ("req-new-failed: " ++ Error.toString e)

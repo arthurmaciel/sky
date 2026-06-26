@@ -1,7 +1,27 @@
 # WALL-H — Generic-Self serde-T `send` on `CustomizableStripeRequest<T>`
 
-**Status:** DESIGN — guardian APPROVE-WITH-CONSTRAINTS (B1–B11 in §7). **Route A** chosen.
-WALL-G (#84) shipped — this is unblocked.
+**Status:** PARTIALLY SHIPPED — the async generic-Self `send` MECHANISM works (fixture 92
+GREEN, guardian-final APPROVE — see §9.2). Remaining: genuine multi-impl-decode OPEN-T
+(miniserde) + WALL-I (#88).
+
+## 9.2 SHIPPED — the async generic-Self send core
+
+The async `send<C: Wire>` on a generic-Self `Customizable<T>` (T resolving to a concrete via
+a unique cross-crate decode impl) BINDS + cargo-compiles + runs. Fixture
+`92-ffi-generic-self-open-t` GREEN under `SKY_DCE=0`, runs `send=decoded:hi [ALL OK]`; full
+FFI gate **38 ok · 0 fail**; 209 inspector unit tests; guardian-final **APPROVE**. The real
+blocker (§9.1) was the moved-receiver + Ok-output Send proof for a generic INSTANTIATION
+(`Customizable<Resp>`) — every async-Send gate rejected it via the `<`-reject. Shipped:
+`register_self_mono_send` (Self-mono'd concrete's frozen/3-source Send → OPAQUE set);
+`SEND_WHEN_ARGS_SEND_NAMES` (synthetic/all-fields-Send bases, FULL-PATH only per B-1);
+`is_generic_instantiation_send` (base Send-when-args-Send + every arg Send), wired into the
+receiver + async-output gates. The empty assoc `<C as Wire>::Err` normalised to
+`Task Error Resp` (#34/Task-wrap) — finding (b) handled, no extra work.
+**Remaining (#87/#88):** the GENUINE open-T stripe case (`miniserde::Deserialize` multi-impl →
+T stays open) is INERT without WALL-I supplying a concrete response; the shipped mechanism
+covers the unique-impl-decode / firestore-style generic-Self async-send.
+
+---
 
 ## 0. Guardian outcome (resolves §5 + adds §7 constraints)
 

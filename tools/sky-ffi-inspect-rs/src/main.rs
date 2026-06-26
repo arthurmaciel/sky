@@ -1319,6 +1319,28 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     // AFTER those three sets are filled.
     PROVABLY_SEND_RECV_NAMES.with(|c| *c.borrow_mut() = collect_provably_send_recv_names(index));
 
+    // [WALL-H #87] Rendered base names of crate-local structs that carry a positive
+    // (possibly conditional) synthetic `Send` impl OR are all-fields-Send — i.e. Send
+    // WHEN their type-args are Send. Both id sets are already populated above. A struct
+    // with a synthetic NEGATIVE Send / an Rc field is absent from BOTH → never admitted.
+    {
+        let mut names: HashSet<String> = HashSet::new();
+        let mut add_id = |id: &String| {
+            // FULL crate-prefixed path ONLY (guardian B-1 discipline, mirroring the
+            // OPAQUE set): an instantiation's base renders crate-prefixed
+            // (`req_crate::Customizable`), so the full path is what the structural proof
+            // matches. A bare-name insert would open a cross-module same-bare-name
+            // collision (`m1::Foo` Send vs `m2::Foo` !Send). A struct with no reachable
+            // public path can't be named anyway → its absence is a sound over-drop.
+            if let Some(f) = REACHABLE_PATHS.with(|c| c.borrow().get(id).cloned()) {
+                names.insert(f);
+            }
+        };
+        SYNTHETIC_SEND_TYPE_IDS.with(|s| s.borrow().iter().for_each(&mut add_id));
+        ALL_FIELDS_SEND_TYPE_IDS.with(|s| s.borrow().iter().for_each(&mut add_id));
+        SEND_WHEN_ARGS_SEND_NAMES.with(|c| *c.borrow_mut() = names);
+    }
+
     // [WALL-G #84] Mirror this crate's concrete trait-impls into the process-global
     // cross-crate index, keyed by canonical trait path. NOT reset per crate (it
     // accumulates across the project's crates); the per-crate local-trait-id→canon
@@ -4088,6 +4110,18 @@ thread_local! {
     // ALL_FIELDS_SEND_TYPE_IDS / SEND_SUPERTRAIT_TRAIT_IDS) — no duplicate proof.
     static PROVABLY_SEND_RECV_NAMES: std::cell::RefCell<HashSet<String>> =
         std::cell::RefCell::new(HashSet::new());
+
+    // [WALL-H #87] RENDERED names (crate-prefixed AND bare) of crate-local GENERIC
+    // structs that are `Send` WHEN their type-args are Send — i.e. rustdoc synthesised a
+    // (possibly conditional `where Ti: Send`) positive auto-`Send` impl for them. Drives
+    // the structural generic-instantiation Send proof: `Base<A1..An>` (a moved async
+    // receiver / Ok output like `Customizable<Resp>`) is Send when `Base` is in this set
+    // AND every `Ai` is provably Send. Built from `SYNTHETIC_SEND_TYPE_IDS` +
+    // `ALL_FIELDS_SEND_TYPE_IDS` (their rendered base names), reset per crate. A struct
+    // with an `Rc`/raw-pointer field is absent (rustdoc emits no positive Send) → its
+    // instantiations stay un-admittable (sound — the async method drops).
+    static SEND_WHEN_ARGS_SEND_NAMES: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
 }
 
 /// [#52 Step 3] Build the all-fields-Send id set. A crate-local struct whose every
@@ -4235,6 +4269,47 @@ fn collect_provably_send_recv_names(
 /// receiver-name set; `&mut` / nested borrows are rejected. Reuses the SAME
 /// `PROVABLY_SEND_OPAQUE_NAMES` set as the param gate too, so a #52-monomorphized
 /// opaque receiver is also admitted.
+/// [WALL-H #87] Structural Send proof for a generic INSTANTIATION `Base<A1,…,An>` — the
+/// moved async receiver / Ok output `Customizable<Resp>` that the name-set gates can't
+/// prove (they reject any `<`). Send when the base struct is Send-WHEN-ARGS-Send
+/// (`SEND_WHEN_ARGS_SEND_NAMES` — rustdoc synthesised a positive, possibly conditional,
+/// auto-`Send` impl for it) AND EVERY type-arg is provably Send (primitive/String, a
+/// frozen-Send opaque, or recursively a Send instantiation). Lifetime args are
+/// Send-irrelevant. CONSERVATIVE: unknown base / any unprovable arg → false → the async
+/// method drops (no E0277 at `tokio::spawn`).
+fn is_generic_instantiation_send(rt: &str) -> bool {
+    let s = rt.trim();
+    if s.starts_with('&') {
+        return false; // a reference shape is handled by the caller's borrow strip.
+    }
+    let Some(open) = s.find('<') else { return false };
+    if !s.ends_with('>') {
+        return false;
+    }
+    let base = s[..open].trim();
+    if base.is_empty() || !SEND_WHEN_ARGS_SEND_NAMES.with(|c| c.borrow().contains(base)) {
+        return false;
+    }
+    let inner = &s[open + 1..s.len() - 1];
+    let args = split_top_level(inner, ',');
+    if args.is_empty() {
+        return false;
+    }
+    args.iter().all(|a| {
+        let a = a.trim();
+        if a.is_empty() {
+            return false;
+        }
+        if a.starts_with('\'') {
+            return true; // lifetime arg — Send-irrelevant
+        }
+        is_async_send_output(a)
+            || PROVABLY_SEND_OPAQUE_NAMES.with(|c| c.borrow().contains(a))
+            || PROVABLY_SEND_RECV_NAMES.with(|c| c.borrow().contains(a))
+            || is_generic_instantiation_send(a)
+    })
+}
+
 fn recv_provably_async_send(recv_rust: &str) -> bool {
     let rt = recv_rust.trim();
     if rt.is_empty() {
@@ -4250,6 +4325,13 @@ fn recv_provably_async_send(recv_rust: &str) -> bool {
         Some(_) => return false, // &mut receiver → never admit
         None => rt.strip_prefix('&').unwrap_or(rt).trim(),
     };
+    // [WALL-H #87] A generic-instantiation receiver/param (`Customizable<Resp>`) is
+    // admitted by the structural Send proof when its base is Send-when-args-Send and
+    // every type-arg is provably Send. (Applies to the by-value owned form; a borrowed
+    // `&Base<..>` strips to the same `base` here.)
+    if is_generic_instantiation_send(base) {
+        return true;
+    }
     if base.is_empty() || base.starts_with('&') {
         return false;
     }
@@ -5302,15 +5384,25 @@ fn is_provably_send_opaque_return(rt: &str) -> bool {
     if s.starts_with('&') {
         return false;
     }
-    // Reject generics / arrays / whitespace-containing compound types.
-    if s.contains('<') || s.contains('[') || s.contains(' ') || s.contains(',') {
+    // [WALL-H #87] A generic-instantiation OUTPUT (`Customizable<Resp>` /
+    // `Wrapper<Resp>`) is admitted by the structural Send proof BEFORE the `<`-reject.
+    if s.contains('<') {
+        return is_generic_instantiation_send(s);
+    }
+    // Reject arrays / whitespace-containing compound types.
+    if s.contains('[') || s.contains(' ') || s.contains(',') {
         return false;
     }
     let last = s.rsplit("::").next().unwrap_or(s);
-    PROVABLY_SEND_RECV_NAMES.with(|c| {
+    let in_recv = PROVABLY_SEND_RECV_NAMES.with(|c| {
         let b = c.borrow();
         b.contains(s) || b.contains(last)
-    })
+    });
+    // [WALL-H #87] Also admit a frozen-Send opaque OUTPUT registered in the OPAQUE set
+    // (a Self-mono'd concrete `Resp` — the stripe `send` Ok payload after T resolves).
+    // FULL-PATH match only (guardian B-1): the OPAQUE set holds cross-crate concretes by
+    // owning-crate path; a bare-last match would admit a sibling's same-named !Send type.
+    in_recv || PROVABLY_SEND_OPAQUE_NAMES.with(|c| c.borrow().contains(s))
 }
 
 /// Async-output sequence variant: `Vec<T>` / `&[T]` / `[T; N]` / `&[T; N]`
@@ -9509,9 +9601,48 @@ fn impl_self_mono_subst(
         let bounds = param_bounds.get(var)?; // free var not an impl param → drop.
         let trait_key = single_concrete_impl_trait_key(bounds)?; // not our shape → drop.
         let concrete = concrete_for_unique_impl(&trait_key)?; // 0/>1 impls → drop.
+        // [WALL-H #87] The Self type-arg resolved to a concrete (possibly cross-crate).
+        // Register its Send verdict into PROVABLY_SEND_OPAQUE_NAMES so the structural
+        // generic-instantiation Send proof (`is_generic_instantiation_send`) can prove
+        // `Base<ThisArg>: Send` for an async method whose moved receiver / Ok output is
+        // the mono'd Self (stripe `send<C>(self: Customizable<Resp>) -> Result<Resp,_>`).
+        register_self_mono_send(&trait_key, &concrete);
         subst.insert(var.clone(), concrete);
     }
     Some(subst)
+}
+
+/// [WALL-H #87] Register a Self-mono'd concrete's Send verdict into
+/// `PROVABLY_SEND_OPAQUE_NAMES` (by its rendered owning-crate public path) IFF provably
+/// Send. Cross-crate → WALL-G's FROZEN `send_ok`; same-crate → the concrete id + the
+/// three Send sources. Unproven → unregistered (the structural Send proof then fails →
+/// the async method drops; sound).
+fn register_self_mono_send(trait_key: &str, concrete: &serde_json::Value) {
+    if let Some(xc) = xc_unique_for_trait_key(trait_key) {
+        let same_crate_unique = TRAIT_CONCRETE_IMPLS
+            .with(|c| c.borrow().get(trait_key).map(|v| v.len() == 1).unwrap_or(false));
+        if !same_crate_unique {
+            if xc.send_ok && !xc.self_public_path.is_empty() {
+                PROVABLY_SEND_OPAQUE_NAMES.with(|c| {
+                    c.borrow_mut().insert(xc.self_public_path);
+                });
+            }
+            return;
+        }
+    }
+    let Some(id) = concrete.get("resolved_path").and_then(|rp| rp.get("id")) else { return };
+    let id_str = item_id_to_str(id);
+    let send_ok = EXPLICIT_SEND_TYPE_IDS.with(|s| s.borrow().contains(&id_str))
+        || ALL_FIELDS_SEND_TYPE_IDS.with(|s| s.borrow().contains(&id_str))
+        || SYNTHETIC_SEND_TYPE_IDS.with(|s| s.borrow().contains(&id_str));
+    if send_ok {
+        let rendered = rustdoc_type_to_rust_str(concrete);
+        if !rendered.is_empty() {
+            PROVABLY_SEND_OPAQUE_NAMES.with(|c| {
+                c.borrow_mut().insert(rendered);
+            });
+        }
+    }
 }
 
 /// [WALL-F / #81 (b), invariant A] True if a projected trait default method has a
@@ -10159,6 +10290,35 @@ mod tests {
         assert!(!recv_provably_async_send("&siblingcrate::Client"));
         // Bare `Client` alone is no longer enough to admit an opaque.
         assert!(!recv_provably_async_send("&Client"));
+        PROVABLY_SEND_OPAQUE_NAMES.with(|c| c.borrow_mut().clear());
+    }
+
+    // [WALL-H #87] The structural generic-instantiation Send proof: `Base<Args>` is Send
+    // only when the base is Send-when-args-Send AND every type-arg is provably Send. A
+    // `!Send` arg (absent from the proven-Send sets) → the instantiation is NOT Send (the
+    // async method drops; no E0277 at tokio::spawn).
+    #[test]
+    fn wallh_generic_instantiation_send_requires_base_and_all_args() {
+        SEND_WHEN_ARGS_SEND_NAMES.with(|c| c.borrow_mut().clear());
+        PROVABLY_SEND_OPAQUE_NAMES.with(|c| c.borrow_mut().clear());
+        PROVABLY_SEND_RECV_NAMES.with(|c| c.borrow_mut().clear());
+        SEND_WHEN_ARGS_SEND_NAMES.with(|c| {
+            c.borrow_mut().insert("req_crate::Customizable".to_string());
+        });
+        PROVABLY_SEND_OPAQUE_NAMES.with(|c| {
+            c.borrow_mut().insert("client_crate::Resp".to_string());
+        });
+        // base Send-when-args-Send + arg provably Send → Send.
+        assert!(is_generic_instantiation_send("req_crate::Customizable<client_crate::Resp>"));
+        // primitive arg → Send.
+        assert!(is_generic_instantiation_send("req_crate::Customizable<u32>"));
+        // arg NOT proven Send (absent from every set) → NOT Send.
+        assert!(!is_generic_instantiation_send("req_crate::Customizable<other::NotSend>"));
+        // base NOT Send-when-args-Send (absent) → NOT Send even with a Send arg.
+        assert!(!is_generic_instantiation_send("other::Unknown<u32>"));
+        // non-generic → not this predicate's job.
+        assert!(!is_generic_instantiation_send("client_crate::Resp"));
+        SEND_WHEN_ARGS_SEND_NAMES.with(|c| c.borrow_mut().clear());
         PROVABLY_SEND_OPAQUE_NAMES.with(|c| c.borrow_mut().clear());
     }
 

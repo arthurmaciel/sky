@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -912,6 +912,58 @@ run_cross_crate_impl() {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 92-ffi-generic-self-open-t — WALL-H (#87): async generic-Self open-T `send`. req-crate
+# defines generic `impl<T: Decode> Customizable<T>` with async `send<C: Wire>` (assoc-type
+# Err) + sync `send_blocking`; client-crate holds the unique `impl Wire for RealClient`
+# (WALL-G resolves C) + concrete `Resp: Decode` (T resolves to it). WALL-H binds the async
+# `send`: the moved receiver `Customizable<Resp>` is proven Send STRUCTURALLY (base
+# Send-when-args-Send + Resp frozen-Send) and the `Resp` Ok output via the frozen-Send
+# OPAQUE set. Built under FORCED SKY_DCE=0. Two-crate staging (like 91).
+# POSITIVE: send_from_customizable binds (Task Error Resp) + runs "decoded:hi".
+# ─────────────────────────────────────────────────────────────────────────────
+run_generic_self_open_t() {
+  local base=92-ffi-generic-self-open-t
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+  [ -f "$src/setup.sh" ]     || { _fail "$base (no setup.sh)"; return; }
+
+  bash "$src/setup.sh" >/tmp/ffi-fixture-"$base".setup.log 2>&1 || {
+    _fail "$base (setup.sh failed — see /tmp/ffi-fixture-$base.setup.log)"; return; }
+  local reqDir="$HOME/.cache/sky/$base-req" cliDir="$HOME/.cache/sky/$base-client"
+  [ -d "$reqDir/.git" ] && [ -d "$cliDir/.git" ] || {
+    _fail "$base (expected staged crates at $reqDir + $cliDir)"; return; }
+
+  local wd; wd="$(mktemp -d "${TMPDIR:-/tmp}/ffi-fixture-$base.XXXXXX")" || { _fail "$base (mktemp)"; return; }
+  mkdir -p "$wd/src"
+  cp -r "$src/src/." "$wd/src/" 2>/dev/null || true
+  cp "$src/sky.toml" "$wd/sky.toml" || { _fail "$base (cp sky.toml)"; rm -rf "$wd"; return; }
+  local escR escC
+  escR="$(printf 'file://%s' "$reqDir" | sed -e 's/[\/&]/\\&/g')"
+  escC="$(printf 'file://%s' "$cliDir" | sed -e 's/[\/&]/\\&/g')"
+  sed -i -E "s|file://[^\"]*/$base-req|$escR|g;   s|file://[^\"]*/$base-client|$escC|g" "$wd/sky.toml" \
+    || { _fail "$base (sed sky.toml)"; rm -rf "$wd"; return; }
+
+  local bin; bin="$(SKY_DCE=0 build_fixture "$wd")" || {
+    _fail "$base (build failed — async generic-Self send cargo-fail? E0277 non-Send future?)"; rm -rf "$wd"; return; }
+
+  local binds="$wd/sky-out/rust/src/req_crate_bindings.rs"
+  if ! rg -q 'fn req_crate_send_from_customizable' "$binds" 2>/dev/null; then
+    _fail "$base: async 'send' did NOT bind (WALL-H structural Send proof broken)"; rm -rf "$wd"; return
+  fi
+
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (async generic-Self send<C> on Customizable<Resp> bound+ran 'decoded:hi' · SKY_DCE=0 cargo-clean · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
 # ── Drive ────────────────────────────────────────────────────────────────────
 FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -932,6 +984,7 @@ for n in "${FIXTURES[@]}"; do
     89-ffi-static-str-into)   run_static_str_into ;;
     90-ffi-default-trait-method-mono) run_default_trait_mono ;;
     91-ffi-cross-crate-impl)  run_cross_crate_impl ;;
+    92-ffi-generic-self-open-t) run_generic_self_open_t ;;
     *)                        run_basic "$n" ;;
   esac
 done
