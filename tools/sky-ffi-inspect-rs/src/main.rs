@@ -9172,6 +9172,33 @@ fn parametric_sky_type(self_sky: &str, tyvars: &[String]) -> String {
     }
 }
 
+/// [WALL-I] Last path segments that BOTH Sky-rendering paths keep type args for —
+/// i.e. they are Sky-PARAMETRIC and their args become real Sky type application,
+/// so collapsing them to bare would itself create a divergence. EVERYTHING ELSE —
+/// a crate-local opaque generic struct (`Customizable<Resp>`, …) — renders BARE on
+/// the receiver path (`resolve_path_to_sky`'s `_` arm drops its args, treating the
+/// type as an opaque nominal), so the parametric-RETURN path (`sky_of_typeref`)
+/// must drop them too for a producer's return to unify with a consumer's receiver
+/// of the same Rust type.
+///
+/// NOTE the two paths render a container's HEAD differently (each internally
+/// consistent): `sky_of_typeref` keeps the literal last segment (`Vec t`,
+/// `HashMap k v`) while `resolve_path_to_sky` remaps (`List t`, `Dict String v`).
+/// A parametric return and a parametric receiver agree with EACH OTHER; a
+/// parametric value meeting a NON-generic inherent receiver of a container type is
+/// a separate pre-existing cross-path question (out of scope here). This set's only
+/// job is to never collapse a real Sky-container's args — keep it a superset of
+/// every with-args arm of `resolve_path_to_sky`.
+fn is_sky_container_head(last: &str) -> bool {
+    matches!(
+        last,
+        "Vec" | "Option" | "Result" | "SkyResult" | "SkyTask" | "Pin" | "Future"
+            | "Box" | "Arc" | "Rc" | "Mutex" | "RwLock" | "Cell" | "RefCell"
+            | "HashMap" | "BTreeMap" | "IndexMap" | "AHashMap"
+            | "HashSet" | "BTreeSet" | "VecDeque" | "Cow"
+    )
+}
+
 /// Render a `TypeRef` as a Sky type string (parametric — tyvars, not concretes).
 fn sky_of_typeref(tr: &TypeRef, tyvars: &[String], self_sky: &str) -> String {
     match tr {
@@ -9216,6 +9243,22 @@ fn sky_of_typeref(tr: &TypeRef, tyvars: &[String], self_sky: &str) -> String {
                 }
             };
             if args.is_empty() {
+                head
+            } else if !is_sky_container_head(last) {
+                // [WALL-I] A crate-local OPAQUE generic struct (e.g. the stripe
+                // `Customizable<Resp>` / `CustomizableStripeRequest<Customer>`).
+                // The RECEIVER path (`resolve_path_to_sky`'s `_` arm) renders such
+                // a type BARE — the Sky surface treats it as an opaque nominal
+                // (its type arg is an internal Rust detail, never a Sky tyvar).
+                // The parametric-RETURN path MUST agree: a value produced by
+                // `customize -> Customizable<Resp>` flows into a consumer whose
+                // receiver is the SAME Rust type (`send` on `Customizable`). If
+                // the producer renders `Customizable Resp` while the consumer's
+                // receiver renders bare `Customizable`, Sky HM can't unify them
+                // (`Variable type mismatch: Customizable Resp vs Customizable`) —
+                // the binds-but-won't-typecheck class. Render bare to match the
+                // receiver convention. Known containers (Vec/Option/Result/Dict/…)
+                // keep their type application — they ARE Sky-parametric.
                 head
             } else {
                 let parts: Vec<String> = args

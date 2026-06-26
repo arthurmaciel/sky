@@ -17,6 +17,35 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 18:30 — WALL-I customize-chain GREEN end-to-end (#88): Sky-type-rendering consistency fix
+
+**What.** Closed the one separable gap left after the WALL-I MECHANISM (provided-method
+projection + `Self::Output` resolution, spec §7): a crate-local OPAQUE generic struct rendered
+INCONSISTENTLY across the two Sky-rendering paths. `customize`'s RETURN rendered
+`Customizable<Resp>` parametrically (`Customizable Resp`) via `sky_of_typeref`, while `send`'s
+RECEIVER rendered the SAME Rust type bare (`Customizable`) via `resolve_path_to_sky`'s `_` arm
+(#45 self_sky). Sky HM couldn't unify → `Variable 'cust' type mismatch`, so the chain BOUND at
+the skyi level but never cargo-built.
+
+**Fix.** `sky_of_typeref`'s `TypeRef::Ctor` arm now renders a non-container crate-local opaque
+generic struct BARE (drops args), matching the receiver convention. New `is_sky_container_head`
+guard (superset of every with-args arm of `resolve_path_to_sky`) keeps real Sky containers
+(Vec/Option/Result/Dict/…) rendering with their type application. Over-collapse is fail-safe:
+only ever newly-unifies; any genuine downstream mismatch surfaces as a loud cargo/HM error.
+
+**Result.** `customize : CreateThing -> Result Error Customizable` unifies with
+`send_from_customizable : Customizable -> LocalClient -> Task Error Resp`. Fixture 93 builds+runs
+`chain=decoded:seed [ALL OK]` under SKY_DCE=0; gate-wired (`run_customize_chain`). Full FFI gate
+**39 ok · 0 fail**; 209 inspector unit tests pass. Guardian-final APPROVED (CLEAN), 2 non-blocking
+rewrite-opportunities filed. Customize-chain MECHANISM + rendering now proven end-to-end on the
+synthetic fixture; real async-stripe resource-crate feature surfacing remains for the real-crate proof.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (`is_sky_container_head` + `sky_of_typeref`
+Ctor arm), `runtime-rust/scripts/ffi-fixtures-test.sh` (`run_customize_chain` + 93 in
+ALL_FIXTURES + dispatch arm), spec `2026-06-26-wall-i-stripe-resource-builders.md` §8.
+
+---
+
 ## 2026-06-26 — WALL-H async generic-Self `send` SHIPPED (core) (#87)
 
 The async `send<C: Wire>` on a generic-Self `Customizable<T>` (T resolving to a concrete via

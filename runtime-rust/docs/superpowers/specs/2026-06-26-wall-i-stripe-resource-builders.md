@@ -119,3 +119,36 @@ bare opaque `Customizable` (#45 generic-Self-mono `self_sky`). Sky HM can't unif
 consistently across return + receiver. `resolve_path_to_sky`'s `_` arm already renders it BARE
 (drops args); the parametric-stub return path does not. Contained codegen fix (next session).
 Fixture 93 committed but NOT gate-wired (RED on this consistency until the fix lands).
+
+## 8. SHIPPED — the Sky-type-rendering consistency fix → fixture 93 end-to-end GREEN
+
+The §7 "remaining gap" is CLOSED. `sky_of_typeref`'s `TypeRef::Ctor` arm now renders a
+crate-local OPAQUE generic struct BARE (drops its type args) when the head's last segment is
+NOT a known Sky container — matching `resolve_path_to_sky`'s `_`-arm receiver convention. New
+helper `is_sky_container_head` (a superset of every with-args arm of `resolve_path_to_sky`:
+Vec/Option/Result/SkyResult/SkyTask/Pin/Future/Box/Arc/Rc/Mutex/RwLock/Cell/RefCell/
+HashMap/BTreeMap/IndexMap/AHashMap/HashSet/BTreeSet/VecDeque/Cow) guards the known
+containers so they keep their type application.
+
+Result: `customize : CreateThing -> Result Error Customizable` (bare) now unifies with
+`send_from_customizable : Customizable -> LocalClient -> Task Error Resp` (bare receiver).
+Fixture 93 builds+runs `chain=decoded:seed [ALL OK]` under SKY_DCE=0; gate-wired
+(`run_customize_chain`, `93-ffi-customize-chain` in ALL_FIXTURES). Full FFI gate **39 ok · 0
+fail**; 209 inspector unit tests pass. Guardian-final: APPROVED (CLEAN) — fail-safe by
+construction (over-collapse only ever newly-unifies; any genuine downstream mismatch surfaces
+as a loud cargo/HM error, never silent-wrong); two non-blocking rewrite-opportunities filed:
+
+1. **Cross-path container-head divergence (pre-existing, out of scope).** `sky_of_typeref`
+   renders a container's head literally (`Vec t`, `HashMap k v`) while `resolve_path_to_sky`
+   remaps (`List t`, `Dict String v`). Parametric↔parametric agree; a parametric value meeting
+   a NON-generic inherent receiver of a container type could mismatch (loud). Separate ticket.
+2. **Unify the two head derivations** through one `sky_head_from_ctor_name` helper so submodule
+   same-last-segment opaque structs agree by construction (today they'd mismatch loudly — an
+   under-fix, not a soundness hole). Separate ticket.
+
+### Still open for the stripe arc (the real-crate proof)
+
+The customize-chain MECHANISM + rendering are proven on the synthetic fixture. The real
+async-stripe resource crate still needs its per-resource Cargo feature resolved so
+`Create*` builders + `customize` are visible in rustdoc (§2's KEY SCOPING FINDING — the
+default surface omits them). Re-measure with the resource feature on, then the real-crate proof.
