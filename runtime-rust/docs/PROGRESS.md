@@ -17,6 +17,33 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — MILESTONE: a real FirestoreDb mints from Sky + cargo-builds shim-free; definitive CRUD scoping
+
+Post-WALL-5 measurement (HEAD da939c23, real firestore 0.49). **A Sky program that
+mints `FirestoreDb` via `for_default_project_id () |> Task.run` and calls
+`get_database_path` cargo-builds CLEAN (0 errors, 2.48s)** — the first end-to-end
+shim-free firestore handle from Sky. Bound ground ctors:
+`for_default_project_id : () -> Task Error FirestoreDb` ·
+`with_options : FirestoreDbOptions -> Task Error FirestoreDb`.
+
+**Definitive CRUD drop scoping (3rd measurement, finally against live data — no
+third blocker; every CRUD op maps to a filed wall):**
+
+| firestore op | drop reason (live) | wall |
+|---|---|---|
+| create_obj/update_obj(+_at) | serde-mono-inadmissible: param `I` in `&I` | #65 WALL 3a-&I |
+| get_obj/get_doc/query_obj/delete_by_id(+variants) | `not-bindable: dyn_trait` | #64 WALL 4 |
+| db.fluent() builders | `E0603` private `fluent_api` mod + `trait-method-generic-self` (lifetime-Self) | #68 (new) |
+| FirestoreDbOptions::new(String) | owned-String ctor arg → `&arg0` E0308 | #67 |
+
+Top crate drop histogram now: `trait-method-trait-unreachable` 1333 (std-trait UFCS
+boilerplate on newly-visible types) · `trait-method-generic-self` 570 ·
+`not-bindable` 362 · `unmodellable-bound` 346. The CRUD path specifically is
+dyn_trait + serde-&I — bounded, not the 1333 tail.
+
+**Lesson reinforced (3×): always re-measure the live drop histogram before scoping
+a real-crate wall — the per-op framing drifted twice before this.**
+
 ## 2026-06-26 — WALL 5 (#63, GATING): crate generic-Result-alias see-through → FirestoreDb ground ctor binds
 
 The gating firestore blocker — RESOLVED, and narrower+more general than the
