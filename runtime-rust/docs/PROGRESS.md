@@ -17,6 +17,29 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-25 — firestore coverage measurement (post-walls) + WALL-3 worklist
+
+Empirical re-measure on firestore 0.49.0 (pre-wall inspector `dfea217a` vs both
+walls `8a2f1738`, run directly on the crate):
+
+| Metric | BEFORE | AFTER |
+|---|---|---|
+| Total bound functions | 309 | **1041** (3.4×) |
+| Generic params bound | 72 | 237 |
+| `trait-method-trait-unreachable` | 2054 | 1333 (−721; remainder = std-trait UFCS boilerplate on newly-visible types) |
+| `unmodellable-bound AsRef` | 11 | **0** (WALL 2 cleared the class) |
+| `FirestoreDb` methods | 0 | **38+** (options/query-builder/cursors/aggregations/error ctors) |
+
+**Walls delivered the predicted unblock** (path resolution + AsRef), but real CRUD
+is NOT yet end-to-end shim-free. Residual blockers (filed #59/#60/#61, "WALL 3"):
+1. **#59** serde `Serialize`/`Deserialize` on `get_obj`/`create_obj` (27+5 drops) —
+   #47's serde→Value reduction doesn't compose with the concrete-Self trait-method
+   path (the same routing class #58 fixed for AsRef). Highest value (the data path).
+2. **#60** `not-bindable borrowed_ref` on `get_doc`/`delete_by_id` (169 drops).
+3. **#61** `FirestoreDb::new` async constructor unbound (#44 async + #52 opaque).
+Together #59+#60+#61 make a real firestore get/create reachable from Sky.
+Lower-priority structural tail: 570 `trait-method-generic-self`, 260 tonic `Policy`.
+
 ## 2026-06-25 — #57/#58 firestore CRUD walls: nested-glob path resolution + AsRef<str>→String
 
 **Unlock:** the two remaining structural blockers to shim-free firestore CRUD
