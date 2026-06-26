@@ -141,6 +141,15 @@ struct Generic {
     /// unmodellable bound here is defense-in-depth — Wall #2 still rejects it).
     bounds: std::collections::BTreeMap<String, Vec<String>>,
     call: Call,
+    /// [#58 WALL 2] True when at least one type-param was eliminated from
+    /// `params` / `order` by the mono pre-pass (resolve_param_bounds resolved
+    /// it to a concrete type).  Distinguishes the AsRef<str>+Send → String
+    /// case (fully-mono via the WALL 2 pre-pass; `params` becomes empty) from
+    /// a method that was never generic in the first place (assoc-type-only;
+    /// `params` also empty but NO mono pre-pass ran).  Only the first case
+    /// should trigger the WALL 2 mono-routing branch.
+    #[serde(skip)]
+    mono_resolved: bool,
 }
 
 /// One Rust call expression as a structure (parse-don't-validate). `kind` is
@@ -1393,7 +1402,13 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     // still bare-and-unknown is unresolved.  `to_string` bridges are exempt —
     // FfiGen emits them with an `impl std::fmt::Display` bound and never spells
     // the receiver type.
-    functions.retain(|f| f.method_name == "to_string" || fn_types_nameable(f));
+    // Functions with `generic: Some(_)` are routed to `sky_ffi_generics.rs` by
+    // Haskell's FfiGen — they are NEVER emitted by `emitRustFnSimple` in
+    // `_bindings.rs`.  `fn_types_nameable` guards the _bindings.rs path (ensuring
+    // the receiver type can be spelled in the wrapper).  It must NOT filter generic
+    // functions whose receiver may carry a synthetic type-token like `Doc<M>` —
+    // `sky_ffi_generics.rs` synthesizes those wrappers differently (UFCS).
+    functions.retain(|f| f.method_name == "to_string" || f.generic.is_some() || fn_types_nameable(f));
 
     // Sized gate (P4): drop methods whose RECEIVER type is never produced by
     // value anywhere in the crate — a strong "unsized / un-constructible" signal
@@ -1502,7 +1517,13 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
         // uses the receiver merely as a call namespace (no by-value `arg0`), so
         // it's exempt even when the type is never produced by value.
         let is_instance = f.params.first().map(|p| p.name == "self").unwrap_or(false);
-        !is_instance || owned_producible.contains(recv)
+        // [#58 WALL 2] Trait-mono'd methods carry a dummy `<M>` suffix on
+        // `recv_rust_type` to trigger Haskell's `hasGenericRecvParam` skip in
+        // `_bindings.rs` (avoids E0659 duplicate wrappers). Strip the dummy
+        // suffix before the Sized check so `owned_producible` lookup uses the
+        // REAL base type (`nested_glob_crate::Doc` not `nested_glob_crate::Doc<M>`).
+        let recv_base = recv.split('<').next().unwrap_or(recv).trim_end();
+        !is_instance || owned_producible.contains(recv) || owned_producible.contains(recv_base)
     });
 
     if functions.is_empty() && !errors.is_empty() {
@@ -3561,6 +3582,24 @@ const STD_TRAIT_CANONICAL: &[(&str, &str)] = &[
     ("std::string::ToString", "ToString"),
     ("core::str::FromStr", "FromStr"),
     ("std::str::FromStr", "FromStr"),
+    // Conversion traits — #58 WALL 2: bound_to_concrete resolves AsRef<str> → String
+    // and guards against crate-local look-alikes via std_trait_tag.
+    ("core::convert::AsRef", "AsRef"),
+    ("std::convert::AsRef", "AsRef"),
+    ("core::borrow::Borrow", "Borrow"),
+    ("std::borrow::Borrow", "Borrow"),
+    ("core::convert::Into", "Into"),
+    ("std::convert::Into", "Into"),
+    ("core::convert::From", "From"),
+    ("std::convert::From", "From"),
+    // Marker traits — #58 WALL 2: Send on a param is a pure marker (resolve_param_bounds
+    // skips it via is_marker_bound), but std_trait_tag must recognise it for future
+    // guard extensions and for the BoundSource "known std" fact.
+    ("core::marker::Send", "Send"),
+    ("core::marker::Sync", "Sync"),
+    ("core::marker::Sized", "Sized"),
+    ("core::marker::Copy", "Copy"),
+    ("core::marker::Unpin", "Unpin"),
 ];
 
 /// Build the `STD_TRAIT_BY_ID` map: for every `doc["paths"]` entry whose `kind`
@@ -3711,11 +3750,19 @@ fn std_trait_tag(trait_node: &serde_json::Value) -> Option<&'static str> {
         let key = item_id_to_str(id);
         // (1) Confirmed std by resolved canonical path.
         if let Some(tag) = STD_TRAIT_BY_ID.with(|m| m.borrow().get(&key).copied()) {
+            if std::env::var("SKY_FFI_DBG").is_ok() {
+                eprintln!("[STD_TRAIT_TAG] id={key:?} path={:?} → STD_TRAIT_BY_ID hit", trait_node.get("path"));
+            }
             return Some(tag);
         }
         // (2) Confirmed crate-local → NOT std (the #25 defect's wrong-admit case).
-        let is_local = LOCAL_TYPE_IDS.with(|s| s.borrow().contains(&key))
-            || REACHABLE_PATHS.with(|c| c.borrow().contains_key(&key));
+        let in_local_type_ids = LOCAL_TYPE_IDS.with(|s| s.borrow().contains(&key));
+        let in_reachable_paths = REACHABLE_PATHS.with(|c| c.borrow().contains_key(&key));
+        let is_local = in_local_type_ids || in_reachable_paths;
+        if std::env::var("SKY_FFI_DBG").is_ok() {
+            eprintln!("[STD_TRAIT_TAG] id={key:?} path={:?} in_local_type_ids={in_local_type_ids} in_reachable_paths={in_reachable_paths}",
+                trait_node.get("path"));
+        }
         if is_local {
             return None;
         }
@@ -4940,7 +4987,10 @@ fn vec_u8_node() -> serde_json::Value {
 }
 
 fn string_node() -> serde_json::Value {
-    serde_json::json!({ "resolved_path": { "name": "String", "path": "String", "id": 0, "args": null } })
+    // Use {"primitive":"str"} so type_to_typeref → TRPrim "String" → Haskell
+    // renderTypeRef → bare "String" (valid Rust).  A {"resolved_path":{id:0}}
+    // would produce TRCtor "::String" [] → "::String" which is E0412.
+    serde_json::json!({ "primitive": "str" })
 }
 
 fn i64_node() -> serde_json::Value {
@@ -5273,6 +5323,19 @@ fn bound_to_concrete(bound: &serde_json::Value, pos: BoundPos) -> Option<serde_j
         // targets (str/Path/OsStr/String/PathBuf/Vec<u8>/slice) keep the v2
         // recursive resolution.
         "AsRef" | "Borrow" | "Into" | "From" => {
+            // [#58 constraint 1] Source-fix: gate on std_trait_tag BEFORE the
+            // last-segment name match — mirrors the `Display|ToString` arm above.
+            // A crate-local `trait AsRef<T>` (or any look-alike with the same last
+            // segment) has crate_id 0 → std_trait_tag returns None → we fall through
+            // to the `_ => None` arm below, never substituting String for a
+            // crate-local trait. This closes BOTH crate-local (id 0) AND
+            // foreign-look-alike (id > 0 but not in STD_TRAIT_BY_ID) wrong-admits.
+            // Defense-in-depth: the `classify_param_bound` `!is_crate_local` guard
+            // remains, but this is the authoritative gate.
+            match std_trait_tag(tr) {
+                Some("AsRef") | Some("Borrow") | Some("Into") | Some("From") => {}
+                _ => return None,
+            }
             let arg = args.first()?;
             if let Some(p) = arg.get("primitive").and_then(|p| p.as_str()) {
                 match (name, p) {
@@ -6474,7 +6537,7 @@ fn try_parametric_stub(
     let host_abi_rust = host_abi_is_rust(fn_data);
     // The Sky-facing TYVARS = used params MINUS the consumed closure/iterator
     // params.
-    let tyvars: HashSet<String> = used
+    let mut tyvars: HashSet<String> = used
         .iter()
         .filter(|u| !closure_param_bound.contains_key(*u) && !iter_param_bound.contains_key(*u))
         .cloned()
@@ -6503,6 +6566,60 @@ fn try_parametric_stub(
             return Err(GenericDrop::NotBindable(format!("undeclared type-var `{u}`")));
         }
     }
+    // ── WALL 2 MONO PRE-PASS (#58, constraints 2/3/4/5) ─────────────────────
+    // Before full_union_bounds / BoundCrossImpl: for each USED tyvar, attempt to
+    // monomorphize via resolve_param_bounds. A param whose entire bound set
+    // collapses to ONE concrete type (markers skipped, conflicts → None) is
+    // ELIMINATED from tyvars/order and substituted in the sig. This separates
+    // "fully-resolvable → monomorphize" from "genuinely-generic → parametric stub",
+    // so the BoundCrossImpl gate only fires on tyvars that truly can't resolve.
+    //
+    // Constraint 5 (multi-bound, per-param): resolve_param_bounds decides over ALL
+    // bounds of ONE param — `AsRef<str>+Serialize` → None (Serialize unresolvable)
+    // → method DROPS (never substitute AsRef and silently drop Serialize). The
+    // `AsRef<str>+AsRef<Path>` conflict → None → also drops.
+    //
+    // Constraint 7 (no panic/index/unwrap): uses .get()/if let/match throughout.
+    if std::env::var("SKY_FFI_DBG").is_ok() {
+        eprintln!("[MONO-PRE] method={method_name:?} tyvars={:?} all_bounds_keys={:?}",
+            tyvars, all_bounds.keys().collect::<Vec<_>>());
+        for (k, v) in &all_bounds {
+            eprintln!("[MONO-PRE]   bounds[{k:?}] = {v:?}");
+        }
+    }
+    let mut mono_map: HashMap<String, serde_json::Value> = HashMap::new();
+    {
+        let mut to_remove: Vec<String> = Vec::new();
+        for tv in &tyvars {
+            let empty_bounds: Vec<serde_json::Value> = Vec::new();
+            let bounds_for = all_bounds.get(tv).unwrap_or(&empty_bounds);
+            if let Some(concrete) = resolve_param_bounds(bounds_for, BoundPos::Param) {
+                // Constraint 4: census — every occurrence of this param in the fn
+                // sig must be in an admissible position (by-value param, owned
+                // return, Vec<T>/Result<T,_>/Option<T> wrapper). Reuses the same
+                // serde census walker (position semantics are identical: we're
+                // substituting an owned String, not serde_json::Value, but the
+                // admissibility predicate — no &T, no tuple, no map-value — is the
+                // same). Inadmissible → drop the whole method.
+                if !fn_serde_param_all_admissible(fn_data, tv) {
+                    return Err(GenericDrop::UnmodellableBound(
+                        format!("mono-inadmissible: param `{tv}` occurs in a non-owned position"),
+                    ));
+                }
+                mono_map.insert(tv.clone(), concrete);
+                to_remove.push(tv.clone());
+            }
+            // If resolve_param_bounds returns None: leave this tyvar in tyvars →
+            // full_union_bounds + BoundCrossImpl will decide (drop or parametric).
+        }
+        // Constraint 3: remove mono'd params from tyvars and order so they never
+        // reach the BoundCrossImpl gate and never emit a turbofish slot.
+        for tv in &to_remove {
+            tyvars.remove(tv);
+        }
+        order.retain(|n| !to_remove.contains(n));
+    }
+
     // [#48-R2] Blanket-impl gate: if the METHOD has NO own generic type-params
     // but DOES have used tyvars, they all originate from `impl_generics` (the
     // blanket impl's own `<T: Bound>` — for example `impl<T: Clone> ToOwned for T`).
@@ -6557,6 +6674,20 @@ fn try_parametric_stub(
             }
         }
     }
+
+    // ── MONO PRE-PASS substitution (constraint 4 / #58) ─────────────────────
+    // Substitute mono'd params into ALL sig positions (args, return) so
+    // type_to_typeref never encounters a {generic:S} that is no longer in
+    // param_idx. Constraint 8: String is passed BY VALUE (String: AsRef<str>
+    // satisfies the host directly — no .as_str() emitted).
+    // The shadowing `sig` mirrors the assoc-projection substitution above.
+    let sig_mono_owned: serde_json::Value;
+    let sig: &serde_json::Value = if mono_map.is_empty() {
+        sig
+    } else {
+        sig_mono_owned = subst_generic_json(sig, &mono_map, BoundPos::Param);
+        &sig_mono_owned
+    };
 
     // Build the call AST.
     let inputs = sig["inputs"].as_array().cloned().unwrap_or_default();
@@ -6724,6 +6855,10 @@ fn try_parametric_stub(
             // inherent impl (byte-identical to a pre-#21 stub).
             trait_qualifier: trait_ctx.map(|tc| tc.qualifier.clone()),
         },
+        // [#58 WALL 2]: true iff at least one type-param was resolved by the
+        // mono pre-pass.  Distinguishes "fully mono because AsRef<str>+Send
+        // resolved to String" from "fully mono because never generic".
+        mono_resolved: !mono_map.is_empty(),
     })
 }
 
@@ -7307,6 +7442,84 @@ fn parametric_function(
     // inherent `arg0.method()` form, the only correct render (no qualifier
     // exists).
     let is_trait_method = generic.call.trait_qualifier.is_some();
+    // [#58 WALL 2 MONO]: a WALL 2 mono is one where the mono pre-pass
+    // ELIMINATED type-params that originally existed (`mono_resolved = true`),
+    // leaving `params` empty.  This is distinct from a method that was NEVER
+    // generic at all (assoc-type-only: `params` also empty, `mono_resolved =
+    // false`).  Only the first case triggers the WALL 2 routing below.
+    let is_wall2_mono = generic.mono_resolved && generic.params.is_empty();
+
+    // [#58 WALL 2 MONO] Fully-monomorphised via the pre-pass: all tyvars
+    // resolved to concrete types.  Route to the correct non-generic emission
+    // to avoid E0659 (duplication between _bindings.rs and sky_ffi_generics.rs)
+    // and E0425 (wrong free-function call from _bindings.rs for trait methods):
+    //
+    // INHERENT mono: drop `generic` entirely.  The Haskell emitter sees
+    //   `generic = None` → no sky_ffi_generics.rs entry at all.  The regular
+    //   `_pkgFns` path in _bindings.rs already emits the correct
+    //   `arg0.method(&arg)` form via `isInstance` (recv_type non-empty +
+    //   method_name non-empty + first param "self").
+    //
+    // TRAIT mono: keep `generic` so sky_ffi_generics.rs emits the UFCS call
+    //   (`<Self as Trait>::method(&arg0, arg)`).  Set `recv_rust_type` to a
+    //   dummy `<M>`-suffixed form to trigger `hasGenericRecvParam=true` in
+    //   Haskell's `emitRustFnSimple`.  Also keep `method_name` non-empty so
+    //   `isInstance` fires (first param is "self" + method_name non-empty +
+    //   recv_type non-empty).  The combined condition
+    //   `(isInstance || isStaticFn) && hasGenericRecvParam` evaluates True →
+    //   `_bindings.rs` emits an empty body (no duplication, no E0425).
+    if is_wall2_mono {
+        if !is_trait_method {
+            // Inherent mono: emit as regular function, no generic data.
+            return Some(Function {
+                name: method_name.to_string(),
+                params,
+                results,
+                effect: "pure".into(),
+                exported: true,
+                recv_type: recv_sky_parametric.clone(),
+                recv_rust_type: self_rust.to_string(),
+                method_name: method_name.to_string(),
+                generic: None,
+                ..Default::default()
+            });
+        } else {
+            // Trait mono: keep generic for sky_ffi_generics.rs UFCS, but use a
+            // dummy recv_rust_type with <M> to trigger hasGenericRecvParam skip
+            // in _bindings.rs.  method_name must be non-empty (so isInstance
+            // fires with the "self" first-param) to satisfy the skip condition.
+            return Some(Function {
+                name: method_name.to_string(),
+                params,
+                results,
+                effect: "pure".into(),
+                exported: true,
+                recv_type: recv_sky_parametric.clone(),
+                recv_rust_type: format!("{}<M>", self_rust),
+                method_name: method_name.to_string(),
+                generic: Some(generic),
+                ..Default::default()
+            });
+        }
+    }
+
+    // Non-mono (still has free tyvars) — existing logic:
+    //
+    // [#58 WALL 2] For trait methods, `method_name` is LEFT EMPTY so neither
+    // `isInstance` nor `isStaticFn` fires in the Haskell wrapper generator (the
+    // call is emitted from `generic.call.traitQualifier`, not `arg0.method()`).
+    // BUT `recv_type` IS set so `wrapperRefName` appends `_from_<recv>` for
+    // disambiguation — `op_trait_from_doc` rather than bare `op_trait`.
+    // `out_recv_rust` is set to the full Rust path for UFCS resolution (pre-existing
+    // inherent path; trait methods don't need it because the UFCS qualifier is baked
+    // into `generic.call.traitQualifier`).
+    // [C-4 codegen / #21]: a TRAIT-method parametric stub (non-fully-mono path)
+    // MUST leave `recv_type` / `method_name` EMPTY so the Sky compiler routes it
+    // ONLY through `sky_ffi_generics.rs` (UFCS) and does NOT also emit an
+    // inherent `arg0.m()` duplicate wrapper (E0659 / E0599).  The
+    // `is_wall2_mono` branch above already handles the fully-mono trait case
+    // (setting recv_type + dummy <M> recv_rust_type for the `hasGenericRecvParam`
+    // skip gate in Haskell).  An inherent method (no qualifier) KEEPS them.
     let (out_recv_type, out_recv_rust, out_method_name) = if is_trait_method {
         (String::new(), String::new(), String::new())
     } else {
@@ -7319,7 +7532,9 @@ fn parametric_function(
     // concrete type args (trait_qualifier.0 contains `<…>`), derive a lowercase
     // last-segment suffix from the self path and embed it directly in `name`:
     //   `::tm::Holder<i64>` → last segment before `<` → `holder` → `area_from_holder`
-    // Bare-named Self (Circle, no `<`) is unaffected (no suffix added).
+    // Bare-named Self (Circle, no `<`) is unaffected (no suffix added here;
+    // the WALL 2 mono branch above sets recv_type → `wrapperRefName` handles
+    // the `_from_doc` suffix via the existing recv_type non-empty path).
     let emitted_name = if is_trait_method {
         if let Some((self_path, _)) = &generic.call.trait_qualifier {
             if self_path.contains('<') {
@@ -9516,6 +9731,7 @@ mod tests {
                 iter_adapters: vec![],
                 trait_qualifier: None,
             },
+            mono_resolved: false,
         };
         let v = serde_json::to_value(&g).unwrap();
         assert_eq!(v["params"], serde_json::json!(["K", "V"]));

@@ -1,11 +1,17 @@
 module Main exposing (main)
 
--- 75-ffi-nested-glob-asref: WALL 1 proof (nested private-module glob path resolution).
+-- 75-ffi-nested-glob-asref: WALL 1 + WALL 2 proof fixture.
 --
--- WALL 1 target: Sup is reachable ONLY through two levels of private modules:
+-- WALL 1 target: Sup/Doc reachable ONLY through two levels of private modules:
 --   crate root → mod inner (private) + pub use inner::* →
 --   inner/mod.rs → mod deep (private) + pub use deep::* →
---   inner/deep.rs → pub struct Sup
+--   inner/deep.rs → pub struct Sup / pub trait Op / pub struct Doc
+--
+-- WALL 2 — POSITIVE-INHERENT: Sup::op<S: AsRef<str>+Send> → String
+--   Inherent method, A-path (resolve_generics).
+--
+-- WALL 2 — POSITIVE-TRAIT: Doc::op_trait<S: AsRef<str>+Send> → String
+--   Trait method (concrete Self), B-path (try_parametric_stub mono pre-pass).
 --
 -- Control (one level, already works pre-fix):
 --   Inner lives in inner/mod.rs directly (one private level glob)
@@ -13,7 +19,10 @@ module Main exposing (main)
 -- Collision (C2): Dual is in both nested_glob_crate::vis::Dual AND
 --   nested_glob_crate::Dual (via pub use vis::*); insert_shorter picks shorter.
 --
--- Negative (C1): Hidden is pub(crate) in inner/deep.rs — must NOT bind.
+-- Negatives: op_neg (AsRef+Serialize) and op_ambig (AsRef<str>+AsRef<[u8]>)
+--   must be ABSENT from bindings (dropped at FFI-inspector layer).
+--   op_ambig uses AsRef<[u8]> (→ Vec<u8>) to create a genuine conflict with
+--   AsRef<str> (→ String); resolve_param_bounds returns None on the conflict.
 
 import Sky.Core.Prelude exposing (..)
 import Sky.Core.Task as Task
@@ -79,9 +88,51 @@ checkDual =
             Task.fail e
 
 
+-- WALL 2: POSITIVE-INHERENT — Sup::op (A-path / resolve_generics)
+checkOpInherent : Task Error ()
+checkOpInherent =
+    case G.new_from_sup 42 of
+        Ok sup ->
+            case G.op_from_sup sup "!" of
+                Ok s ->
+                    if s == "42!" then
+                        println "op_inherent=42!"
+
+                    else
+                        Task.fail (Error.unexpected ("op_inherent=UNEXPECTED " ++ s))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+
+-- WALL 2: POSITIVE-TRAIT — Doc::op_trait (B-path / try_parametric_stub mono pre-pass)
+checkOpTrait : Task Error ()
+checkOpTrait =
+    case G.new_from_doc 42 of
+        Ok doc ->
+            case G.op_trait_from_doc doc "!" of
+                Ok s ->
+                    if s == "42!" then
+                        println "op_trait=42!"
+
+                    else
+                        Task.fail (Error.unexpected ("op_trait=UNEXPECTED " ++ s))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+
 main : Task Error ()
 main =
     checkInner
         |> Task.andThen (\_ -> checkSup)
         |> Task.andThen (\_ -> checkDual)
+        |> Task.andThen (\_ -> checkOpInherent)
+        |> Task.andThen (\_ -> checkOpTrait)
         |> Task.andThen (\_ -> println "[ALL OK]")

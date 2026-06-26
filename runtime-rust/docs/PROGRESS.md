@@ -17,6 +17,53 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-25 — #57/#58 firestore CRUD walls: nested-glob path resolution + AsRef<str>→String
+
+**Unlock:** the two remaining structural blockers to shim-free firestore CRUD
+binding. Both guardian-reviewed (design + final), in `tools/sky-ffi-inspect-rs`.
+
+**WALL 1 (#57) — nested private-module glob path resolution.** `collect_reachable_paths`
+only registered trait support types ONE private-module level deep; firestore hides
+them two (`lib → mod db → mod get → FirestoreGetByIdSupport`), so the support traits
+never entered REACHABLE_PATHS → every method dropped `trait-method-trait-unreachable`
+(~2054 drops). Replaced the bounded one-level glob handler with a recursive
+`walk_module_with_path` threading the public path prefix through `pub use glob`
+chains into private targets. Guardian constraints: C1 type-registration gated on
+`is_public(it)` (no E0603 over-registration — rustdoc strips `pub(crate)` globs
+anyway); C3 `seen` keyed on `(mid, mp)` pairs (deterministic, terminates as `mp`
+passes unchanged through globs); renamed-re-export + one-level regex case preserved.
+
+**WALL 2 (#58) — `S: AsRef<str> + Send` → `String`.** A generic param bounded by a
+single concrete-resolvable std conversion trait now monomorphizes to `String` on
+BOTH the inherent path AND the concrete-Self TRAIT-method path (firestore
+`get_doc`). Guardian-BLOCKED the original §3 plan: Approach A (`resolve_generics`)
+is structurally dead for trait methods (reintroduces #31 E0599). Sound design:
+- `bound_to_concrete`'s `AsRef/Borrow/Into/From` arm source-fixed to gate on
+  `std_trait_tag` BEFORE the last-segment match → a crate-local OR foreign
+  `AsRef` look-alike (resolved by canonical id) can't wrong-admit (#25 class).
+- per-PARAM reduction over the FULL bound set (`resolve_param_bounds`) → mono'd
+  params REMOVED from `tyvars`/`order` before the `BoundCrossImpl` gate, so a
+  genuinely-unresolvable tyvar still drops while `AsRef<str>` binds; multi-bound
+  `AsRef<str>+Serialize` and conflicting `AsRef<str>+AsRef<[u8]>` both DROP.
+- occurrence census (the #47 walk) → drop if S occurs in an inadmissible position;
+  the mono String passes BY VALUE (`String: AsRef<str>`), UFCS-qualified, no stray
+  `::<S>`. Guardian-final SKY_DCE=0 cargo build clean (constraint 9).
+
+**Proof:** fixture `75-ffi-nested-glob-asref` — `Sup` (2-level glob), `Inner`
+(1-level), `Dual` (both-paths collision), `op_inherent`/`op_trait` (`42!`,
+WALL 2) all bind; `pub(crate) Hidden` + `op_neg`/`op_ambig` ABSENT. 22 ffi-fixtures
+ok, 166 inspector unit tests green (incl #25 crate-local), clippy clean.
+
+**Affected:**
+- `tools/sky-ffi-inspect-rs/src/main.rs` — `walk_module_with_path` (#57);
+  `bound_to_concrete` source-fix + per-param mono reduction + `parametric_function`
+  WALL-2 branch + `fn_types_nameable` exemption (#58)
+- `runtime-rust/tests/sky/75-ffi-nested-glob-asref/` — fixture (both walls)
+- `runtime-rust/scripts/ffi-fixtures-test.sh` — fixture wired into the gate
+- `runtime-rust/docs/superpowers/specs/2026-06-25-rust-ffi-firestore-crud-walls-design.md` — spec + guardian rulings
+
+---
+
 ## 2026-06-25 — #52 FFI keystone: opaque-handle threading + concrete-impl monomorphization
 
 **Unlock:** a realistic async-generic op over a NOT-Clone opaque client handle binds shim-free — the firestore/stripe shape. Composes on #44 async / #45 generic-Self / #46 UFCS / #47 serde / #51 --all-features.
