@@ -1,0 +1,12 @@
+[project]
+name = "80-ffi-result-alias"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local resultalias80 crate — async ctor returning a crate-defined GENERIC
+# Result alias `type DbResult<T> = Result<T, DbError>` (firestore's
+# `FirestoreResult<T> = Result<T, FirestoreError>` shape). Staged via setup.sh;
+# file:// git dep points at the cache path.
+["rust.dependencies"]
+resultalias80 = { git = "file:///home/arthur/.cache/sky/80-ffi-result-alias-crate", branch = "master" }

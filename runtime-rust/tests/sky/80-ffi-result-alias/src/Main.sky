@@ -1,0 +1,79 @@
+module Main exposing (main)
+
+-- 80-ffi-result-alias: WALL 5 (#63) — async constructor returning a crate-defined
+-- GENERIC `Result` alias `type DbResult<T> = Result<T, DbError>`.
+--
+-- Root cause closed: `FirestoreDb::with_options(FirestoreDbOptions) ->
+-- FirestoreResult<Self>` was dropped because the inspector did not see through the
+-- crate's GENERIC alias `FirestoreResult<T> = Result<T, FirestoreError>`. The
+-- unresolved `FirestoreResult<Db>` failed the async-Send output gate's
+-- `Result<…>`-unwrap → silent `async-future-not-send` drop.
+--
+-- Post-fix (`expand_generic_alias` in tools/sky-ffi-inspect-rs): the alias
+-- expands to `Result<Db, DbError>`, the gate unwraps to `Db`, `Db` is provably
+-- Send, and the ctor binds.
+--
+-- POSITIVE (bind + run end-to-end):
+--   with_options_from_db   : DbOptions -> Task Error Db   (the gating shape)
+--   connect_default_from_db : () -> Task Error Db          (no-arg secondary)
+--   ping_from_db           : Db -> Task Error Int          (ground handle threads downstream)
+--   new_from_dbOptions     : String -> Result Error DbOptions
+--   with_retries_from_dbOptions : DbOptions -> Int -> Result Error DbOptions
+--
+-- NEGATIVE (must be ABSENT from bindings — coverage-dropped; crate still compiles):
+--   Db::boxed → DbResult<Box<dyn Debug + Send>>  -- outer Result expands, inner
+--               Box<dyn> trait object → DROP (proves the see-through stays narrow)
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Resultalias80 as W
+import Std.Log exposing (println)
+
+
+-- POSITIVE: build the options value (pure builder), feed the async ctor, then
+-- thread the ground `Db` into the async `ping` to prove the handle is usable.
+-- "proj" is 4 chars → ping returns 4.
+checkWithOptions : Task Error ()
+checkWithOptions =
+    Task.fromResult (W.new_from_dbOptions "proj")
+        |> Task.andThen
+               (\base -> Task.fromResult (W.with_retries_from_dbOptions base 5))
+        |> Task.andThen (\o -> W.with_options_from_db o)
+        |> Task.andThen
+               (\db ->
+                   W.ping_from_db db
+                       |> Task.andThen
+                              (\n ->
+                                  if n == 4 then
+                                      println "with_options-ping=4"
+
+                                  else
+                                      Task.fail
+                                          (Error.unexpected
+                                              ("with_options-ping=UNEXPECTED "
+                                                  ++ String.fromInt n))))
+
+
+-- POSITIVE: the no-arg async ctor. "default" is 7 chars → ping returns 7.
+checkConnectDefault : Task Error ()
+checkConnectDefault =
+    W.connect_default_from_db ()
+        |> Task.andThen
+               (\db ->
+                   W.ping_from_db db
+                       |> Task.andThen
+                              (\n ->
+                                  if n == 7 then
+                                      println "connect_default-ping=7"
+
+                                  else
+                                      Task.fail
+                                          (Error.unexpected
+                                              ("connect_default-ping=UNEXPECTED "
+                                                  ++ String.fromInt n))))
+
+
+main : Task Error ()
+main =
+    checkWithOptions |> Task.andThen (\_ -> checkConnectDefault)
+        |> Task.andThen (\_ -> println "[ALL OK]")

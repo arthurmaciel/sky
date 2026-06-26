@@ -1,0 +1,10 @@
+[package]
+name = "resultalias80"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# No external deps — async simulation is pure Rust (no tokio needed for the test).

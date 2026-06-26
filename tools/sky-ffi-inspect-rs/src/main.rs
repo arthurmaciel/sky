@@ -879,6 +879,7 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     // set BEFORE any function is parsed (parse_fn_item -> rust_str reads it).
     REACHABLE_PATHS.with(|c| *c.borrow_mut() = collect_reachable_paths(doc));
     ALIAS_MAP.with(|c| *c.borrow_mut() = collect_aliases(doc));
+    GENERIC_ALIAS_MAP.with(|c| *c.borrow_mut() = collect_generic_result_aliases(doc));
     LOCAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_local_type_ids(doc));
     EXTERNAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_external_type_ids(doc));
     STD_TRAIT_BY_ID.with(|c| *c.borrow_mut() = collect_std_trait_ids(doc));
@@ -3177,23 +3178,23 @@ fn parse_fn_item(
             if is_async_send_seq(rt) {
                 return true;
             }
-            // [#52 Step 3] A provably-Send opaque concrete (monomorphized from a
-            // `C: Trait` param whose Send was proven — Send-supertrait / explicit
-            // impl Send / all-fields-Send). Strip a single leading borrow; reject
-            // `&mut`/nested. An UNPROVABLE concrete is absent from the set → drops.
-            {
-                let base = rt
-                    .strip_prefix("&mut ")
-                    .map(|_| "") // &mut → never admit (the set holds owned/&T names)
-                    .or_else(|| rt.strip_prefix('&'))
-                    .unwrap_or(rt)
-                    .trim();
-                if !base.is_empty()
-                    && !base.starts_with('&')
-                    && PROVABLY_SEND_OPAQUE_NAMES.with(|c| c.borrow().contains(base))
-                {
-                    return true;
-                }
+            // [#52 Step 3 / WALL 5] A provably-Send opaque concrete param
+            // (Send-supertrait / explicit `impl Send` / all-fields-Send) captured
+            // by-move into the `async move` block is Send-safe — the SAME Send
+            // reasoning the receiver gate (`recv_provably_async_send`) applies to
+            // the by-move-captured receiver. Route through that predicate so the
+            // param gate consults the POPULATED proven-Send set
+            // (`PROVABLY_SEND_RECV_NAMES`); the legacy `PROVABLY_SEND_OPAQUE_NAMES`
+            // is never populated, so the prior `contains` here could never admit a
+            // crate-local Send struct param (the `FirestoreDbOptions` /
+            // `with_options` shape) — a latent over-drop no async fixture with a
+            // struct param had exercised. `recv_provably_async_send` strips a
+            // single leading borrow and rejects `&mut`/nested, so the admit stays
+            // as tight as before for everything it already covered; an UNPROVABLE
+            // concrete (Rc-bearing / private-field opaque) is absent from the set →
+            // still drops (no over-bind).
+            if recv_provably_async_send(rt) {
+                return true;
             }
             false
         };
@@ -3276,6 +3277,20 @@ thread_local! {
     // type converters see through aliases like `uuid::Bytes = [u8; 16]` so the
     // array/slice filter drops constructors that can't take a Sky Vec<u8>.
     static ALIAS_MAP: std::cell::RefCell<HashMap<String, serde_json::Value>> =
+        std::cell::RefCell::new(HashMap::new());
+
+    // [WALL 5 / #63] Crate-local GENERIC type-alias id -> (declared type-param
+    // names in order, aliased body JSON).  Populated ONLY for the canonical
+    // crate-Result-alias shape `type Alias<T…> = core::result::Result<…>` (and,
+    // forward-compatibly, `Option<…>`).  The converters substitute the use-site
+    // angle-bracketed args into the body positionally and recurse, so e.g.
+    // `FirestoreResult<FirestoreDb> = Result<FirestoreDb, FirestoreError>` becomes
+    // visible to the async-Send output gate's `Result<…>`-unwrap.  Kept narrow:
+    // a NON-Result/Option body is never recorded (the generic-body-references-
+    // unbindable-own-params hazard the non-generic guard exists for), and an
+    // arity mismatch at the use site fails closed (no expansion → current opaque
+    // rendering → drops, never a half-substituted ill-typed body).
+    static GENERIC_ALIAS_MAP: std::cell::RefCell<HashMap<String, (Vec<String>, serde_json::Value)>> =
         std::cell::RefCell::new(HashMap::new());
 
     // RENDERED rust-type names of crate-local opaque structs that DERIVE `Clone`
@@ -3954,6 +3969,197 @@ fn collect_aliases(doc: &serde_json::Value) -> HashMap<String, serde_json::Value
     out
 }
 
+/// [WALL 5 / #63] Build the id -> (params, body) map for every crate-local
+/// GENERIC type alias whose body's OUTERMOST constructor is the canonical
+/// `core::result::Result` (or `core::option::Option`) — the crate-Result-alias
+/// idiom `type DbResult<T> = Result<T, DbError>` (firestore's
+/// `FirestoreResult<T> = Result<T, FirestoreError>`).
+///
+/// Narrow + sound by construction:
+/// * Only crate-local (`crate_id == 0`) aliases.
+/// * Only when the body's outer `resolved_path` resolves — via `doc["paths"]`
+///   provenance — to `core::result::Result` / `core::option::Option` in an
+///   EXTERNAL crate (`crate_id > 0`), so a crate-local type *named* `Result`
+///   can never be misclassified as the std one.  This is the gating shape; any
+///   other generic-alias body is deliberately NOT recorded (it stays opaque,
+///   exactly as before — fail closed).
+/// * The declared param names are captured in order so the use-site args can be
+///   substituted positionally; an arity mismatch is handled at the expansion
+///   site (see `expand_generic_alias`), never here.
+fn collect_generic_result_aliases(
+    doc: &serde_json::Value,
+) -> HashMap<String, (Vec<String>, serde_json::Value)> {
+    let mut out = HashMap::new();
+    let index = match doc["index"].as_object() {
+        Some(i) => i,
+        None => return out,
+    };
+    let paths = doc["paths"].as_object();
+    for (id, item) in index {
+        if item["crate_id"].as_u64().unwrap_or(1) != 0 {
+            continue;
+        }
+        let alias = item["inner"]
+            .get("type_alias")
+            .or_else(|| item["inner"].get("typedef"));
+        let alias = match alias {
+            Some(a) => a,
+            None => continue,
+        };
+        // Declared type-param names, in order.  A non-`type` param kind (lifetime
+        // / const) has no `name` usable here; we only record pure-type aliases so
+        // a stray lifetime/const param would mean a shape we don't model -> skip.
+        let params_json = match alias["generics"]["params"].as_array() {
+            Some(p) if !p.is_empty() => p,
+            // Empty -> not generic (the non-generic ALIAS_MAP already covers it);
+            // missing -> malformed.  Either way, skip.
+            _ => continue,
+        };
+        let mut params: Vec<String> = Vec::with_capacity(params_json.len());
+        let mut all_type_params = true;
+        for p in params_json {
+            // Only a `{ "kind": { "type": … } }` param is a substitutable type
+            // var.  Lifetimes / consts make the alias un-substitutable here.
+            let is_type_param = p
+                .get("kind")
+                .and_then(|k| k.get("type"))
+                .is_some();
+            match (is_type_param, p.get("name").and_then(|n| n.as_str())) {
+                (true, Some(n)) => params.push(n.to_string()),
+                _ => {
+                    all_type_params = false;
+                    break;
+                }
+            }
+        }
+        if !all_type_params {
+            continue;
+        }
+        let body = match alias.get("type").or_else(|| alias.get("type_")) {
+            Some(b) => b,
+            None => continue,
+        };
+        // The body's outermost constructor must be the canonical std Result /
+        // Option, confirmed by id provenance (not by bare name).
+        if generic_alias_body_is_result_or_option(body, paths) {
+            out.insert(id.clone(), (params, body.clone()));
+        }
+    }
+    out
+}
+
+/// True iff `body` is a `resolved_path` whose id resolves, via `doc["paths"]`,
+/// to an EXTERNAL-crate `core::result::Result` or `core::option::Option`.  A
+/// crate-local type named `Result` (`crate_id == 0`) is rejected, so the
+/// see-through can never expand a homonym.  When provenance is unavailable for
+/// the id (rare format drift), fall back to the bare last-path-segment name —
+/// still a tight `Result`/`Option` literal gate, never a blanket admit.
+fn generic_alias_body_is_result_or_option(
+    body: &serde_json::Value,
+    paths: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    let rp = match body.get("resolved_path") {
+        Some(rp) => rp,
+        None => return false,
+    };
+    if let (Some(paths), Some(id)) = (paths, rp.get("id")) {
+        let key = item_id_to_str(id);
+        if let Some(entry) = paths.get(&key) {
+            let is_external = entry
+                .get("crate_id")
+                .and_then(|c| c.as_u64())
+                .map(|c| c != 0)
+                .unwrap_or(false);
+            let segs: Vec<&str> = entry
+                .get("path")
+                .and_then(|p| p.as_array())
+                .map(|a| a.iter().filter_map(|s| s.as_str()).collect())
+                .unwrap_or_default();
+            let canonical = matches!(
+                segs.as_slice(),
+                ["core", "result", "Result"] | ["core", "option", "Option"]
+            );
+            return is_external && canonical;
+        }
+    }
+    // No provenance entry: fall back to a literal last-segment name gate.
+    let name = rp["path"].as_str().or_else(|| rp["name"].as_str()).unwrap_or("");
+    let last = name.rsplit("::").next().unwrap_or(name);
+    matches!(last, "Result" | "Option")
+}
+
+/// [WALL 5 / #63] If `rp` (a `resolved_path` JSON node) refers to a crate-local
+/// generic Result/Option alias recorded in `GENERIC_ALIAS_MAP`, return the alias
+/// body with each declared type-param substituted by the matching USE-SITE
+/// angle-bracketed arg, so the caller can recurse on the concrete shape.
+///
+/// Fail-closed contract (spec §5.2.2):
+/// * Arity mismatch (declared params ≠ use-site `type` args) -> `None` (no
+///   expansion; the caller keeps the current opaque rendering).
+/// * Any declared param with no matching use-site arg -> `None`.
+///
+/// The substitution is TOTAL: every `{ "generic": "<param>" }` whose name is a
+/// declared param is replaced, so no residual unbound type-var can survive into
+/// the rendered string (which would be an E0412 at cargo build).
+fn expand_generic_alias(rp: &serde_json::Value) -> Option<serde_json::Value> {
+    let id = rp.get("id")?;
+    let key = item_id_to_str(id);
+    let (params, body) =
+        GENERIC_ALIAS_MAP.with(|c| c.borrow().get(&key).cloned())?;
+    // Use-site type args (lifetimes/consts ignored — only `type` args bind a
+    // type param positionally).
+    let use_args: Vec<serde_json::Value> = rp
+        .get("args")
+        .and_then(|a| a.get("angle_bracketed"))
+        .and_then(|ab| ab.get("args"))
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|arg| arg.get("type").cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+    // Arity must match EXACTLY — fail closed otherwise.
+    if use_args.len() != params.len() {
+        return None;
+    }
+    let mut subst: HashMap<&str, &serde_json::Value> = HashMap::new();
+    for (p, a) in params.iter().zip(use_args.iter()) {
+        subst.insert(p.as_str(), a);
+    }
+    Some(subst_generic_params(&body, &subst))
+}
+
+/// Recursively clone `ty`, replacing every `{ "generic": "<name>" }` node whose
+/// `<name>` is a key in `subst` with the substituted type JSON.  Walks objects
+/// and arrays so a nested generic (`Result<Vec<T>, E>`) substitutes fully.  A
+/// `{ "generic": … }` whose name is NOT in `subst` (e.g. `Self`, handled later
+/// by `subst_self` on the rendered string) is left intact.
+fn subst_generic_params(
+    ty: &serde_json::Value,
+    subst: &HashMap<&str, &serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(name) = ty.get("generic").and_then(|g| g.as_str()) {
+        if let Some(replacement) = subst.get(name) {
+            return (*replacement).clone();
+        }
+        return ty.clone();
+    }
+    match ty {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                out.insert(k.clone(), subst_generic_params(v, subst));
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.iter().map(|v| subst_generic_params(v, subst)).collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 /// Replace every whole-word `Self` token in a type string with `replacement`.
 /// Used to monomorphise `Self`-typed params/results to the concrete receiver
 /// type (`Option<Self>` -> `Option<NaiveDate>`).  Type strings are ASCII.
@@ -4562,6 +4768,13 @@ fn rustdoc_type_to_sky(val: &serde_json::Value, aliases: &HashMap<String, String
 
     // { "resolved_path": { "name": "Vec", "args": { "angle_bracketed": … } } }
     if let Some(rp) = val.get("resolved_path") {
+        // [WALL 5 / #63] See through a crate-local GENERIC Result/Option alias
+        // identically to the rust-string path above, so the Sky surface and the
+        // rust string the gate reads AGREE (a divergence is the classic
+        // type-checks-but-cargo-fails class).  Fail-closed on arity mismatch.
+        if let Some(expanded) = expand_generic_alias(rp) {
+            return rustdoc_type_to_sky(&expanded, aliases);
+        }
         // See through a crate-local non-generic alias (uuid::Bytes -> [u8;16]).
         if let Some(aliased) = rp.get("id").and_then(resolve_alias) {
             return rustdoc_type_to_sky(&aliased, aliases);
@@ -4843,6 +5056,14 @@ fn rustdoc_type_to_rust_str(val: &serde_json::Value) -> String {
     }
 
     if let Some(rp) = val.get("resolved_path") {
+        // [WALL 5 / #63] See through a crate-local GENERIC Result/Option alias
+        // (`FirestoreResult<FirestoreDb> -> Result<FirestoreDb, FirestoreError>`)
+        // BEFORE the non-generic see-through, so the async-Send output gate's
+        // `Result<…>`-unwrap can reach the inner type.  Fail-closed on arity
+        // mismatch (returns None -> falls through to opaque rendering).
+        if let Some(expanded) = expand_generic_alias(rp) {
+            return rustdoc_type_to_rust_str(&expanded);
+        }
         // See through a crate-local non-generic alias (uuid::Bytes -> [u8;16]),
         // so the array/slice filter sees the real shape.
         if let Some(aliased) = rp.get("id").and_then(resolve_alias) {
@@ -12818,5 +13039,202 @@ mod tests {
         let note = &notes[0];
         assert!(note.contains("alpha"), "note must contain 'alpha': {}", note);
         assert!(note.contains("beta"),  "note must contain 'beta': {}", note);
+    }
+
+    // ── [WALL 5 / #63] generic Result-alias see-through ──────────────────
+    //
+    // The firestore-gating shape: a crate-local GENERIC alias
+    // `type DbResult<T> = Result<T, DbError>` must be expanded at the use site
+    // so the async-Send output gate's `Result<…>`-unwrap can reach the inner
+    // type.  These tests pin: (a) the canonical Result/Option alias expands,
+    // (b) the inner type survives expansion (incl. a `Box<dyn>` inner that the
+    // DOWNSTREAM gate still drops), (c) a non-Result generic alias is NOT
+    // expanded, (d) arity mismatch fails closed.
+
+    /// A rustdoc generic type-alias INDEX item: `type Name<params…> = body`.
+    fn generic_alias_item(name: &str, params: &[&str], body: serde_json::Value) -> serde_json::Value {
+        let params_json: Vec<serde_json::Value> = params
+            .iter()
+            .map(|p| serde_json::json!({
+                "name": p,
+                "kind": { "type": { "bounds": [], "default": null, "is_synthetic": false } }
+            }))
+            .collect();
+        serde_json::json!({
+            "name": name,
+            "crate_id": 0,
+            "inner": {
+                "type_alias": {
+                    "type": body,
+                    "generics": { "params": params_json, "where_predicates": [] }
+                }
+            }
+        })
+    }
+
+    /// `resolved_path` to a body constructor with the given rustdoc id + args.
+    fn rp_with_id(name: &str, id: u64, args: Vec<serde_json::Value>) -> serde_json::Value {
+        let type_args: Vec<serde_json::Value> =
+            args.into_iter().map(|t| serde_json::json!({ "type": t })).collect();
+        serde_json::json!({
+            "resolved_path": {
+                "name": name, "path": name, "id": id,
+                "args": { "angle_bracketed": { "args": type_args, "constraints": [] } }
+            }
+        })
+    }
+
+    /// A `paths` map proving id 100 is the canonical external `core::result::Result`
+    /// and id 101 is `core::option::Option`.
+    fn std_result_option_paths() -> serde_json::Value {
+        serde_json::json!({
+            "100": { "crate_id": 2, "kind": "enum", "path": ["core", "result", "Result"] },
+            "101": { "crate_id": 2, "kind": "enum", "path": ["core", "option", "Option"] }
+        })
+    }
+
+    /// Build a doc whose index holds a single generic alias item at id 48, with
+    /// std-provenance paths, run `collect_generic_result_aliases`, and install the
+    /// result into GENERIC_ALIAS_MAP for the converters to consult.
+    fn install_generic_alias(item: serde_json::Value) {
+        let doc = serde_json::json!({
+            "index": { "48": item },
+            "paths": std_result_option_paths()
+        });
+        let map = collect_generic_result_aliases(&doc);
+        GENERIC_ALIAS_MAP.with(|c| *c.borrow_mut() = map);
+    }
+
+    /// A use-site `resolved_path` referencing the installed alias (id 48) with the
+    /// given use-site type args.
+    fn alias_use(args: Vec<serde_json::Value>) -> serde_json::Value {
+        let type_args: Vec<serde_json::Value> =
+            args.into_iter().map(|t| serde_json::json!({ "type": t })).collect();
+        serde_json::json!({
+            "resolved_path": {
+                "name": "DbResult", "path": "DbResult", "id": 48,
+                "args": { "angle_bracketed": { "args": type_args, "constraints": [] } }
+            }
+        })
+    }
+
+    #[test]
+    fn wall5_result_alias_expands_rust_and_sky() {
+        // type DbResult<T> = Result<T, DbError>   (DbError is crate-local id 7)
+        let body = rp_with_id("Result", 100, vec![generic_node("T"), path("DbError")]);
+        install_generic_alias(generic_alias_item("DbResult", &["T"], body));
+
+        // DbResult<Db>  →  Result<Db, DbError> (rust)  /  Result DbError Db (sky)
+        let use_site = alias_use(vec![path("Db")]);
+        assert_eq!(rustdoc_type_to_rust_str(&use_site), "Result<Db, DbError>");
+        assert_eq!(sky(&use_site), "Result DbError Db");
+    }
+
+    #[test]
+    fn wall5_result_alias_inner_box_dyn_survives_for_downstream_drop() {
+        // The see-through expands the OUTER Result; the inner Box<dyn …> must be
+        // rendered intact so the (separate) async-Send / nameability gate drops it.
+        // We assert the rendered rust string carries the Box<dyn …> verbatim.
+        let body = rp_with_id("Result", 100, vec![generic_node("T"), path("DbError")]);
+        install_generic_alias(generic_alias_item("DbResult", &["T"], body));
+
+        let boxed_dyn = serde_json::json!({
+            "resolved_path": {
+                "name": "Box", "path": "Box", "id": 0,
+                "args": { "angle_bracketed": { "args": [
+                    { "type": { "dyn_trait": { "traits": [], "lifetime": null } } }
+                ], "constraints": [] } }
+            }
+        });
+        let use_site = alias_use(vec![boxed_dyn]);
+        let rust = rustdoc_type_to_rust_str(&use_site);
+        assert!(rust.starts_with("Result<"), "outer Result must expand: {}", rust);
+        // The inner stays a Box (the downstream gate, not the see-through, drops it).
+        assert!(rust.contains("Box"), "inner Box must survive expansion: {}", rust);
+    }
+
+    #[test]
+    fn wall5_option_alias_expands() {
+        // type Opt<T> = Option<T>  →  Maybe T
+        let body = rp_with_id("Option", 101, vec![generic_node("T")]);
+        install_generic_alias(generic_alias_item("Opt", &["T"], body));
+        let use_site = alias_use(vec![path("Db")]);
+        assert_eq!(sky(&use_site), "Maybe Db");
+        assert_eq!(rustdoc_type_to_rust_str(&use_site), "Option<Db>");
+    }
+
+    #[test]
+    fn wall5_non_result_generic_alias_not_expanded() {
+        // type Wrap<T> = Vec<T>  — body outer ctor is Vec, NOT Result/Option.
+        // collect_generic_result_aliases must NOT record it; GENERIC_ALIAS_MAP
+        // empty -> use site renders opaquely (the pre-fix behaviour).
+        let body = rp_with_id("Vec", 200, vec![generic_node("T")]);
+        let doc = serde_json::json!({
+            "index": { "48": generic_alias_item("Wrap", &["T"], body) },
+            "paths": std_result_option_paths()
+        });
+        let map = collect_generic_result_aliases(&doc);
+        assert!(map.is_empty(), "non-Result generic alias must NOT be recorded");
+        GENERIC_ALIAS_MAP.with(|c| *c.borrow_mut() = map);
+        // The use site falls through to opaque rendering: the bare alias name.
+        let use_site = alias_use(vec![path("Db")]);
+        assert_eq!(rustdoc_type_to_rust_str(&use_site), "DbResult<Db>");
+    }
+
+    #[test]
+    fn wall5_crate_local_result_homonym_not_expanded() {
+        // A crate-local type NAMED `Result` (crate_id 0 in paths) must NOT be
+        // treated as the std Result — provenance gate rejects it.
+        let body = rp_with_id("Result", 300, vec![generic_node("T"), path("DbError")]);
+        let doc = serde_json::json!({
+            "index": { "48": generic_alias_item("DbResult", &["T"], body) },
+            // id 300 is a CRATE-LOCAL "Result" homonym (crate_id 0).
+            "paths": { "300": { "crate_id": 0, "kind": "enum", "path": ["mycrate", "Result"] } }
+        });
+        let map = collect_generic_result_aliases(&doc);
+        assert!(map.is_empty(), "crate-local Result homonym must NOT be recorded");
+    }
+
+    #[test]
+    fn wall5_arity_mismatch_fails_closed() {
+        // type Pair<A, B> = Result<A, B>  (2 params) used with ONE arg -> no expand.
+        let body = rp_with_id("Result", 100, vec![generic_node("A"), generic_node("B")]);
+        install_generic_alias(generic_alias_item("Pair", &["A", "B"], body));
+        // Use site supplies only one type arg -> arity mismatch -> fail closed.
+        let use_site = alias_use(vec![path("Db")]);
+        assert!(
+            expand_generic_alias(use_site.get("resolved_path").unwrap()).is_none(),
+            "arity mismatch must yield None (fail closed)"
+        );
+        // And the rendered string stays the opaque alias (no half-substitution).
+        assert_eq!(rustdoc_type_to_rust_str(&use_site), "DbResult<Db>");
+    }
+
+    #[test]
+    fn wall5_nested_generic_substitutes_totally() {
+        // type DbResult<T> = Result<Vec<T>, DbError>  — nested generic.
+        // Use site DbResult<Db> must substitute T inside the nested Vec, leaving
+        // NO residual {generic:"T"} (which would render an undeclared type-var).
+        let vec_t = rp_with_id("Vec", 201, vec![generic_node("T")]);
+        let body = rp_with_id("Result", 100, vec![vec_t, path("DbError")]);
+        install_generic_alias(generic_alias_item("DbResult", &["T"], body));
+        let use_site = alias_use(vec![path("Db")]);
+        let rust = rustdoc_type_to_rust_str(&use_site);
+        assert_eq!(rust, "Result<Vec<Db>, DbError>");
+        assert!(!rust.contains('T') || rust.contains("DbError"),
+            "no residual bare type-var T: {}", rust);
+    }
+
+    #[test]
+    fn wall5_self_inner_preserved_for_subst_self() {
+        // The firestore real shape uses `DbResult<Self>` at the use site; the
+        // see-through substitutes T <- {generic:"Self"}, keeping `Self` for the
+        // later string-level subst_self(recv) pass.
+        let body = rp_with_id("Result", 100, vec![generic_node("T"), path("DbError")]);
+        install_generic_alias(generic_alias_item("DbResult", &["T"], body));
+        let use_site = alias_use(vec![generic_node("Self")]);
+        // Rendered with Self intact (subst_self maps it to the receiver downstream).
+        assert_eq!(rustdoc_type_to_rust_str(&use_site), "Result<Self, DbError>");
+        assert_eq!(subst_self(&rustdoc_type_to_rust_str(&use_site), "Db"), "Result<Db, DbError>");
     }
 }

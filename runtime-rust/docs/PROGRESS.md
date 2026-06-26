@@ -17,6 +17,48 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — WALL 5 (#63, GATING): crate generic-Result-alias see-through → FirestoreDb ground ctor binds
+
+The gating firestore blocker — RESOLVED, and narrower+more general than the
+"Box<dyn> un-mintable handle" the re-measure feared (that was a coverage-report
+name-collision artifact). `FirestoreDb::with_options(FirestoreDbOptions) ->
+FirestoreResult<Self>` and `for_default_project_id() -> FirestoreResult<Self>` are
+shape-clean async ctors; they dropped ONLY because the inspector didn't expand the
+crate generic alias `FirestoreResult<T> = Result<T, FirestoreError>` — the
+unresolved `FirestoreResult<FirestoreDb>` failed the async-Send output gate's
+`Result<…>` strip → silent `async-future-not-send` drop.
+
+Fix (inspector-only, `main.rs` +452/-18): a narrow, sound generic-Result-alias
+see-through — `GENERIC_ALIAS_MAP` + `collect_generic_result_aliases` (records a
+crate-local generic alias ONLY when its body's outer ctor resolves by id-provenance
+to EXTERNAL `core::result::Result`/`Option` — crate-local `Result` homonym
+rejected) + `expand_generic_alias`/`subst_generic_params` (positional arg subst,
+**fail-closed on arity mismatch**, total recursive subst, `Self` preserved),
+applied in BOTH converters (`rustdoc_type_to_rust_str` + `rustdoc_type_to_sky`) so
+the Send-gate rust-string ≡ the Sky surface. The inner `Box<dyn>` SURVIVES outer
+expansion (still drops trait-object-unsupported — narrow, not over-bound). Plus a
+latent param-Send over-DROP fix: the async param gate consulted a dead-empty
+`PROVABLY_SEND_OPAQUE_NAMES` (dropped every crate-local struct param) → rerouted
+through the same conservative `recv_provably_async_send` proven-Send predicate
+(admits provably-Send opaque params like `FirestoreDbOptions`, still drops
+Rc/private-field — guardian-proven no `!Send` over-admit).
+
+**Proof:** real firestore 0.49 — `with_options : FirestoreDbOptions -> Task Error
+FirestoreDb` + `for_default_project_id : () -> Task Error FirestoreDb` now BIND
+(0→2 ground ctors); `new`/`with_options_token_source`/`_key_file` correctly stay
+dropped. Fixture `80-ffi-result-alias`: `with_options-ping=4 connect_default-ping=7
+[ALL OK]`, `Box<dyn>` negative drops. 26 ffi-fixtures ok, 174 inspector unit tests
+(8 new alias tests), SKY_DCE=0 + clippy clean. Guardian-final APPROVE.
+
+**This unblocks the firestore data path** — a ground `FirestoreDb` value now flows
+to every CRUD producer. Remaining for end-to-end CRUD: WALL 4 (#64 dyn-trait),
+WALL 3a-&I (#65 serde &I). Crate-Result-alias is a top Rust idiom → broadly useful
+beyond firestore.
+
+**Affected:** `tools/sky-ffi-inspect-rs/src/main.rs` ·
+`runtime-rust/tests/sky/80-ffi-result-alias/` · `ffi-fixtures-test.sh` ·
+spec `2026-06-26-rust-ffi-wall5-firestore-ground-ctor-design.md`.
+
 ## 2026-06-26 — firestore end-to-end re-measure (all walls): CRUD still shim-required; prior diagnosis was WRONG
 
 Re-measured firestore 0.49.0 with ALL walls in (HEAD 72e368b6). **Honest result:
