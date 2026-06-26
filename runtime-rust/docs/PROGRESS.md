@@ -17,6 +17,40 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — firestore end-to-end re-measure (all walls): CRUD still shim-required; prior diagnosis was WRONG
+
+Re-measured firestore 0.49.0 with ALL walls in (HEAD 72e368b6). **Honest result:
+real firestore CRUD does NOT bind shim-free.** The WALL-3 mechanisms are sound
+(hand-stub fixtures 76/78/79 prove them) but the 2026-06-25 measurement
+MIS-DIAGNOSED the firestore drop reasons — the walls were scoped against the wrong
+gates. Corrected per-op truth (default features; firestore has no `full` feature):
+
+| Op | Real drop reason (HEAD) |
+|---|---|
+| get_obj / get_doc / query_obj / delete_by_id | **`dyn_trait`** (boxed `dyn Trait` target — NOT plain Deserialize/borrowed_ref) |
+| create_obj / update_obj | serde generic `I` behind **`&I`** (non-owned; WALL 3a admits only OWNED `I`) |
+| FirestoreDb::new / for_database_id | trait-`Self` + `Box<dyn>` + `FirestoreListenSupport` bound async ctor |
+
+**Gating blocker:** NO bound fn mints a `FirestoreDb` from ground — every producer
+(`clone_with_session_params`/`with_session_params`/`db_field`) already TAKES a
+`FirestoreDb`. So there is no call site to type-check → the "binds⇒cargo-compiles"
+floor is structurally unreachable until the ctor binds. No regression (1046 kept
+≥ 1041; the 8 CRUD ops were never bound — the prior framing just mislabeled them).
+
+**Remaining walls (next epic, dependency order) — filed:**
+1. **WALL 5 (gating)** — ground constructor for trait-`Self` + `Box<dyn>` async
+   ctors (`FirestoreDb::new`). Fix FIRST or the rest is dead code.
+2. **WALL 4** — `dyn Trait` return/param routing (get_obj/get_doc/query/delete);
+   the dominant histogram class (`trait-method-trait-unreachable ×1333`).
+3. **WALL 3a-&I** — serde generic in a `&I` (non-owned) position → owned-clone-at-
+   boundary extension (create_obj/update_obj).
+4. IntoIterator batch ops (`batch_stream_get_*`) — lower priority.
+
+The shipped walls (#57-#61) ARE real general auto-FFI gains (FirestoreDb 0→50
+methods, AsRef→0, async opaque ctors, serde-on-trait for owned params) — just not
+the firestore data path. **Lesson: scope a real-crate epic against the ACTUAL
+current drop histogram, re-measured each time — not a stale per-op framing.**
+
 ## 2026-06-26 — WALL 3a (#59): serde-bound generic on the concrete-Self trait path (firestore get_obj/create_obj)
 
 The LAST firestore wall + the data path. `get_obj<T: DeserializeOwned>(&self) ->
