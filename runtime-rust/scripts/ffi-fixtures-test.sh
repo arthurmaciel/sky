@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -653,6 +653,56 @@ run_mixed_turbofish() {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 85-ffi-vec-struct-field — WALL-A (#74): a foreign struct with a
+# `Vec<StructType>` field. The field SETTER's param type must be the REAL
+# `Vec<Inner>` (Inner a bound Clone-opaque), NEVER the bug's `Vec<String>` —
+# which E0308s at cargo build. Pre-#74: `resolveRustType` short-circuited a
+# `List <opaque>` field through `skyTypeToRust` → `Vec<String>`.
+# POSITIVE 1: items (Vec<Inner>) getter+setter bind with `Vec<::…::Inner>`.
+# POSITIVE 2: tags (Vec<String>) getter+setter still work (no-regress).
+# NEGATIVE:   Bag.bad (Vec<NonClone>, NonClone not Clone) → no accessor.
+# Asserts: build is cargo-CLEAN (no E0308), the items setter is typed
+# `Vec<::…::Inner>` and NOT `Vec<String>`, and the program prints [ALL OK].
+# ─────────────────────────────────────────────────────────────────────────────
+run_vec_struct_field() {
+  local base=85-ffi-vec-struct-field
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+
+  local wd; wd="$(stage_workdir "$src")" || { _fail "$base (stage failed)"; return; }
+  local binds; binds="$(bindings_file "$wd")" || { _fail "$base (cannot derive bindings path)"; rm -rf "$wd"; return; }
+  local bin;  bin="$(build_fixture "$wd")"  || { _fail "$base (build failed — E0308 Vec<String> vs Vec<Inner>?)"; rm -rf "$wd"; return; }
+
+  # CRITICAL INVARIANT: the items setter must be the REAL Vec<Inner> type, and a
+  # `Vec<String>` setter for items must NEVER appear (the WALL-A bug). The items
+  # setter wrapper line carries `arg0: Vec<::vecstructfield::Inner>`.
+  if ! rg -q 'fn vecstructfield_items_set_field_from_outer\(arg0: Vec<::vecstructfield::Inner>' "$binds" 2>/dev/null; then
+    _fail "$base: items setter is NOT typed Vec<::vecstructfield::Inner> (WALL-A type-collapse not fixed)"; rm -rf "$wd"; return
+  fi
+  if rg -q 'fn vecstructfield_items_set_field_from_outer\(arg0: Vec<String>' "$binds" 2>/dev/null; then
+    _fail "$base: items setter emitted Vec<String> for a Vec<Inner> field (the WALL-A bug)"; rm -rf "$wd"; return
+  fi
+  # NEGATIVE: Bag.bad (Vec<NonClone>) must have NO accessor at all.
+  for banned in bad_field bad_set_field; do
+    if rg -q "SKY-FFI-WRAPPER BEGIN $banned" "$binds" 2>/dev/null; then
+      _fail "$base: Vec<NonClone> field accessor '$banned' leaked into bindings (not fail-closed)"; rm -rf "$wd"; return
+    fi
+  done
+
+  # [ALL OK] output (build was already cargo-clean to reach here).
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (items setter Vec<Inner> not Vec<String> · tags Vec<String> no-regress · Bag.bad Vec<NonClone> absent · cargo-clean · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
 # ── Drive ────────────────────────────────────────────────────────────────────
 FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -668,6 +718,7 @@ for n in "${FIXTURES[@]}"; do
     73-ffi-serde)             run_serde ;;
     81-ffi-serde-ref)         run_serde_ref ;;
     83-ffi-mixed-generic-turbofish) run_mixed_turbofish ;;
+    85-ffi-vec-struct-field)  run_vec_struct_field ;;
     *)                        run_basic "$n" ;;
   esac
 done

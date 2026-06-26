@@ -1,0 +1,80 @@
+module Main exposing (main)
+
+-- WALL-A proof: a foreign struct with a `Vec<StructType>` field. The `Outer`
+-- struct's `items : Vec<Inner>` field (Inner is a bound Clone-opaque) must bind
+-- its GETTER and SETTER with the REAL `Vec<Inner>` type — NEVER a `Vec<String>`
+-- that E0308s at cargo build.
+--
+-- POSITIVE 1: `tags : Vec<String>` getter+setter still work (primitive elem,
+--             no-regress).
+-- POSITIVE 2: `items : Vec<Inner>` getter+setter bind with the correct
+--             `Vec<Inner>` type; we SET items from a `List Inner` built from
+--             `make_inner` and read the length back.
+-- NEGATIVE:   `Bag.bad : Vec<NonClone>` (NonClone is NOT Clone) → no accessor.
+--             Verified by the bindings grep in the sweep harness, not here.
+import Rust.Vecstructfield as F
+import Sky.Core.List as List
+import Std.Log exposing (println)
+
+
+main =
+    case F.make_outer () of
+
+        Err _ ->
+            println "make_outer failed"
+
+        Ok o0 ->
+            let
+                -- Vec<Inner> getter on the constructed Outer: 2 items.
+                items0 = F.items_field_from_outer o0
+                items0Len = List.length items0
+                -- Vec<String> getter: 2 tags (no-regress primitive elem).
+                tags0 = F.tags_field_from_outer o0
+                tags0Len = List.length tags0
+            in
+                case F.make_inner 7 of
+
+                    Err _ ->
+                        println "make_inner failed"
+
+                    Ok inner1 ->
+                        let
+                        -- Build a `List Inner` of THREE opaque Inners and SET it
+                        -- into the items field — this is the Vec<Inner> setter
+                        -- that used to E0308 as Vec<String>.
+                            newItems = [ inner1, inner1, inner1 ]
+                            o1 = F.items_set_field_from_outer newItems o0
+                            items1Len =
+                                List.length (F.items_field_from_outer o1)
+                        -- SET tags (Vec<String>) — no-regress.
+                            o2 =
+                                F.tags_set_field_from_outer
+                                    [ "x", "y", "z", "w" ]
+                                    o1
+                            tags1Len =
+                                List.length (F.tags_field_from_outer o2)
+                        -- The Vec<Inner> survived the tags setter (immutable
+                        -- update replaced only tags).
+                            items2Len =
+                                List.length (F.items_field_from_outer o2)
+                            ok =
+                                items0Len == 2 && tags0Len == 2 && items1Len
+                                    == 3
+                                    && tags1Len
+                                    == 4
+                                    && items2Len
+                                    == 3
+                        in
+                            println
+                                ("Outer.items len 2->"
+                                    ++ String.fromInt items1Len
+                                    ++ " Outer.tags len 2->"
+                                    ++ String.fromInt tags1Len
+                                    ++ " (items preserved="
+                                    ++ String.fromInt items2Len
+                                    ++ ")"
+                                    ++ (if ok then
+                                           "  [ALL OK]"
+
+                                       else
+                                           "  [MISMATCH]"))

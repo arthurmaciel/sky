@@ -685,6 +685,21 @@ emitRustFile kernelName pkg =
         , not (isKnownSky (trimStr (drop 6 st)))
         , Just optInner <- stripGeneric1 "Option" rtOverride
             = "SkyMaybe<" ++ ownedInner crate optInner ++ ">"
+        -- [WALL-A / #74] `List <opaque>`: skyTypeToRust would collapse the
+        -- opaque element to "String" (`Vec<String>`) — wrong, and an E0308 at
+        -- cargo build when the field is `Vec<FooStruct>`. Take the element from
+        -- the raw `Vec<elem>` override, owned (&T → T), so the decl is
+        -- `Vec<::crate::Foo>` and the setter's `ElemGeneral` identity coercion
+        -- lines up. Mirrors the `Maybe <opaque>` arm above. A `List <primitive>`
+        -- (List Int / List String / List Bool / List Char) keeps `isKnownSky`
+        -- → `skyTypeToRust` (a faithful `Vec<i64>` / `Vec<String>` mapping), so
+        -- this arm only fires for a genuinely-opaque element the Sky mapping
+        -- can't name. Fail-closed: if the override isn't a `Vec<…>` we fall
+        -- through to the existing arms (never emit a wrong `Vec<String>`).
+        | "List " `isPrefixOf` st
+        , not (isKnownSky (trimStr (drop 5 st)))
+        , Just vecInner <- stripGeneric1 "Vec" rtOverride
+            = "Vec<" ++ ownedInner crate vecInner ++ ">"
         | isKnownSky st                = skyTypeToRust st
         | not (null rtOverride)        = absolutizeCrate crate rtOverride
         | otherwise                    = "String"

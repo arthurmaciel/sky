@@ -28,7 +28,7 @@ likely also close firestore's #73 SKY_DCE=0 residuals):
 
 | wall | error | cause | task |
 |---|---|---|---|
-| A | E0308 ×5 | `Vec<StructType>` field setter emits `Vec<String>` (collapses non-primitive elem) | #75 (HIGH) |
+| A | E0308 ×5 | `Vec<StructType>` field setter emits `Vec<String>` (collapses non-primitive elem) | **#74 ✅ CLOSED** (firebase 5→0; `resolveRustType` List<opaque> arm) |
 | B | E0433 ×6 | generic wrappers emit `::http::`/`::google_cloud_auth::` transitive-dep paths not in generated Cargo.toml | #76 |
 | C | E0603 ×1 | HashMap return emits private `::std::collections::hash::map::HashMap` not `::std::collections::HashMap` | #77 |
 | D | E0425 ×1 | `Default` emits free-fn `crate::default()` not `<T as Default>::default()` | #78 |
