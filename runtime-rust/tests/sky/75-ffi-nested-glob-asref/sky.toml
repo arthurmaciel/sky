@@ -1,0 +1,10 @@
+[project]
+name = "75-ffi-nested-glob-asref"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local nested-glob-crate: tests WALL 1 (nested private-module glob path resolution).
+# setup.sh git-inits ./nested-glob-crate into the cache path below.
+["rust.dependencies"]
+nested-glob-crate = { git = "file:///home/arthur/.cache/sky/75-ffi-nested-glob-asref-crate", branch = "master" }

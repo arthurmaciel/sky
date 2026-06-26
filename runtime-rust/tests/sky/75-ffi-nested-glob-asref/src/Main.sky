@@ -1,0 +1,87 @@
+module Main exposing (main)
+
+-- 75-ffi-nested-glob-asref: WALL 1 proof (nested private-module glob path resolution).
+--
+-- WALL 1 target: Sup is reachable ONLY through two levels of private modules:
+--   crate root → mod inner (private) + pub use inner::* →
+--   inner/mod.rs → mod deep (private) + pub use deep::* →
+--   inner/deep.rs → pub struct Sup
+--
+-- Control (one level, already works pre-fix):
+--   Inner lives in inner/mod.rs directly (one private level glob)
+--
+-- Collision (C2): Dual is in both nested_glob_crate::vis::Dual AND
+--   nested_glob_crate::Dual (via pub use vis::*); insert_shorter picks shorter.
+--
+-- Negative (C1): Hidden is pub(crate) in inner/deep.rs — must NOT bind.
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Nested_glob_crate as G
+import Std.Log exposing (println)
+
+
+checkInner : Task Error ()
+checkInner =
+    case G.new_from_inner 5 of
+        Ok inner ->
+            case G.get_x_from_inner inner of
+                Ok x ->
+                    if x == 5 then
+                        println "inner=5"
+
+                    else
+                        Task.fail (Error.unexpected ("inner=UNEXPECTED " ++ String.fromInt x))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+
+checkSup : Task Error ()
+checkSup =
+    case G.new_from_sup 42 of
+        Ok sup ->
+            case G.get_y_from_sup sup of
+                Ok y ->
+                    if y == 42 then
+                        println "sup=42"
+
+                    else
+                        Task.fail (Error.unexpected ("sup=UNEXPECTED " ++ String.fromInt y))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+
+checkDual : Task Error ()
+checkDual =
+    case G.new_from_dual 7 of
+        Ok dual ->
+            case G.get_d_from_dual dual of
+                Ok d ->
+                    if d == 7 then
+                        println "dual=7"
+
+                    else
+                        Task.fail (Error.unexpected ("dual=UNEXPECTED " ++ String.fromInt d))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+
+main : Task Error ()
+main =
+    checkInner
+        |> Task.andThen (\_ -> checkSup)
+        |> Task.andThen (\_ -> checkDual)
+        |> Task.andThen (\_ -> println "[ALL OK]")

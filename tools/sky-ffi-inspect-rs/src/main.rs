@@ -4049,6 +4049,88 @@ fn resolved_path_is_bindable(id: &serde_json::Value, raw_name: &str) -> bool {
     ALWAYS_NAMEABLE.contains(&last)
 }
 
+/// Register `path` for `id` if it is shorter than any currently stored path.
+/// Called from both `collect_reachable_paths` (seed loop) and
+/// `walk_module_with_path` (recursive helper) — must be a free function so the
+/// recursive call compiles (closures cannot be passed by recursion).
+fn insert_shorter_path(out: &mut HashMap<String, String>, id: String, path: String) {
+    if out.get(&id).is_none_or(|e| path.len() < e.len()) {
+        out.insert(id, path);
+    }
+}
+
+/// Recursive DFS that walks a module (identified by `mid`) publishing all
+/// publicly-reachable types at the given `mp` prefix.
+///
+/// **Why `mp` may differ from the module's own rustdoc path.**
+/// For a private intermediate module (`mod db; pub use db::*;`) rustdoc records
+/// NO entry in `doc["paths"]` for `db`'s id — the module is unreachable by
+/// name from outside the crate.  The parent's public path IS the right prefix
+/// for `db`'s re-exported items, so callers pass the parent's `mp` (the
+/// synthetic public path) when recursing into a private module.
+///
+/// **Cycle / convergence guard (C3).**
+/// `seen` is keyed on `(mid, mp)` pairs.  Bare-`mid` would short-circuit
+/// re-registration under a SHORTER prefix depending on HashMap seed order,
+/// causing non-deterministic drops for crates with two-level glob re-exports
+/// (e.g. firestore: `lib → db → get → FirestoreGetByIdSupport`).  `mp` is
+/// passed UNCHANGED through glob recursion (never grows per hop), so the set
+/// of `(mid, mp)` pairs is bounded by `index.len() × distinct_prefixes`.
+fn walk_module_with_path(
+    mid: &str,
+    mp: &str,
+    index: &serde_json::Map<String, serde_json::Value>,
+    out: &mut HashMap<String, String>,
+    seen: &mut HashSet<(String, String)>,
+) {
+    if !seen.insert((mid.to_string(), mp.to_string())) {
+        return;
+    }
+    let module = match index.get(mid).and_then(|it| it["inner"].get("module")) {
+        Some(m) => m,
+        None => return,
+    };
+    let items = match module["items"].as_array() {
+        Some(a) => a,
+        None => return,
+    };
+    for child in items {
+        let cid = item_id_to_str(child);
+        let it = match index.get(&cid) {
+            Some(x) => x,
+            None => continue,
+        };
+        // C1 [load-bearing]: gate type registration on is_public.
+        // A `pub use private::*` re-exports ONLY the public items of `private`;
+        // registering a `pub(crate)` child would publish a path unreachable
+        // from outside the crate → E0603 cargo-fail.
+        if item_is_type(it) && is_public(it) {
+            if let Some(n) = it["name"].as_str() {
+                insert_shorter_path(out, cid.clone(), format!("{}::{}", mp, n));
+            }
+        }
+        if let Some(u) = it["inner"].get("use") {
+            let tid = u.get("id").map(item_id_to_str);
+            if u["is_glob"].as_bool().unwrap_or(false) {
+                // `pub use target::*`: all publicly-reachable items of the target
+                // become reachable at `mp`.  The target may be a PRIVATE module
+                // (absent from `doc["paths"]`).  Pass the CURRENT `mp` as the
+                // synthetic public prefix so the recursive walk publishes the
+                // target's items at `mp::name` — this is the WALL 1 fix.
+                if let Some(tids) = tid {
+                    walk_module_with_path(&tids, mp, index, out, seen);
+                }
+            } else if let (Some(n), Some(tids)) = (u["name"].as_str(), tid.as_ref()) {
+                // Named re-export (`pub use foo::Bar as Baz`): register the
+                // target type under the alias name at the current path.
+                if index.get(tids).map(item_is_type).unwrap_or(false) {
+                    insert_shorter_path(out, tids.clone(), format!("{}::{}", mp, n));
+                }
+            }
+        }
+    }
+}
+
 fn collect_reachable_paths(doc: &serde_json::Value) -> HashMap<String, String> {
     let mut out: HashMap<String, String> = HashMap::new();
     let index = match doc["index"].as_object() {
@@ -4056,7 +4138,7 @@ fn collect_reachable_paths(doc: &serde_json::Value) -> HashMap<String, String> {
         None => return out,
     };
     let paths = doc["paths"].as_object();
-    let mpath = |mid: &str| -> Option<String> {
+    let mpath_from_doc = |mid: &str| -> Option<String> {
         paths
             .and_then(|m| m.get(mid))
             .and_then(|e| e.get("path"))
@@ -4068,96 +4150,20 @@ fn collect_reachable_paths(doc: &serde_json::Value) -> HashMap<String, String> {
                     .join("::")
             })
     };
-    let insert_shorter = |out: &mut HashMap<String, String>, id: String, path: String| {
-        if out.get(&id).is_none_or(|e| path.len() < e.len()) {
-            out.insert(id, path);
-        }
-    };
 
-    let mut stack: Vec<String> = Vec::new();
+    // C4: seed ONLY publicly-reachable crate-local modules.
+    // Private modules are NEVER seeded as walk roots — they may only be
+    // visited as recursive targets of a glob re-export from a public parent.
+    // This preserves the invariant that every registered path is reachable
+    // from outside the crate.
+    let mut seen: HashSet<(String, String)> = HashSet::new();
     for (id, item) in index {
         if item["inner"].get("module").is_some()
             && item["crate_id"].as_u64().unwrap_or(1) == 0
             && is_public(item)
         {
-            stack.push(id.clone());
-        }
-    }
-
-    let mut seen: HashSet<String> = HashSet::new();
-    while let Some(mid) = stack.pop() {
-        if !seen.insert(mid.clone()) {
-            continue;
-        }
-        let mp = match mpath(&mid) {
-            Some(p) => p,
-            None => continue,
-        };
-        let module = match index.get(&mid).and_then(|it| it["inner"].get("module")) {
-            Some(m) => m,
-            None => continue,
-        };
-        let items = match module["items"].as_array() {
-            Some(a) => a,
-            None => continue,
-        };
-        for child in items {
-            let cid = item_id_to_str(child);
-            let it = match index.get(&cid) {
-                Some(x) => x,
-                None => continue,
-            };
-            if item_is_type(it) {
-                if let Some(n) = it["name"].as_str() {
-                    insert_shorter(&mut out, cid.clone(), format!("{}::{}", mp, n));
-                }
-            }
-            if let Some(u) = it["inner"].get("use") {
-                let tid = u.get("id").map(item_id_to_str);
-                if u["is_glob"].as_bool().unwrap_or(false) {
-                    // `pub use target::*`: the target module's PUBLIC types become
-                    // accessible at THIS module's path. Record them at
-                    // `<mp>::<typename>` — the target's own path may be private
-                    // (e.g. regex's `builders::string`), so it's absent from
-                    // `paths` and the stack walk would skip it, leaving the type
-                    // unqualified and dropped by the nameability filter. This is
-                    // the usable public path (e.g. `regex::RegexBuilder`).
-                    if let Some(tids) = tid.as_ref() {
-                        if let Some(tmod) =
-                            index.get(tids).and_then(|m| m["inner"].get("module"))
-                        {
-                            if let Some(titems) = tmod["items"].as_array() {
-                                for tchild in titems {
-                                    let tcid = item_id_to_str(tchild);
-                                    if let Some(tit) = index.get(&tcid) {
-                                        if item_is_type(tit) && is_public(tit) {
-                                            if let Some(tn) = tit["name"].as_str() {
-                                                insert_shorter(
-                                                    &mut out,
-                                                    tcid,
-                                                    format!("{}::{}", mp, tn),
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else if let (Some(n), Some(tids)) = (u["name"].as_str(), tid.as_ref()) {
-                    if index.get(tids).map(item_is_type).unwrap_or(false) {
-                        insert_shorter(&mut out, tids.clone(), format!("{}::{}", mp, n));
-                    }
-                }
-                if let Some(tids) = tid {
-                    if index
-                        .get(&tids)
-                        .and_then(|x| x["inner"].get("module"))
-                        .is_some()
-                    {
-                        stack.push(tids);
-                    }
-                }
+            if let Some(mp) = mpath_from_doc(id) {
+                walk_module_with_path(id, &mp, index, &mut out, &mut seen);
             }
         }
     }
