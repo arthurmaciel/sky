@@ -17,6 +17,33 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 20:00 — WALL-J Stage 0 (B8, SECURITY): redact foreign FFI error Debug from the Sky message
+
+**What.** The WALL-J design's BLOCKING B8 finding: `sky_error_from_foreign` (the codegen-emitted
+boundary fn flattening a foreign FFI `Result` Err arm) did `format!("{e:?}").into()` — surfacing the
+RAW foreign `Debug` as the Sky-visible `Error` message. A real network/auth client error
+(reqwest/hyper transport, stripe API error) can echo the request URL, headers, a bearer token, or an
+API key in its `Debug` → secret leak to the user-facing message.
+
+**Fix.** Follow Go's two-level error pattern: generate a correlation id (existing `short_err_id`),
+server-log the raw Debug under it via new private `log_foreign_error` (stderr; honours
+`SKY_LOG_FORMAT=json`; `json_escape`d; kind `ForeignError`; mirrors `classify_and_log_panic`), and
+return ONLY a fixed generic message + the id to Sky: `external operation failed (ref <8-hex>)`.
+Signature unchanged → codegen call sites unaffected.
+
+**Verification.** Live proof (fixture 72-ffi-async): Sky sees `Err(Unexpected: external operation
+failed (ref 173a1350))` while `"division by zero"` goes to the server log under the SAME ref. New
+unit test asserts the secret (bearer token) is absent from the returned message + the id is 8-hex.
+546 lib tests (1 new); clippy `-D warnings` clean; minimal CLI + 45/72/82 async-FFI fixtures GREEN.
+Guardian-final APPROVED CLEAN (all six axes incl. JSON log-injection closed by `json_escape`). 2
+non-blocking pre-existing notes (eprintln-on-broken-stderr crate-wide convention; errId nanosecond
+collision is correlation-only, never auth-load-bearing).
+
+**Affected.** `runtime-rust/src/sky_runtime/core.rs` (`sky_error_from_foreign` rewrite +
+`log_foreign_error` + B8 unit test). Unblocks WALL-J Stage 1.
+
+---
+
 ## 2026-06-26 19:10 — Feature-visibility fix (#89): inject crate features via dep table, not `--all-features`
 
 **What.** Re-measured the REAL async-stripe (`async-stripe-core@1.0.0-rc.6`) before scoping the

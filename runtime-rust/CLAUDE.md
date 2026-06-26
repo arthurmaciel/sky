@@ -694,6 +694,22 @@ log** — hold it to the same bar as a code review:
   Inline match-arm code that calls `.to_string()` on a `Decimal` field fails with
   E0599. Use the runtime helper `decimal_to_string(d)` everywhere a `Decimal` must
   become a `String` (SqlDecimal / SqlMoney arms in `sqlValueMatchArms`).
+- **A boundary fn that `format!("{e:?}")`s a foreign error into the USER-FACING
+  message LEAKS secrets — "the runtime already redacts" must be VERIFIED at the
+  fn, not assumed.** `sky_error_from_foreign` (core.rs) used to do
+  `format!("{e:?}").into()`; a real network/auth client error (reqwest/hyper
+  transport, a stripe API error) echoes the request URL / headers / bearer /
+  API-key in its `Debug`, so that string became the Sky-visible `Error.toString`.
+  FIX (B8, Go's two-level pattern): server-log the raw `Debug` under a fresh
+  correlation id (`short_err_id` + `eprintln!`, `SKY_LOG_FORMAT=json`-aware,
+  `json_escape`d), return ONLY `"external operation failed (ref <id>)"` to Sky.
+  General rule for ANY foreign-error → Sky-error boundary: the raw detail goes to
+  the SERVER LOG keyed by a correlation id; the Sky-visible value is a fixed
+  generic message + that id, NEVER the foreign `Debug`/`Display`. The FFI `Result`
+  Err slot is already unreadable Sky-side (codegen emits `SkyError`), so this is
+  pure gain. When JSON-mode-logging an attacker-influenced string, it MUST pass
+  `telemetry::json_escape` (escapes `"`/`\`/controls) or a crafted Debug forges
+  log fields.
 - Known unfixed codegen/runtime gaps:
   `2026-06-15-skyshop-rs-codegen-gaps.md` (unconstrained-`Result`→`i64`;
   `Dict.union`/`List.sortBy` absences).

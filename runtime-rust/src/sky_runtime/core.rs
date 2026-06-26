@@ -24,25 +24,54 @@ pub fn ok_res<E, A>(a: A) -> SkyResult<E, A> { SkyResult::Ok(a) }
 /// When E = SkyCoreErrorError, the generated code provides the impl.
 pub fn str_err<E: From<String>>(s: &str) -> E { s.to_string().into() }
 
-/// Convert a foreign async error into a SkyError (= String).
+/// Convert a foreign FFI error into the project's error type — REDACTED.
 ///
-/// Used by the fallible-async FFI wrapper bodies to flatten a foreign
-/// `Result<T, E>` Err arm into a Sky-compatible error string:
+/// Used by the fallible(-async) FFI wrapper bodies to flatten a foreign
+/// `Result<T, E>` Err arm into a Sky-compatible error:
 ///
 ///   `Ok(Err(e)) => SkyResult::Err(sky_error_from_foreign(e))`
 ///
 /// C5: `tokio::task::spawn(...).await` already catches panics via JoinError;
-/// this fn handles the non-panic `Err(e)` arm.  Any `Debug`-able foreign
-/// error type is accepted — `Debug` is universal, safe, and always available.
-/// Convert a foreign async error into the project's error type.
+/// this fn handles the non-panic `Err(e)` arm. Any `Debug`-able foreign error
+/// type is accepted — `Debug` is universal and always available.
 ///
-/// Same generic `E: From<String>` contract as `str_err` — the project
-/// provides `impl From<String> for SkyCoreErrorError` so both arms of
-/// the fallible-async match resolve to the same `SkyResult<E, A>`.
+/// [B8 SECURITY — load-bearing] The foreign error's raw `Debug` is NEVER
+/// surfaced to the Sky side. A real network/auth client error (a reqwest/hyper
+/// transport failure, a stripe API error) can echo the request URL, request
+/// headers, a bearer token, or an API key in its `Debug`. So we follow Go's
+/// two-level error pattern: the raw `Debug` detail is logged SERVER-SIDE under a
+/// fresh correlation id (operators can trace it), and ONLY a fixed generic
+/// message carrying that id is returned to Sky (`Error.toString` shows
+/// `external operation failed (ref <id>)`, never the secret-bearing detail).
 ///
-/// Requires `Debug` on the foreign error (universally available).
+/// Same generic `E: From<String>` contract as `str_err` — the project provides
+/// `impl From<String> for SkyCoreErrorError` so both arms of the fallible match
+/// resolve to the same `SkyResult<E, A>`. Total — no unwrap/index/panic.
 pub fn sky_error_from_foreign<ForeignE: std::fmt::Debug, E: From<String>>(e: ForeignE) -> E {
-    format!("{e:?}").into()
+    let err_id = short_err_id();
+    log_foreign_error(&err_id, &format!("{e:?}"));
+    format!("external operation failed (ref {err_id})").into()
+}
+
+/// [B8] Server-log a foreign FFI error's raw `Debug` detail under a correlation
+/// id, honouring `SKY_LOG_FORMAT=json`. The detail is for OPERATORS ONLY — it can
+/// carry secrets / PII / internal paths from a transport error — so it goes to
+/// the SERVER LOG (stderr), never to the Sky-visible message. Mirrors the
+/// `classify_and_log_panic` log shape (kind `ForeignError`). Total — no
+/// unwrap/index/panic.
+fn log_foreign_error(err_id: &str, detail: &str) {
+    let json = std::env::var("SKY_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    if json {
+        eprintln!(
+            "{{\"level\":\"error\",\"kind\":\"ForeignError\",\"errId\":\"{}\",\"message\":\"{}\"}}",
+            err_id,
+            crate::sky_runtime::telemetry::json_escape(detail)
+        );
+    } else {
+        eprintln!("[error] ForeignError (ref {err_id}): {detail}");
+    }
 }
 
 /// Bake a config-derived default for an env var: set `key=val` ONLY when the
@@ -708,5 +737,36 @@ mod tests {
         assert_eq!(classify_panic("index out of bounds: the len is 3"), "IndexOutOfRange");
         assert_eq!(classify_panic("attempt to add with overflow"), "ArithmeticOverflow");
         assert_eq!(classify_panic("something else entirely"), "Unexpected");
+    }
+
+    // [B8] The Sky-visible message NEVER contains the foreign error's Debug detail
+    // (which can carry a bearer token / API key / URL from a transport error). It
+    // is a fixed generic message + a correlation id only.
+    #[derive(Debug)]
+    struct SecretBearingError {
+        #[allow(dead_code)]
+        bearer: &'static str,
+    }
+
+    #[test]
+    fn foreign_error_redacts_secret_from_sky_message() {
+        let e = SecretBearingError { bearer: "Bearer sk_live_SUPERSECRET_KEY" };
+        let msg: String = sky_error_from_foreign(e);
+        assert!(
+            !msg.contains("SUPERSECRET") && !msg.contains("Bearer") && !msg.contains("bearer"),
+            "the foreign Debug detail (with the bearer token) must NOT reach the Sky-visible \
+             message — got: {msg:?}"
+        );
+        assert!(
+            msg.starts_with("external operation failed (ref ") && msg.ends_with(')'),
+            "the Sky-visible message must be the fixed generic message + correlation id — \
+             got: {msg:?}"
+        );
+        // The 8-hex correlation id is present between the fixed prefix and `)`.
+        let id = msg
+            .trim_start_matches("external operation failed (ref ")
+            .trim_end_matches(')');
+        assert_eq!(id.len(), 8, "correlation id is 8 hex chars — got: {id:?}");
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "id must be hex — got: {id:?}");
     }
 }
