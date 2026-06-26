@@ -3119,7 +3119,10 @@ fn parse_fn_item(
                 .unwrap_or(ret.rust_type.trim());
             let output_is_send = inner_rt.is_empty()
                 || is_async_send_output(inner_rt)
-                || is_async_send_seq(inner_rt);
+                || is_async_send_seq(inner_rt)
+                // [Wall-3c #61] An async ctor returning an owned opaque handle
+                // proven Send (in PROVABLY_SEND_RECV_NAMES) is Send-safe to spawn.
+                || is_provably_send_opaque_return(inner_rt);
             if !output_is_send {
                 if tail_audit_enabled() {
                     record_tail_drop(
@@ -4294,6 +4297,33 @@ fn is_async_send_output(s: &str) -> bool {
       | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
       | "f32" | "f64" | "bool" | "char" | "String"
     )
+}
+
+/// [Wall-3c #61] An async fn returning an OWNED opaque handle (`FirestoreDb`,
+/// `Client`, …) that is PROVABLY Send is safe to drive on the multi-thread tokio
+/// executor. `PROVABLY_SEND_RECV_NAMES` is the same proven-Send set the receiver
+/// Send-proof uses (explicit `impl Send` / all-fields-Send / Send-supertrait),
+/// keyed by BOTH the crate-prefixed form and the bare name.
+/// CONSERVATIVE: a type NOT in the set (Rc-bearing, private-field-opaque,
+/// unproven) is absent → the async gate still drops it (no over-bind).
+fn is_provably_send_opaque_return(rt: &str) -> bool {
+    let s = rt.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // Reject reference shapes — only owned opaque values are admitted.
+    if s.starts_with('&') {
+        return false;
+    }
+    // Reject generics / arrays / whitespace-containing compound types.
+    if s.contains('<') || s.contains('[') || s.contains(' ') || s.contains(',') {
+        return false;
+    }
+    let last = s.rsplit("::").next().unwrap_or(s);
+    PROVABLY_SEND_RECV_NAMES.with(|c| {
+        let b = c.borrow();
+        b.contains(s) || b.contains(last)
+    })
 }
 
 /// Async-output sequence variant: `Vec<T>` / `&[T]` / `[T; N]` / `&[T; N]`

@@ -3707,9 +3707,18 @@ inferParamRustTypeFromRegions :: EmitCtx -> String -> Can.Expr -> Maybe String
 inferParamRustTypeFromRegions ctx pname = firstJust . go
   where
     firstJust = foldr (\x acc -> case x of Just _ -> x; Nothing -> acc) Nothing
+    -- [Wall-3c #61] FfiTypeResolve.opaqueValue collapses every nullary non-builtin
+    -- FFI opaque type to the sentinel `Can.TType (Canonical "") "Value" []`. Emitting
+    -- `Value` (= sky_runtime::JsonVal) as a closure-param annotation is WRONG for an
+    -- opaque async ctor return threaded through `Task.andThen` (`move |client: Value|`
+    -- mismatches the real `::crate::Client`). Skip the sentinel so the lambda param is
+    -- left BARE and Rust infers the concrete type from the callee signature. Concrete
+    -- types (i64/bool/String/…) are unaffected.
+    isFfiOpaqueSentinel (Can.TType m "Value" []) = null (ModuleName._name m)
+    isFfiOpaqueSentinel _ = False
     useType region = case Map.lookup region (ecRegionTypes ctx) of
-      Just t | not (hasTypeVars t) -> Just (typeToRustString (ecRecordMap ctx) t)
-      _                            -> Nothing
+      Just t | not (hasTypeVars t), not (isFfiOpaqueSentinel t) -> Just (typeToRustString (ecRecordMap ctx) t)
+      _                                                          -> Nothing
     -- Stop descending into any sub-scope that REBINDS `pname` — a shadowed use
     -- belongs to the inner binding, not this param, so its region type would
     -- mis-annotate ours. (In well-typed Sky a clash would still pin a concrete

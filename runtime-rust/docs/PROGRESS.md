@@ -17,6 +17,34 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — WALL 3c (#61): async constructor returning a provably-Send opaque handle binds
+
+`FirestoreDb::new(project) -> Result<FirestoreDb, _>` (async, opaque-return) was
+dropped: `is_async_send_output` admitted only primitives + String, so an owned
+opaque return failed the async output-Send gate. Two-layer fix:
+- **Inspector** (`main.rs`): new `is_provably_send_opaque_return` consults
+  `PROVABLY_SEND_RECV_NAMES` (the same 4-source proven-Send set the receiver gate
+  uses — explicit `impl Send` / rustc synthetic positive auto-Send / Send-supertrait
+  / all-fields-Send-no-stripped-fields), OR-ed into `output_is_send`. A `!Send`
+  opaque (Rc-bearing / private-field-unprovable) is absent → still drops
+  `async-future-not-send`.
+- **Codegen** (`ExprEmitter.hs`): `FfiTypeResolve.opaqueValue` collapses a nullary
+  opaque FFI type to the sentinel `Can.TType (Canonical "") "Value" []`;
+  `inferParamRustTypeFromRegions` was annotating `move |client: Value|`
+  (Value=JsonVal) → E0308 vs the real `::crate::Client`. New `isFfiOpaqueSentinel`
+  (empty-module `Value` ONLY — a real `Sky.Core.Json` Value has a non-empty module)
+  skips it so the opaque lambda param is left BARE and Rust infers the concrete
+  type from the callee. Non-FFI closure inference unaffected.
+
+**Proof:** fixture `78-ffi-async-opaque-ctor` — async `Client::new("proj")` +
+`Client::ping(&self)` bind end-to-end (`client-ping=4 [ALL OK]`); `RcClient` (!Send)
+absent. 24 ffi-fixtures ok, 166 unit tests, SKY_DCE=0 clean. Guardian-final APPROVE.
+Integrated by hand-applying the 3 hunks (the worktree commit was on a divergent base).
+
+**Affected:** `tools/sky-ffi-inspect-rs/src/main.rs` ·
+`src/Sky/Generate/Rust/Builder/ExprEmitter.hs` ·
+`runtime-rust/tests/sky/78-ffi-async-opaque-ctor/` · `ffi-fixtures-test.sh`.
+
 ## 2026-06-26 — WALL 3b (#60): concrete borrowed-ref sibling binds in a generic method
 
 firestore `get_doc<S: AsRef<str>>(&self, collection: &str, doc: S)` was dropping

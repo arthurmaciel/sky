@@ -1,0 +1,10 @@
+[project]
+name = "78-ffi-async-opaque-ctor"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local asyncopaquector78 crate — async constructor returning a Send opaque handle.
+# Staged via setup.sh; file:// git dep points at the cache path.
+["rust.dependencies"]
+asyncopaquector78 = { git = "file:///home/arthur/.cache/sky/78-ffi-async-opaque-ctor-crate", branch = "master" }

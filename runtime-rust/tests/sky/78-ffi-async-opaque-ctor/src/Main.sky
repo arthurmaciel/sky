@@ -1,0 +1,52 @@
+module Main exposing (main)
+
+-- 78-ffi-async-opaque-ctor: Sky #61 — async constructor returning a Send opaque handle.
+--
+-- Root cause closed: `FirestoreDb::new(project) -> Result<FirestoreDb, _>` was
+-- dropped because `is_async_send_output("FirestoreDb")` admits only primitives +
+-- String.  Post-#61 the output-Send gate consults PROVABLY_SEND_RECV_NAMES, which
+-- includes any crate-local type proven Send (explicit impl / all-fields-Send /
+-- Send-supertrait).
+--
+-- POSITIVE (bind + run end-to-end):
+--   client = Client.new "proj"       -- async ctor returning opaque; #61 BINDS it
+--   Client.ping client               -- async method on Send opaque; proves handle threads
+--
+-- NEGATIVE (must be ABSENT from bindings — coverage-dropped):
+--   RcClient.new "proj"  -- !Send opaque return → DROP (not in PROVABLY_SEND_RECV_NAMES)
+--   RcClient.poke rc     -- async method on !Send receiver → DROP
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Asyncopaquector78 as C
+import Std.Log exposing (println)
+
+-- POSITIVE: async ctor returns opaque Client; then async ping uses it.
+-- `Client.new` is bound post-#61 (was DROP pre-#61).
+-- `Client.ping` returns the project-name length as sentinel.
+-- Binding sigs (from .skyi):
+--   new_from_client  : String -> Task Error Client
+--   ping_from_client : Client -> Task Error Int
+-- Both return Task Error <value> directly (no extra Result wrapper).
+checkClient : Task Error ()
+checkClient =
+    C.new_from_client "proj"
+        |> Task.andThen
+            (\client ->
+                C.ping_from_client client
+                    |> Task.andThen
+                        (\n ->
+                            -- "proj" is 4 chars; ping returns len as i64
+                            if n == 4 then
+                                println "client-ping=4"
+
+                            else
+                                Task.fail (Error.unexpected ("client-ping=UNEXPECTED " ++ String.fromInt n))
+                        )
+            )
+
+main : Task Error ()
+main =
+    checkClient
+        |> Task.andThen (\_ -> println "[ALL OK]")
