@@ -61,3 +61,34 @@ yields a concrete `Customizable<ConcreteResp>` and `Customizable` is Send-when-a
 the stripe struct is PhantomData/owned-field), `send` binds by the shipped WALL-H path. WALL-I
 is therefore mostly PRODUCER plumbing (features + provided-method projection + Output resolution),
 not new Send/async mechanics.
+
+## 6. Refinement (2026-06-26, customize-chain construction attempt) — it is NOT "mostly plumbing"
+
+Attempted to add the `customize()` producer to fixture 92's req-crate. Construction revealed
+WALL-I's customize-chain is a DISTINCT REGIME, not plumbing over the shipped mechanics:
+
+1. **Orphan rule.** `customize` is a PROVIDED method on `WireReq` (the `StripeRequest` analog).
+   To exercise projection it needs `impl WireReq for CreateThing { type Output = … }`. Both
+   `WireReq` and `CreateThing` are req-crate-local, so the impl MUST live in req-crate — its
+   `Output` therefore can't be the cross-crate `Resp` (client-crate) without a 3rd crate or
+   moving `Resp`. The real stripe shape sidesteps this (resource + its `StripeRequest` impl +
+   the response type co-locate in one product crate), so the synthetic must mirror that:
+   `Decode`-type + resource + `WireReq` impl all in ONE crate.
+2. **Multi-impl-Decode breaks the shipped T-mono.** Fixture 92's `send` GREEN relies on `Decode`
+   being UNIQUE-impl (T mono's to `Resp` via WALL-G). A second `Decode` type (the resource's
+   `Output`) makes Decode multi-impl → T no longer mono's. So `Customizable<ConcreteResp>` in the
+   chain arises NOT from T-mono but from `customize()` returning `Customizable<Self::Output>`
+   with `Self::Output` resolved to a concrete — a NEW mechanism (concrete-instantiation-via-
+   associated-type-return), distinct from the unique-impl-decode T-mono WALL-H shipped.
+3. **Therefore:** WALL-I needs its OWN fixture (`93-ffi-customize-chain`, single-crate resource +
+   WireReq-impl + Output co-located) and a NEW mechanism: (a) project a PROVIDED trait method
+   (`customize`) onto a concrete resource Self (WALL-F's `project_trait_default_methods` may
+   fire — CONFIRM), (b) resolve `Self::Output` to the concrete response type, (c) recognise the
+   returned concrete `Customizable<ConcreteResp>` and bind `send` on it (WALL-H's Send-proof
+   applies to the concrete instantiation, but the instantiation must be SEEN — it comes from the
+   assoc-type return, not a T-mono). This corrects §5's "mostly plumbing" — the Send/async
+   mechanics are reused, but the PRODUCER recognition (provided-method + assoc-type-return) is new.
+
+**Next-session order:** build `93-ffi-customize-chain` (single-crate) RED → confirm whether
+`customize` projects + `Self::Output` resolves today (probe) → implement the gap → GREEN under
+SKY_DCE=0 → then the feature-gated real-stripe resource crate.
