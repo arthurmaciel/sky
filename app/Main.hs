@@ -40,7 +40,7 @@ import qualified System.Info
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Aeson as Aeson
-import Data.Aeson ((.:), (.:?), (.!=))
+import Data.Aeson ((.:), (.:?), (.!=), (.=))
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
@@ -1378,7 +1378,20 @@ regenMissingRustBindings deps = do
         let slug = FfiGen.slugify name
         not <$> doesFileExist (".skycache/ffi/rust/" ++ slug ++ ".kernel.json")
         ) deps
-    forM_ missing $ \(name, spec) -> case spec of
+    -- [WALL-G #84] With ≥2 Rust FFI deps, inspect them in ONE invocation via a JSON
+    -- manifest so the cross-crate concrete-impl index spans every crate (a method
+    -- whose generic param is bounded by a trait impl'd in a SIBLING dep — stripe
+    -- `send<C: StripeClient>` resolving to the facade's `impl StripeClient for Client`).
+    -- The manifest carries ALL deps (not just `missing`) so the index is complete even
+    -- when only one crate's bindings need regenerating; we then (re)write every result
+    -- (idempotent). A single-crate project keeps the per-crate path (no siblings).
+    if null missing
+        then return ()
+        else if length deps >= 2
+            then regenViaManifest deps
+            else forM_ missing regenOne
+  where
+    regenOne (name, spec) = case spec of
         RustVersion ver feats -> do
             -- [#70 stripe] Thread the sky.toml crates.io version to the inspector as
             -- `name@version` (a no-op `*`/empty stays the bare name → latest stable).
@@ -1391,7 +1404,31 @@ regenMissingRustBindings deps = do
         RustGitDep url mr mb mt -> do
             r <- RustFfi.runRustInspectorGit name url mr mb mt []
             handleInspectorResult name r
-  where
+
+    -- [WALL-G #84] Build the JSON manifest from every dep (with its own version /
+    -- features / git source), run the inspector once, and write all bindings.
+    regenViaManifest allDeps = do
+        let manifestPath = ".skycache/ffi/rust/.wallg-manifest.json"
+        BL.writeFile manifestPath (Aeson.encode (map depToManifestEntry allDeps))
+        result <- RustFfi.runRustInspectorManifestFile manifestPath
+        case result of
+            Left err -> putStrLn $ "   (rust ffi manifest) " ++ err
+            Right pkgs -> forM_ pkgs $ \info -> do
+                names <- RustFfi.generateRustBindings info
+                putStrLn $ "   " ++ FfiGen._pkgName info ++ ": "
+                    ++ show (length names) ++ " bindings"
+
+    depToManifestEntry (name, spec) = case spec of
+        RustVersion ver feats ->
+            let nm = if not (null ver) && ver /= "*" then name ++ "@" ++ ver else name
+            in Aeson.object $ ["name" .= nm]
+                ++ (if null feats then [] else ["features" .= feats])
+        RustGitDep url mr mb mt ->
+            Aeson.object $ ["name" .= name, "git" .= url]
+                ++ maybe [] (\r -> ["rev" .= r]) mr
+                ++ maybe [] (\b -> ["branch" .= b]) mb
+                ++ maybe [] (\t -> ["tag" .= t]) mt
+
     handleInspectorResult name result = case result of
         Left err ->
             putStrLn $ "   " ++ name ++ ": " ++ err

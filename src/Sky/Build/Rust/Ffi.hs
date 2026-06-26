@@ -11,6 +11,7 @@ module Sky.Build.Rust.Ffi
     , runRustInspector       -- :: String -> [String] -> IO (Either String PkgInfo)
     , runRustInspectorGit    -- :: String -> String -> Maybe String -> Maybe String -> Maybe String -> [String] -> IO (Either String PkgInfo)
     , runRustInspectorMulti  -- :: [String] -> [String] -> IO [Either String PkgInfo]
+    , runRustInspectorManifestFile  -- :: FilePath -> IO (Either String [PkgInfo])
     , emitRustSkyi           -- :: PkgInfo -> String
     , rustModuleName         -- :: String -> String
     , rustKernelName         -- :: PkgInfo -> String
@@ -146,6 +147,28 @@ quoteShell s = "'" ++ concatMap esc s ++ "'"
 runRustInspectorMulti :: [String] -> [String] -> IO [Either String PkgInfo]
 runRustInspectorMulti []       _    = return []
 runRustInspectorMulti pkgPaths feats = mapM (\p -> runRustInspector p feats) pkgPaths
+
+
+-- | [WALL-G #84] Single-invocation, multi-crate mode driven by a JSON manifest
+-- (`[{"name","features"?,"git"?,"rev"?,"branch"?,"tag"?}]`). ALL of a project's
+-- Rust FFI crates are inspected in ONE process so the cross-crate concrete-impl
+-- index spans them — the crate defining `op<C: Trait>` resolves to the unique
+-- `impl Trait for Concrete` living in a sibling crate. The inspector emits a JSON
+-- ARRAY of PkgInfo (one per manifest entry, in order). The caller writes the
+-- manifest file (it knows each dep's git/version/features) and consumes the array.
+runRustInspectorManifestFile :: FilePath -> IO (Either String [PkgInfo])
+runRustInspectorManifestFile manifestPath = do
+    resolved <- resolveRustInspector
+    case resolved of
+        Left e    -> return (Left e)
+        Right bin -> do
+            let cmd' = quoteShell bin ++ " --manifest " ++ quoteShell manifestPath
+            (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd'] ""
+            if null out
+                then return (Left $ "sky-ffi-inspect-rs: empty output; stderr: " ++ err)
+                else case A.eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) of
+                    Left e  -> return (Left $ "sky-ffi-inspect-rs: manifest json: " ++ e)
+                    Right ps -> return (Right ps)
 
 
 -- | Generate the Rust FFI binding artifacts (.rs wrapper, .skyi catalogue,

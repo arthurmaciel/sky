@@ -17,6 +17,47 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — WALL-G SHIPPED (#84): cross-crate unique-impl monomorphization (stripe `send` gating piece)
+
+**The gating stripe-operation wall is DONE.** A method whose generic param `C: Trait` has
+no impl in its own crate now monomorphizes to the UNIQUE `impl Trait for Concrete` living
+in a SIBLING project crate — the stripe `send<C: StripeClient>` shape (send in
+`async-stripe-client-core`, the unique `impl StripeClient for Client` in the `async-stripe`
+facade).
+
+**Mechanism (generalizes #52/WALL-F from crate-local to cross-crate):**
+- **Inspector** (`tools/sky-ffi-inspect-rs/src/main.rs`): a process-global
+  `GLOBAL_XC_IMPLS` index keyed by the trait's CANONICAL path (`doc["paths"]`, stable
+  across crates), populated from EVERY project crate by `mirror_into_global_xc_index`
+  (accepts an EXTERNAL-trait impl as long as the impl + concrete `for` are crate-local).
+  Each entry is a FROZEN `XcImpl { for_node, self_public_path, send_ok }` resolved in the
+  OWNING crate's pass (B2/B3/B6 — the binding crate can't re-resolve a foreign rustdoc id).
+  `concrete_for_unique_impl` falls back to it (after the same-crate index); the substitute
+  is a synthetic `{"resolved_path":{"__sky_xc_path":"<public path>"}}` node both renderers
+  emit VERBATIM. Two-pass `main` (populate→bind) for a multi-crate run; single-crate is
+  byte-identical to pre-WALL-G (per-crate index hits first, global fallback inert).
+- **`--manifest` CLI** (per-crate name/features/git JSON) so ONE inspector run indexes all
+  crates; **Haskell** `regenMissingRustBindings` writes it + calls
+  `runRustInspectorManifestFile` once when ≥2 Rust deps (`app/Main.hs`,
+  `src/Sky/Build/Rust/Ffi.hs`).
+- **Guardian-final B-1 fix:** the async-Send OPAQUE gate matches a cross-crate concrete by
+  FULL path only (a bare-last-segment fallback would admit a sibling's same-named `!Send`
+  concrete → E0277).
+
+**Verified.** Fixture `91-ffi-cross-crate-impl` (two sibling git crates) builds GREEN under
+`SKY_DCE=0` + runs `op=real:hi [ALL OK]`; `op` wrapper references `&client_crate::RealClient`.
+Full FFI gate **37 ok · 0 fail**; **208** inspector unit tests (incl. 0/1/2-impl ambiguity +
+the B-1 full-path-only gate). Async-opaque fixtures (74/78/82/90) re-pass with the B-1 binary
+(no over-drop). NEXT in the stripe arc: WALL-H (generic-Self miniserde-T `send`, blocked on
+this) + WALL-I (resource builders).
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (global xc index + manifest + B-1),
+`app/Main.hs` + `src/Sky/Build/Rust/Ffi.hs` (single-invocation manifest),
+`runtime-rust/tests/sky/91-ffi-cross-crate-impl/`, `runtime-rust/scripts/ffi-fixtures-test.sh`,
+the WALL-G spec.
+
+---
+
 ## 2026-06-26 — stripe (#70): version-threading SHIPPED + SOLID re-measure + WALL-G design (guardian-approved)
 
 **Version-threading shipped (b6bf0c07).** `regenMissingRustBindings` (app/Main.hs)

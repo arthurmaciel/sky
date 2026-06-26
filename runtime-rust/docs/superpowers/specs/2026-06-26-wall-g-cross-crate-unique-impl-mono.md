@@ -1,6 +1,26 @@
 # WALL-G — Cross-crate unique-impl concrete monomorphization
 
-**Status:** DESIGN — guardian APPROVE-WITH-CONSTRAINTS (B1–B7 folded in §3.5)
+**Status:** SHIPPED — implemented + guardian-final APPROVE-WITH-FIXES (B-1 fixed). Fixture
+`91-ffi-cross-crate-impl` GREEN under `SKY_DCE=0` + runs `op=real:hi [ALL OK]`; full FFI
+gate 37 ok · 0 fail; 208 inspector unit tests.
+
+**Implementation notes (vs design):**
+- **B-1 (guardian-final, fixed):** the async-Send OPAQUE gate (`recv_provably_async_send`)
+  now matches a cross-crate concrete by its FULL owning-crate path only — a bare-last-
+  segment fallback would have admitted a sibling crate's same-named `!Send` concrete when
+  the binding crate also defines a Send `Client` (E0277). Unit test
+  `wallg_async_send_opaque_full_path_only`.
+- **B4 (version skew) — closed by cargo unification, not implemented.** All bindings live
+  in one `sky-app` crate that deps every project crate; cargo unifies a shared semver-
+  compatible trait crate to ONE version across the graph, so two project crates can't see
+  path-equal-but-type-incompatible traits. An incompatible major resolves as a *distinct*
+  crate → distinct canonical path → no false key-equality. The skew refusal is unreachable
+  here; `XcImpl` omits the version fields.
+- **Owning-crate dep:** WALL-G requires the impl-providing crate to be an explicit project
+  `[rust.dependencies]` (true for the stripe facade) — its types resolve in `sky-app`'s
+  Cargo.toml because the user added it.
+
+**Original design + B1–B7 below.**
 **Epic:** stripe (#70) auto-FFI — the gating sub-step of the stripe *operation* arc.
 **Date:** 2026-06-26
 **Author:** runtime-rust agent (measurement-grounded)

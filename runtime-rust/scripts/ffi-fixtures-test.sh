@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -848,6 +848,70 @@ run_vec_struct_field() {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 91-ffi-cross-crate-impl — WALL-G (#84): CROSS-CRATE unique-impl monomorphization.
+# TWO sibling git crates: wire-crate defines `trait Wire` + `Req::op<C: Wire>` with
+# NO impl; client-crate holds the unique `impl Wire for RealClient`. WALL-G builds a
+# process-global, canonical-path-keyed concrete-impl index spanning BOTH (one
+# inspector invocation via the `--manifest` Haskell single-call), resolves `op`'s
+# `C: Wire` to the cross-crate `client_crate::RealClient`, and emits a wrapper that
+# references it by the FROZEN owning-crate public path. This is the stripe
+# `send<C: StripeClient>` shape (send in client-core, impl in the facade).
+# Built under FORCED SKY_DCE=0 so the cross-crate wrapper MUST cargo-compile.
+# POSITIVE: `op_from_req` binds (param `&client_crate::RealClient`) + runs "real:hi".
+# Custom two-crate staging (the shared stage_workdir assumes a single `$base-crate`).
+# ─────────────────────────────────────────────────────────────────────────────
+run_cross_crate_impl() {
+  local base=91-ffi-cross-crate-impl
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+  [ -f "$src/setup.sh" ]     || { _fail "$base (no setup.sh)"; return; }
+
+  # 1. Stage BOTH crates (wire at …-wire, client at …-client).
+  bash "$src/setup.sh" >/tmp/ffi-fixture-"$base".setup.log 2>&1 || {
+    _fail "$base (setup.sh failed — see /tmp/ffi-fixture-$base.setup.log)"; return; }
+  local wireDir="$HOME/.cache/sky/$base-wire" cliDir="$HOME/.cache/sky/$base-client"
+  [ -d "$wireDir/.git" ] && [ -d "$cliDir/.git" ] || {
+    _fail "$base (expected staged crates at $wireDir + $cliDir)"; return; }
+
+  # 2. Clean workdir copy of sources + sky.toml; rewrite BOTH file:// URLs to the
+  #    actually-staged paths (host-$HOME-agnostic, matched by the stable suffix).
+  local wd; wd="$(mktemp -d "${TMPDIR:-/tmp}/ffi-fixture-$base.XXXXXX")" || { _fail "$base (mktemp)"; return; }
+  mkdir -p "$wd/src"
+  cp -r "$src/src/." "$wd/src/" 2>/dev/null || true
+  cp "$src/sky.toml" "$wd/sky.toml" || { _fail "$base (cp sky.toml)"; rm -rf "$wd"; return; }
+  local escW escC
+  escW="$(printf 'file://%s' "$wireDir" | sed -e 's/[\/&]/\\&/g')"
+  escC="$(printf 'file://%s' "$cliDir"  | sed -e 's/[\/&]/\\&/g')"
+  sed -i -E "s|file://[^\"]*/$base-wire|$escW|g;   s|file://[^\"]*/$base-client|$escC|g" "$wd/sky.toml" \
+    || { _fail "$base (sed sky.toml)"; rm -rf "$wd"; return; }
+
+  # 3. Build under forced SKY_DCE=0 (the cross-crate wrapper must cargo-compile even
+  #    in full-surface emit — the type-checks-but-cargo-fails class this gate exists for).
+  local bin; bin="$(SKY_DCE=0 build_fixture "$wd")" || {
+    _fail "$base (build failed — cross-crate op_from_req cargo-fail? E0412/E0433/E0277)"; rm -rf "$wd"; return; }
+
+  # 4. POSITIVE: the cross-crate method binds, typed against the sibling concrete.
+  local binds="$wd/sky-out/rust/src/wire_crate_bindings.rs"
+  if ! rg -q 'fn wire_crate_op_from_req' "$binds" 2>/dev/null; then
+    _fail "$base: cross-crate method 'op' did NOT bind (WALL-G global index broken)"; rm -rf "$wd"; return
+  fi
+  if ! rg -q 'client_crate::RealClient' "$binds" 2>/dev/null; then
+    _fail "$base: op wrapper does not reference the frozen cross-crate path client_crate::RealClient (B2)"; rm -rf "$wd"; return
+  fi
+
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (cross-crate op<C: Wire> → client_crate::RealClient bound+ran 'real:hi' · SKY_DCE=0 cargo-clean · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
 # ── Drive ────────────────────────────────────────────────────────────────────
 FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -867,6 +931,7 @@ for n in "${FIXTURES[@]}"; do
     86-ffi-transitive-dep-path) run_transitive_dep ;;
     89-ffi-static-str-into)   run_static_str_into ;;
     90-ffi-default-trait-method-mono) run_default_trait_mono ;;
+    91-ffi-cross-crate-impl)  run_cross_crate_impl ;;
     *)                        run_basic "$n" ;;
   esac
 done

@@ -468,11 +468,19 @@ fn main() {
     let mut git_tag: Option<String> = None;
 
     let mut audit = false;
+    // [WALL-G #84] `--manifest <path>` points at a JSON array of crate specs
+    // (`[{"name","features"?,"git"?,"rev"?,"branch"?,"tag"?}]`). It lets ONE inspector
+    // run process EVERY project FFI crate with its OWN git source + features — required
+    // for the cross-crate concrete-impl index (the crate defining `op<C: Trait>` and
+    // the sibling impl'ing `Trait` are different crates). Without it the single global
+    // `--git` could not describe two crates from two repos.
+    let mut manifest_path: Option<String> = None;
 
     let mut i = 0;
     while i < raw_args.len() {
         match raw_args[i].as_str() {
             "--audit" => { audit = true; }
+            "--manifest" => { i += 1; if i < raw_args.len() { manifest_path = Some(raw_args[i].clone()); } }
             "--features" => {
                 i += 1;
                 if i < raw_args.len() {
@@ -495,8 +503,9 @@ fn main() {
         i += 1;
     }
 
-    if crate_args.is_empty() {
+    if crate_args.is_empty() && manifest_path.is_none() {
         eprintln!("Usage: sky-ffi-inspect-rs [--features f1,f2] [--git URL [--rev R | --branch B | --tag T]] <crate-name> [crate-name...]");
+        eprintln!("   or: sky-ffi-inspect-rs --manifest <crates.json>  (multi-crate, per-crate git/features — WALL-G cross-crate index)");
         eprintln!();
         eprintln!("Requires nightly Rust: rustup toolchain install nightly");
         std::process::exit(1);
@@ -513,16 +522,66 @@ fn main() {
         TAIL_AUDIT_ENABLED.with(|c| c.set(true));
     }
 
-    let results: Vec<PkgInfo> = crate_args
+    // [WALL-G #84] Unify the invocation into a list of per-crate specs (name + its OWN
+    // features + its OWN optional git source). From `--manifest` (the multi-crate
+    // cross-crate path) when given, else from the legacy CLI args (the global
+    // `--features`/`--git` apply to every positional crate, byte-identical to before).
+    let crate_specs: Vec<CrateSpec> = match &manifest_path {
+        Some(p) => match parse_manifest(p) {
+            Ok(specs) => specs,
+            Err(e) => {
+                let err = PkgInfo {
+                    pkg: p.clone(),
+                    name: "error".into(),
+                    version: String::new(),
+                    functions: vec![],
+                    modules: vec![],
+                    errors: vec![format!("manifest parse error: {}", e)],
+                    notes: vec![],
+                    transitive_deps: vec![],
+                };
+                println!("{}", serde_json::to_string_pretty(&err).unwrap_or_default());
+                std::process::exit(1);
+            }
+        },
+        None => crate_args
+            .iter()
+            .map(|n| CrateSpec { name: n.clone(), features: features.clone(), git: git_clone(&git) })
+            .collect(),
+    };
+
+    // [WALL-G #84] Reset the process-global cross-crate impl index once per run.
+    GLOBAL_XC_IMPLS.with(|c| c.borrow_mut().clear());
+
+    // [WALL-G #84] Cross-crate unique-impl monomorphization needs EVERY project crate's
+    // concrete impls indexed BEFORE any crate is bound (the crate defining `op<C: Wire>`
+    // is typically processed before the sibling that impls `Wire`). For a multi-crate
+    // invocation, run a PHASE-1 populate pass (discarding bindings) so `GLOBAL_XC_IMPLS`
+    // is complete, then bind for real. `mirror_into_global_xc_index` dedups by public
+    // path, so the second pass re-populating is idempotent. A single-crate invocation
+    // skips the extra pass — there are no siblings, and the global fallback is inert
+    // (the per-crate index already finds any same-crate impl first), so behaviour is
+    // byte-identical to pre-WALL-G.
+    if crate_specs.len() > 1 {
+        for spec in &crate_specs {
+            let _ = inspect_crate(&spec.name, &spec.features, spec.git.as_ref());
+        }
+    }
+
+    let crate_args: Vec<String> = crate_specs.iter().map(|s| s.name.clone()).collect();
+    let results: Vec<PkgInfo> = crate_specs
         .iter()
-        .map(|name| inspect_crate(name, &features, git.as_ref()))
+        .map(|spec| inspect_crate(&spec.name, &spec.features, spec.git.as_ref()))
         .collect();
 
     if audit {
         emit_tail_audit_report(&crate_args, &results);
     }
 
-    let json = if crate_args.len() == 1 {
+    // A `--manifest` run ALWAYS emits a JSON array (the Haskell caller decodes
+    // `[PkgInfo]`), even for a 1-entry manifest — guardian N-1: key the shape on the
+    // manifest, not the result count, so the multi-crate contract can't silently break.
+    let json = if manifest_path.is_none() && results.len() == 1 {
         serde_json::to_string_pretty(&results[0])
     } else {
         serde_json::to_string_pretty(&results)
@@ -615,11 +674,87 @@ fn emit_tail_audit_report(crate_args: &[String], results: &[PkgInfo]) {
 // ── Top-level inspection ───────────────────────────────────────────────
 
 /// Optional git source for a crate dep. None ⇒ resolve via crates.io.
+#[derive(Clone)]
 struct GitSource {
     url: String,
     rev: Option<String>,
     branch: Option<String>,
     tag: Option<String>,
+}
+
+/// [WALL-G #84] One crate's full inspection spec — its name, its OWN feature set, and
+/// its OWN optional git source. The `--manifest` multi-crate form carries a list of
+/// these so a single inspector run can index every project FFI crate (each from its
+/// own repo / crates.io version / feature set) into the shared cross-crate index.
+struct CrateSpec {
+    name: String,
+    features: Vec<String>,
+    git: Option<GitSource>,
+}
+
+/// Clone an `Option<&GitSource>`-style borrow into an owned `Option<GitSource>`.
+fn git_clone(g: &Option<GitSource>) -> Option<GitSource> {
+    g.clone()
+}
+
+/// [WALL-G #84] Parse the `--manifest` JSON: an array of
+/// `{"name": str, "features"?: [str], "git"?: str, "rev"?: str, "branch"?: str, "tag"?: str}`.
+/// `git` present ⇒ a `GitSource`; absent ⇒ crates.io (the `name` may carry an `@version`
+/// pin, handled downstream in `run_rustdoc`). Returns a clear error string on malformed
+/// input (the caller emits it as a PkgInfo error and exits non-zero).
+fn parse_manifest(path: &str) -> Result<Vec<CrateSpec>, String> {
+    let body = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read manifest {}: {}", path, e))?;
+    let val: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("invalid manifest JSON: {}", e))?;
+    let arr = val.as_array().ok_or_else(|| "manifest must be a JSON array".to_string())?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, e) in arr.iter().enumerate() {
+        let name = e
+            .get("name")
+            .and_then(|n| n.as_str())
+            .ok_or_else(|| format!("manifest entry {} missing string `name`", i))?
+            .to_string();
+        let features = e
+            .get("features")
+            .and_then(|f| f.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let git = e.get("git").and_then(|g| g.as_str()).map(|url| GitSource {
+            url: url.to_string(),
+            rev: e.get("rev").and_then(|x| x.as_str()).map(|s| s.to_string()),
+            branch: e.get("branch").and_then(|x| x.as_str()).map(|s| s.to_string()),
+            tag: e.get("tag").and_then(|x| x.as_str()).map(|s| s.to_string()),
+        });
+        out.push(CrateSpec { name, features, git });
+    }
+    if out.is_empty() {
+        return Err("manifest is empty".to_string());
+    }
+    Ok(out)
+}
+
+/// [WALL-G #84] A FROZEN cross-crate concrete-impl record (see `GLOBAL_XC_IMPLS`).
+/// Every field is resolved in the OWNING crate's pass so the binding crate never
+/// re-resolves a foreign rustdoc id (guardian B2/B3/B6 — illegal states unrepresentable
+/// at emission). An entry exists ⇒ the concrete is nameable, reachable, and its Send
+/// verdict is known; absence ⇒ over-drop (sound).
+#[derive(Clone)]
+struct XcImpl {
+    /// Synthetic `for` type node — `{"resolved_path":{"__sky_xc_path":"<public path>",…}}`
+    /// — flowing into `subst_generic_json` exactly like a #52 same-crate `for` node,
+    /// but carrying the owning-crate public path the renderer emits VERBATIM (B2).
+    for_node: serde_json::Value,
+    /// The rendered owning-crate public path (`client_crate::RealClient`). Registered
+    /// into `PROVABLY_SEND_OPAQUE_NAMES` when `send_ok`, so the async gate admits it.
+    self_public_path: String,
+    /// Frozen owning-crate async-Send verdict (B3). `false` ⇒ async methods over this
+    /// concrete keep dropping `async-future-not-send` (no E0277 at `tokio::spawn`).
+    send_ok: bool,
 }
 
 fn inspect_crate(crate_name: &str, features: &[String], git: Option<&GitSource>) -> PkgInfo {
@@ -1183,6 +1318,14 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     // Send. Reuses the three #52 Send-proof sources just populated above. Must run
     // AFTER those three sets are filled.
     PROVABLY_SEND_RECV_NAMES.with(|c| *c.borrow_mut() = collect_provably_send_recv_names(index));
+
+    // [WALL-G #84] Mirror this crate's concrete trait-impls into the process-global
+    // cross-crate index, keyed by canonical trait path. NOT reset per crate (it
+    // accumulates across the project's crates); the per-crate local-trait-id→canon
+    // map IS reset here. Runs AFTER REACHABLE_PATHS + the Send sources above (it
+    // freezes both the public path and the Send verdict in THIS owning crate).
+    LOCAL_TRAIT_ID_CANON_PATH.with(|c| c.borrow_mut().clear());
+    mirror_into_global_xc_index(doc);
 
     for (item_id, item) in index {
         // Only items from this crate (crate_id == 0); deps have crate_id > 0
@@ -2173,6 +2316,137 @@ fn collect_trait_concrete_impls(
         }
     }
     out
+}
+
+/// [WALL-G #84] The CANONICAL path string of a rustdoc id via `doc["paths"]`
+/// (joined `::`). Works for BOTH a crate-local id and a foreign id — rustdoc records
+/// every id it knows (local + external) in `paths` with its provenance-qualified
+/// canonical path. This is the cross-crate-STABLE key: a trait's local id in its
+/// defining crate and its foreign id in a crate that impls it both resolve here to
+/// the SAME string (verified: `stripe_client_core::stripe_request::StripeClient`).
+fn canon_path_of_id(paths: Option<&serde_json::Map<String, serde_json::Value>>, id: &str) -> Option<String> {
+    paths
+        .and_then(|m| m.get(id))
+        .and_then(|e| e.get("path"))
+        .and_then(|p| p.as_array())
+        .map(|segs| {
+            segs.iter()
+                .filter_map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("::")
+        })
+        .filter(|s| !s.is_empty())
+}
+
+/// [WALL-G #84] Mirror THIS crate's concrete trait-impls into the process-global
+/// cross-crate index (`GLOBAL_XC_IMPLS`), keyed by the trait's CANONICAL path. The
+/// generalization of `collect_trait_concrete_impls`: it accepts an impl whose TRAIT
+/// is EXTERNAL (defined in a sibling project dep — the stripe facade impl'ing
+/// client-core's `StripeClient`), as long as the impl block + the concrete `for`
+/// Self are CRATE-LOCAL and the `for` is reachable HERE. Every recorded field is
+/// FROZEN in this (owning) crate's pass (guardian B2/B3/B6): `self_public_path` is
+/// rendered now (the binding crate can't re-resolve a foreign id), and `send_ok` is
+/// proven now via the owning crate's Send sources. Dedup by `self_public_path` makes
+/// re-population (the two-pass loop) idempotent while still counting two GENUINELY
+/// distinct cross-crate impls (different public paths) as ambiguous → drop.
+///
+/// Also populates `LOCAL_TRAIT_ID_CANON_PATH` (this crate's local trait id → canonical
+/// path) so the bind-time lookup can translate the per-crate trait KEY into the global
+/// key.  MUST run AFTER REACHABLE_PATHS + the Send sources are populated.
+fn mirror_into_global_xc_index(doc: &serde_json::Value) {
+    let Some(index) = doc["index"].as_object() else { return };
+    let paths = doc["paths"].as_object();
+
+    // Local trait id → canonical path (for the bind-time key translation).
+    for (id, item) in index {
+        if item["crate_id"].as_u64().unwrap_or(1) != 0 {
+            continue;
+        }
+        if item["inner"].get("trait").is_none() {
+            continue;
+        }
+        if let Some(cp) = canon_path_of_id(paths, id) {
+            LOCAL_TRAIT_ID_CANON_PATH.with(|c| {
+                c.borrow_mut().insert(id.clone(), cp);
+            });
+        }
+    }
+
+    for (_id, item) in index {
+        if item["crate_id"].as_u64().unwrap_or(1) != 0 {
+            continue; // impl block must be crate-local (owning crate).
+        }
+        let Some(impl_data) = item["inner"].get("impl") else { continue };
+        let Some(trait_node) = impl_data.get("trait") else { continue };
+        let Some(trait_id) = trait_node.get("id") else { continue };
+        let trait_key = item_id_to_str(trait_id);
+        // Canonical path of the impl'd trait — LOCAL or EXTERNAL both resolve here.
+        let Some(canon) = canon_path_of_id(paths, &trait_key) else { continue };
+        let for_val = impl_data.get("for").or_else(|| impl_data.get("for_"));
+        let Some(for_val) = for_val else { continue };
+        // Non-generic, concrete, named Self only (same gate as #52).
+        if !self_is_concrete_named(for_val) {
+            continue;
+        }
+        let Some(self_id) = for_val.get("resolved_path").and_then(|rp| rp.get("id")) else {
+            continue;
+        };
+        // B2/B6: the concrete Self must be reachable in THIS (owning) crate; render
+        // its public path NOW. `reachable_local_path` returns the crate-prefixed
+        // canonical path (`client_crate::RealClient`) — exactly what the sky-app
+        // crate (which deps every project crate) needs.
+        if reachable_local_path(self_id).is_none() {
+            continue;
+        }
+        let self_public_path = rustdoc_type_to_rust_str(for_val);
+        if self_public_path.is_empty() || self_public_path.contains("__sky_xc_path") {
+            continue;
+        }
+        // B3: freeze the async-Send verdict in the owning crate. Sound proof =
+        // explicit `impl Send` OR all-fields-Send OR rustdoc's own auto-Send
+        // derivation (synthetic; accounts for private fields). Unproven → send_ok
+        // false → the async gate drops async methods over this concrete (sync ones
+        // still bind).
+        let self_id_str = item_id_to_str(self_id);
+        let send_ok = EXPLICIT_SEND_TYPE_IDS.with(|s| s.borrow().contains(&self_id_str))
+            || ALL_FIELDS_SEND_TYPE_IDS.with(|s| s.borrow().contains(&self_id_str))
+            || SYNTHETIC_SEND_TYPE_IDS.with(|s| s.borrow().contains(&self_id_str));
+        // The synthetic substitute node the binding crate renders VERBATIM (B2).
+        let synthetic = serde_json::json!({
+            "resolved_path": { "__sky_xc_path": self_public_path }
+        });
+        GLOBAL_XC_IMPLS.with(|c| {
+            let mut map = c.borrow_mut();
+            let entry = map.entry(canon).or_default();
+            if !entry.iter().any(|e| e.self_public_path == self_public_path) {
+                entry.push(XcImpl {
+                    for_node: synthetic,
+                    self_public_path,
+                    send_ok,
+                });
+            }
+        });
+    }
+}
+
+/// [WALL-G #84] The UNIQUE cross-crate concrete impl for a trait's canonical path,
+/// or None when 0 / >1 (ambiguous → drop, same over-drop-is-sound rule as #52).
+fn xc_unique_for_canon(canon: &str) -> Option<XcImpl> {
+    GLOBAL_XC_IMPLS.with(|c| {
+        let map = c.borrow();
+        match map.get(canon) {
+            Some(v) if v.len() == 1 => v.first().cloned(),
+            _ => None,
+        }
+    })
+}
+
+/// [WALL-G #84] Translate a per-crate trait KEY (local rustdoc id) into the unique
+/// cross-crate `XcImpl`, or None. The bridge from the same-crate `concrete_for_unique_impl`
+/// key space to the canonical-path-keyed global index.
+fn xc_unique_for_trait_key(trait_key: &str) -> Option<XcImpl> {
+    let canon = LOCAL_TRAIT_ID_CANON_PATH.with(|c| c.borrow().get(trait_key).cloned())?;
+    xc_unique_for_canon(&canon)
 }
 
 /// [#52] Crate-local trait ids whose declaration carries a `Send` supertrait
@@ -3735,6 +4009,34 @@ thread_local! {
     static TRAIT_CONCRETE_IMPLS: std::cell::RefCell<HashMap<String, Vec<serde_json::Value>>> =
         std::cell::RefCell::new(HashMap::new());
 
+    // [WALL-G #84] CROSS-CRATE concrete-impl index — the generalization of #52 to a
+    // multi-crate project. Keyed by the trait's CANONICAL PATH STRING (joined `::`,
+    // e.g. `wire_crate::Wire`, `stripe_client_core::stripe_request::StripeClient`),
+    // which is STABLE across crates (rustdoc `doc["paths"]` resolves both a local id
+    // and a foreign id to the same canonical path). Unlike `TRAIT_CONCRETE_IMPLS`
+    // this is NOT reset per crate — `mirror_into_global_xc_index` accumulates every
+    // project crate's concrete impls during a Phase-1 pass (reset ONCE per process in
+    // `main`). The lookup (`concrete_for_unique_impl` global fallback) fires only when
+    // the per-crate index MISSES, so single-crate invocations are byte-identical to
+    // pre-WALL-G (the only entry is the crate's own, already found same-crate).
+    //
+    // Each entry is a FROZEN, owning-crate-resolved record (guardian B1–B7): the
+    // `for_node` is a SYNTHETIC `{"resolved_path":{"__sky_xc_path": "<public path>"}}`
+    // carrying the public path computed in the OWNING crate's pass (B2 — the binding
+    // crate's renderer can't re-resolve a foreign id), plus the frozen `send_ok`
+    // verdict (B3) and the owning crate's name (B4 — already a project dep, so the
+    // generated sky-app Cargo.toml resolves it). A non-nameable / non-reachable / not-
+    // provably-Send concrete is never recorded → the param keeps dropping (sound).
+    static GLOBAL_XC_IMPLS: std::cell::RefCell<HashMap<String, Vec<XcImpl>>> =
+        std::cell::RefCell::new(HashMap::new());
+
+    // [WALL-G #84] Current crate's CRATE-LOCAL trait id → its CANONICAL PATH STRING
+    // (from `doc["paths"]`). Lets `concrete_for_unique_impl` translate the per-crate
+    // trait KEY (a local rustdoc id) into the cross-crate GLOBAL_XC_IMPLS key. Reset
+    // per crate alongside REACHABLE_PATHS.
+    static LOCAL_TRAIT_ID_CANON_PATH: std::cell::RefCell<HashMap<String, String>> =
+        std::cell::RefCell::new(HashMap::new());
+
     // [#52] Set of CRATE-LOCAL trait ids that themselves carry a `Send` supertrait
     // bound (declared `trait T: Send` / `trait T: Send + Sync + …`). The Send-proof
     // (Step 3) consults this: a generic param `C: T` monomorphized to a concrete
@@ -3951,14 +4253,20 @@ fn recv_provably_async_send(recv_rust: &str) -> bool {
     if base.is_empty() || base.starts_with('&') {
         return false;
     }
-    // Match on the full rendered name OR its bare last `::` segment — the recv
-    // renders crate-prefixed (`opaqueffi74::SendClient`) while the proof set may
-    // hold either form (the collector inserts both).
+    // RECV set: match the full rendered name OR its bare last `::` segment — these
+    // are SAME-CRATE receivers (the collector inserts both forms), so a bare-name
+    // match is a same-crate type-identity match (sound).
     let last = base.rsplit("::").next().unwrap_or(base);
     let in_recv_set = PROVABLY_SEND_RECV_NAMES
         .with(|c| c.borrow().contains(base) || c.borrow().contains(last));
-    let in_opaque_set = PROVABLY_SEND_OPAQUE_NAMES
-        .with(|c| c.borrow().contains(base) || c.borrow().contains(last));
+    // OPAQUE set: FULL-PATH match ONLY (guardian B-1). This set now holds CROSS-CRATE
+    // concretes (WALL-G #84) registered by their full owning-crate public path; a
+    // bare-last-segment fallback would admit a sibling crate's same-named `!Send`
+    // concrete when the binding crate also defines a Send `Client` (name collision,
+    // different type) → a non-Send future → E0277. #52 same-crate opaques are ALSO
+    // registered crate-prefixed, and a `&crate::Type` receiver/param renders
+    // crate-prefixed too, so the full-path match still admits every legitimate case.
+    let in_opaque_set = PROVABLY_SEND_OPAQUE_NAMES.with(|c| c.borrow().contains(base));
     in_recv_set || in_opaque_set
 }
 
@@ -5218,6 +5526,14 @@ fn rustdoc_type_to_sky(val: &serde_json::Value, aliases: &HashMap<String, String
 
     // { "resolved_path": { "name": "Vec", "args": { "angle_bracketed": … } } }
     if let Some(rp) = val.get("resolved_path") {
+        // [WALL-G #84] A synthetic cross-crate concrete node — the Sky surface type is
+        // the opaque last segment (`client_crate::RealClient` → `RealClient`), the SAME
+        // opaque name the owning crate's own bindings expose for that type, so the two
+        // unify at the Sky call site. Must mirror the rust-string path's verbatim emit.
+        if let Some(xc) = rp.get("__sky_xc_path").and_then(|p| p.as_str()) {
+            let seg = xc.rsplit("::").next().unwrap_or(xc);
+            return type_str_to_sky(seg, aliases);
+        }
         // [WALL 5 / #63] See through a crate-local GENERIC Result/Option alias
         // identically to the rust-string path above, so the Sky surface and the
         // rust string the gate reads AGREE (a divergence is the classic
@@ -5527,6 +5843,14 @@ fn rustdoc_type_to_rust_str(val: &serde_json::Value) -> String {
     }
 
     if let Some(rp) = val.get("resolved_path") {
+        // [WALL-G #84] A synthetic cross-crate concrete node carries a pre-resolved,
+        // owning-crate public path that the binding crate's id-based renderer cannot
+        // reproduce (its REACHABLE_PATHS hold a different crate). Emit it VERBATIM —
+        // this is the B2 make-or-break: never fall through to `reachable_local_path`
+        // (misses cross-crate → bare last segment → E0412/E0433).
+        if let Some(xc) = rp.get("__sky_xc_path").and_then(|p| p.as_str()) {
+            return xc.to_string();
+        }
         // [WALL 5 / #63] See through a crate-local GENERIC Result/Option alias
         // (`FirestoreResult<FirestoreDb> -> Result<FirestoreDb, FirestoreError>`)
         // BEFORE the non-generic see-through, so the async-Send output gate's
@@ -8904,13 +9228,23 @@ fn single_concrete_impl_trait_key(bounds: &[serde_json::Value]) -> Option<String
 /// All entries in `TRAIT_CONCRETE_IMPLS` are already nameable+reachable+non-generic
 /// (filtered at collection time), so a unique entry is a sound monomorphization.
 fn concrete_for_unique_impl(trait_key: &str) -> Option<serde_json::Value> {
-    TRAIT_CONCRETE_IMPLS.with(|c| {
+    // Same-crate first (#52): exactly one crate-local impl.
+    let same_crate = TRAIT_CONCRETE_IMPLS.with(|c| {
         let map = c.borrow();
         match map.get(trait_key) {
             Some(impls) if impls.len() == 1 => impls.first().cloned(),
             _ => None, // 0 or >1 → ambiguous → drop
         }
-    })
+    });
+    if same_crate.is_some() {
+        return same_crate;
+    }
+    // [WALL-G #84] Cross-crate fallback: the trait has NO (or non-unique) impl in this
+    // crate, but the project's global index may hold a UNIQUE impl from a sibling dep
+    // (stripe `send<C: StripeClient>` here, `impl StripeClient for Client` in the
+    // facade). Returns the FROZEN synthetic `for` node (renders the owning-crate public
+    // path verbatim). 0 / >1 cross-crate impls → None (ambiguous → drop, sound).
+    xc_unique_for_trait_key(trait_key).map(|xc| xc.for_node)
 }
 
 /// [#52] The concrete `for` node + its rustdoc type-id for a unique-impl trait,
@@ -9061,6 +9395,26 @@ fn monomorphize_concrete_impl_params(
     let _ = impl_generics;
     for (param_name, trait_key) in &matched_send_keys {
         let _ = param_name;
+        // [WALL-G #84] Cross-crate concrete: its FROZEN owning-crate Send verdict +
+        // public path live in the global index, NOT in this crate's id-keyed Send
+        // sources (the synthetic substitute node carries no rustdoc id). Register the
+        // frozen name iff send_ok; an unproven cross-crate concrete stays unrecorded →
+        // the async gate drops async methods over it (sync ones still bound). Handled
+        // here BEFORE the same-crate sources, which can't see a foreign concrete.
+        if let Some(xc) = xc_unique_for_trait_key(trait_key) {
+            // Only the cross-crate path produced this match (same-crate would have a
+            // real `for` node); register its frozen public path when provably Send.
+            let same_crate_unique = TRAIT_CONCRETE_IMPLS
+                .with(|c| c.borrow().get(trait_key).map(|v| v.len() == 1).unwrap_or(false));
+            if !same_crate_unique {
+                if xc.send_ok && !xc.self_public_path.is_empty() {
+                    PROVABLY_SEND_OPAQUE_NAMES.with(|c| {
+                        c.borrow_mut().insert(xc.self_public_path.clone());
+                    });
+                }
+                continue; // cross-crate handled — skip the same-crate id-keyed sources.
+            }
+        }
         // Source 1: the bound trait carries a `Send` supertrait (`trait Wire: Send`).
         let via_send_supertrait =
             SEND_SUPERTRAIT_TRAIT_IDS.with(|s| s.borrow().contains(trait_key));
@@ -9770,6 +10124,66 @@ mod tests {
 
     fn sky(val: &serde_json::Value) -> String {
         rustdoc_type_to_sky(val, &HashMap::new())
+    }
+
+    // [WALL-G #84] The cross-crate index resolves a trait canonical path to its impl
+    // ONLY when exactly one cross-crate impl exists — the same over-drop-is-sound rule
+    // as #52's same-crate `concrete_for_unique_impl`. 0 impls → None (the trait has no
+    // concrete client in the project → drop); 2 impls → None (genuinely ambiguous, e.g.
+    // a 3rd crate adding a second `impl Wire for Other` → drop, never guess).
+    fn mk_xc(path: &str) -> XcImpl {
+        XcImpl {
+            for_node: serde_json::json!({ "resolved_path": { "__sky_xc_path": path } }),
+            self_public_path: path.to_string(),
+            send_ok: true,
+        }
+    }
+
+    // [WALL-G #84 / guardian B-1] The async-Send gate must match a cross-crate opaque
+    // by its FULL owning-crate path only. A sibling crate's `!Send` `Client` (registered
+    // nowhere, send_ok=false) must NOT be admitted just because the binding crate has a
+    // Send `Client` whose BARE last segment collides — that would emit a non-Send future
+    // → E0277. The RECV set (same-crate) keeps its sound bare-segment match.
+    #[test]
+    fn wallg_async_send_opaque_full_path_only() {
+        PROVABLY_SEND_OPAQUE_NAMES.with(|c| c.borrow_mut().clear());
+        PROVABLY_SEND_RECV_NAMES.with(|c| c.borrow_mut().clear());
+        // A binding-crate-local Send type, registered crate-prefixed AND bare.
+        PROVABLY_SEND_OPAQUE_NAMES.with(|c| {
+            c.borrow_mut().insert("bindingcrate::Client".to_string());
+        });
+        // Full-path match of the SAME type → admitted.
+        assert!(recv_provably_async_send("&bindingcrate::Client"));
+        // A DIFFERENT crate's same-named concrete (the cross-crate !Send collision) is
+        // NOT in the set by full path → must be REFUSED (no bare-last fallback).
+        assert!(!recv_provably_async_send("&siblingcrate::Client"));
+        // Bare `Client` alone is no longer enough to admit an opaque.
+        assert!(!recv_provably_async_send("&Client"));
+        PROVABLY_SEND_OPAQUE_NAMES.with(|c| c.borrow_mut().clear());
+    }
+
+    #[test]
+    fn wallg_xc_unique_only_when_exactly_one_impl() {
+        GLOBAL_XC_IMPLS.with(|c| c.borrow_mut().clear());
+        // 0 impls → None (over-drop).
+        assert!(xc_unique_for_canon("crate_a::Wire").is_none());
+        // 1 impl → Some, rendering the frozen public path verbatim (B2).
+        GLOBAL_XC_IMPLS.with(|c| {
+            c.borrow_mut()
+                .insert("crate_a::Wire".to_string(), vec![mk_xc("client_crate::RealClient")]);
+        });
+        let got = xc_unique_for_canon("crate_a::Wire").expect("unique impl resolves");
+        assert_eq!(rustdoc_type_to_rust_str(&got.for_node), "client_crate::RealClient");
+        assert!(got.send_ok);
+        // 2 distinct impls → None (ambiguous → drop, the negative-ambiguity case).
+        GLOBAL_XC_IMPLS.with(|c| {
+            c.borrow_mut().insert(
+                "crate_a::Wire".to_string(),
+                vec![mk_xc("client_crate::RealClient"), mk_xc("other_crate::OtherClient")],
+            );
+        });
+        assert!(xc_unique_for_canon("crate_a::Wire").is_none());
+        GLOBAL_XC_IMPLS.with(|c| c.borrow_mut().clear());
     }
 
     fn prim(s: &str) -> serde_json::Value {
