@@ -1,0 +1,11 @@
+[project]
+name = "79-ffi-serde-trait"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local serdetraitcrate79 crate — async serde Serialize/DeserializeOwned on a
+# concrete-Self TRAIT method (firestore FirestoreDb::get_obj/create_obj shape).
+# Staged via setup.sh; file:// git dep points at the cache path.
+["rust.dependencies"]
+serdetraitcrate79 = { git = "file:///home/arthur/.cache/sky/79-ffi-serde-trait-crate", branch = "master" }

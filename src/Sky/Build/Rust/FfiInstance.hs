@@ -91,7 +91,7 @@ import Sky.Build.Rust.FfiCall
     , closureBounds, renderTypeRef
     , Call, TypeRef(..), ClosureKind(..)
     , Receiver(..), ByKind(..)
-    , _call_argTypes, _call_receiver
+    , _call_argTypes, _call_receiver, _call_ret, _call_isAsync
     )
 import Sky.Generate.Rust.Builder.Naming (mangleTVar)
 import qualified Sky.Reporting.Annotation as A
@@ -541,11 +541,64 @@ synthesiseGenericWrapper gf =
             let -- The wrapper's value-arg count, derived from the call's
                 -- receiver + value-arg refs (validated gap-free at parse).
                 arity = callArity call
-                -- <Ret> and <body> walked from the validated AST. mangleTVar
-                -- (`a → A`) is applied INSIDE renderCall/renderRetType so the
-                -- one mangled name matches the <A: …> decl below.
-                retR  = renderRetType call params
+                -- [WALL 3a / #59] serde-Value detection on the call AST. A serde
+                -- value-arg surfaces as a Sky `String` in the wrapper param +
+                -- gets a `from_str::<Value>` prelude; a serde OK return surfaces
+                -- as a Sky `String` via a `to_string` wrap. Async (`_call_isAsync`)
+                -- + a `Result<_,_>` host return drive the spawn/await + match body
+                -- shape (mirrors emitRustFnSimple; #44 async→Task + #54 Send).
+                isSerdeRef TRSerdeValue = True
+                isSerdeRef _            = False
+                serdeArgIdxs = [ j | (j, tr) <- zip [0 :: Int ..] (_call_argTypes call)
+                                   , isSerdeRef tr ]
+                isAsync      = _call_isAsync call
+                -- The host return shape. A `Result<Ok, Err>` ctor ⇒ the host fn is
+                -- FALLIBLE; the OK arm carries the value the Sky surface returns.
+                -- Otherwise the whole ret IS the OK value (infallible host).
+                isResultCtor (TRCtor nm args)
+                    | length args == 2 = nm == "::core::result::Result"
+                                         || nm == "::std::result::Result"
+                                         || nm == "Result"
+                    | otherwise = False
+                isResultCtor _ = False
+                retIsResult = isResultCtor (_call_ret call)
+                okRef = case _call_ret call of
+                    TRCtor _ (ok : _) | retIsResult -> ok
+                    other                           -> other
+                okIsSerde = isSerdeRef okRef
+                -- The wrapper's Rust return INNER type (the `_` in
+                -- `SkyResult<SkyError, _>`). A serde OK → Sky-facing `String`
+                -- (the JSON text the `to_string` wrap yields). A unit OK (`()`,
+                -- the `put_obj -> Result<(), _>` shape) → `()`. Everything else
+                -- renders the OK TypeRef directly. NEVER the raw `Result<…>` (the
+                -- Result layer becomes the SkyResult wrapper, not a nested type).
+                retR
+                    | okIsSerde = "String"
+                    | otherwise = renderTypeRef params okRef
+                -- The host-call expression (UFCS callee + serde turbofish +
+                -- `sv_j` serde args + receiver borrow), walked from the AST.
+                -- For an async host this is the un-awaited future; the body adds
+                -- `.await` inside the spawned task.
                 bodyR = renderCall call params
+                -- [WALL 3a / #59, constraint 8] Lift the host's OK value into the
+                -- Sky-facing return. A serde OK is re-serialised to its JSON text
+                -- via `serde_json::to_string(&(..)).unwrap_or_default()` (TOTAL —
+                -- Value's Serialize never errs; never `.unwrap()`). Otherwise the
+                -- value passes through unchanged.
+                retCoerceOk e
+                    | okIsSerde = "serde_json::to_string(&(" ++ e ++ ")).unwrap_or_default()"
+                    | otherwise = e
+                -- [WALL 3a / #59, constraint 2/8] serde param prelude: each serde
+                -- value-arg's Sky `String` is deserialised to a `serde_json::Value`
+                -- local `sv_j` BEFORE the call (fallible → early-return Err on bad
+                -- JSON; never `.unwrap()`). `renderCall` references `sv_j` at the
+                -- call site. Mirrors emitRustFnSimple's `serdePrelude` verbatim.
+                serdePreludeLines =
+                    [ "    let sv_" ++ show j ++ ": serde_json::Value = "
+                        ++ "match serde_json::from_str::<serde_json::Value>(&arg"
+                        ++ show j ++ ") { Ok(v) => v, Err(e) => return "
+                        ++ "SkyResult::Err(str_err(&format!(\"{:?}\", e))), };"
+                    | j <- serdeArgIdxs ]
                 -- Guardian-final E0308 hole: a param borrowed inside a by-ref
                 -- closure slot (`Fn(&A)`) reaches the owned-clone bridge's
                 -- `__r0.clone()`, which needs `A: Clone` IN THE WRAPPER'S bounds.
@@ -587,8 +640,13 @@ synthesiseGenericWrapper gf =
                 -- as `::box1::Box1<A>` for `get`, the bare type-param `A` for
                 -- `make`, or `Fj` for a closure arg). Renders to a CONCRETE Rust
                 -- type (F2) — 'renderArgTypeAt' maps a 'TRClosure' to `Fj`.
+                -- [WALL 3a / #59] A serde value-arg's WRAPPER param type is the
+                -- Sky-facing `String` (the JSON text), NOT `serde_json::Value` —
+                -- the body deserialises it in `serdePrelude` to the `sv_j` local
+                -- the call site references. Every other arg keeps its rendered
+                -- TypeRef (closures → `Fj`).
                 valArgTypes =
-                    [ renderArgTypeAt params j tr
+                    [ if isSerdeRef tr then "String" else renderArgTypeAt params j tr
                     | (j, tr) <- zip [0 :: Int ..] (_call_argTypes call) ]
                 -- #21: a `&mut self` trait method threads its receiver by
                 -- `&mut argJ` (UFCS first-arg). UFCS function-call syntax never
@@ -619,7 +677,59 @@ synthesiseGenericWrapper gf =
                 -- match has no `.unwrap()` / index / `panic!` — it is the
                 -- sanctioned no-panic shape. A closure-free wrapper keeps the
                 -- plain `ok_res(<body>)` form (byte-identical to pre-Phase-3).
+                -- [WALL 3a / #59, constraint 9] The async host body. The call's
+                -- future is driven under `tokio::task::spawn(async move { … })`
+                -- (C5: panic → JoinError → Err; receiver Send-proven at the
+                -- inspector gate). Two arms per fallibility, mirroring
+                -- emitRustFnSimple's async shapes. The OK value is lifted via
+                -- `retCoerceOk` (serde `to_string` wrap or identity). No
+                -- `.unwrap()` / index / `panic!` — the sanctioned no-panic shape.
+                -- The serde param `from_str` prelude, INDENTED one level deeper,
+                -- spliced INSIDE the `async move { … }` block for the async path:
+                -- an async wrapper's body type is `Pin<Box<Future<Output =
+                -- SkyResult>>>`, so a top-level `return SkyResult::Err(..)` (as
+                -- the prelude emits on bad JSON) is an E0308. Moving the prelude
+                -- inside the async block makes that `return` exit the block —
+                -- whose output IS `SkyResult` — correctly.
+                serdePreludeInner =
+                    [ "    " ++ ln | ln <- serdePreludeLines ]
+                asyncBody
+                    | retIsResult =
+                        [ "    Box::pin(async move {" ]
+                        ++ serdePreludeInner ++
+                        [ "        match tokio::task::spawn("
+                            ++ "async move { " ++ bodyR ++ ".await }).await { "
+                            ++ "Ok(Ok(v)) => ok_res(" ++ retCoerceOk "v" ++ "), "
+                            ++ "Ok(Err(e)) => SkyResult::Err("
+                            ++ "sky_error_from_foreign(e)), "
+                            ++ "Err(_) => SkyResult::Err(str_err("
+                            ++ "\"foreign async call panicked\")) }"
+                        , "    })"
+                        ]
+                    | otherwise =
+                        [ "    Box::pin(async move {" ]
+                        ++ serdePreludeInner ++
+                        [ "        match tokio::task::spawn("
+                            ++ "async move { " ++ bodyR ++ ".await }).await { "
+                            ++ "Ok(v) => ok_res(" ++ retCoerceOk "v" ++ "), "
+                            ++ "Err(_) => SkyResult::Err(str_err("
+                            ++ "\"foreign async call panicked\")) }"
+                        , "    })"
+                        ]
+                -- The SYNC host body. A fallible (`Result<_,_>`) host matches
+                -- Ok/Err; an infallible host wraps directly in `ok_res`.
+                syncBody
+                    | retIsResult =
+                        [ "    match " ++ bodyR ++ " { Ok(v) => ok_res("
+                            ++ retCoerceOk "v" ++ "), Err(e) => SkyResult::Err("
+                            ++ "str_err(&format!(\"{:?}\", e))) }"
+                        ]
+                    | otherwise = [ "    ok_res(" ++ retCoerceOk bodyR ++ ")" ]
                 body
+                    -- A closure-carrying wrapper keeps the catch_unwind boundary
+                    -- (B2). Closures and serde/async are disjoint in practice (a
+                    -- serde-bound trait method takes no Sky closure), so this arm
+                    -- stays byte-identical to pre-WALL-3a.
                     | callHasClosureArg call =
                         [ "    match ::std::panic::catch_unwind("
                             ++ "::std::panic::AssertUnwindSafe(|| {"
@@ -638,14 +748,33 @@ synthesiseGenericWrapper gf =
                             ++ "\"a Sky closure passed to FFI panicked\")),"
                         , "    }"
                         ]
-                    | otherwise = [ "    ok_res(" ++ bodyR ++ ")" ]
+                    -- [WALL 3a / #59] async serde/non-serde trait method.
+                    | isAsync   = asyncBody
+                    -- sync: fallible match or plain ok_res (serde-aware via
+                    -- retCoerceOk). Byte-identical to pre-WALL-3a for a non-serde,
+                    -- non-Result sync stub (`retCoerceOk` is identity, `retIsResult`
+                    -- is False ⇒ `ok_res(bodyR)`).
+                    | otherwise = syncBody
+                -- [WALL 3a / #59] The wrapper RETURN type. An async host surfaces
+                -- as `Task Error _`, which the Rust runtime represents as a
+                -- `SkyTask` (a pinned boxed future). The sync path stays the
+                -- synchronous `SkyResult<SkyError, _>`. The `_` inner is `retR`
+                -- (serde OK → String / unit → () / else the OK TypeRef).
+                wrapperRet
+                    | isAsync   = "SkyTask<" ++ retR ++ ">"
+                    | otherwise = "SkyResult<SkyError, " ++ retR ++ ">"
+                -- The serde param prelude is spliced at the TOP of a SYNC wrapper
+                -- (its `return SkyResult::Err` exits the sync fn directly). For an
+                -- ASYNC wrapper the prelude lives INSIDE the `async move` block
+                -- (`serdePreludeInner`, woven into `asyncBody`) so its `return`
+                -- exits the future-block, not the outer `Pin<Box<…>>`-returning fn.
+                outerPrelude = if isAsync then [] else serdePreludeLines
                 src = unlines $
                     [ "// [ffi-generic] " ++ _gf_baseName gf
                         ++ " <" ++ intercalate ", " params ++ ">"
                     , "pub fn " ++ _gf_baseName gf ++ generics
-                        ++ "(" ++ paramDecl ++ ") -> SkyResult<SkyError, "
-                        ++ retR ++ "> {"
-                    ] ++ body ++
+                        ++ "(" ++ paramDecl ++ ") -> " ++ wrapperRet ++ " {"
+                    ] ++ outerPrelude ++ body ++
                     [ "}" ]
             in WrapperOk (_gf_kernelName gf) (_gf_refName gf) src
 

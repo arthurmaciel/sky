@@ -1,0 +1,76 @@
+module Main exposing (main)
+
+-- 79-ffi-serde-trait: Sky WALL 3a (#59) — serde Serialize/DeserializeOwned
+-- composes with the concrete-Self TRAIT-method (UFCS / parametric-stub) path
+-- AND with async (the firestore FirestoreDb::get_obj/create_obj shape).
+--
+-- #47 reduces serde T → serde_json::Value → JSON String on the INHERENT / free-fn
+-- path. WALL 2 (#58) routed AsRef-bound concrete-Self TRAIT methods through the
+-- mono pre-pass + UFCS. This wall makes the SERDE reduction fire on that same
+-- concrete-Self TRAIT-method path, AND threads async through the generic wrapper.
+--
+-- POSITIVE (bind + run end-to-end):
+--   Db.new ()                  -- inherent ctor → opaque Db
+--   put_obj_from_db json db    -- async trait method, serde param (Sky String in)
+--   get_obj_from_db db         -- async trait method, serde return (Sky String out)
+--   get_inherent_from_db db    -- CONTROL: #47 inherent (sync) serde return
+--
+-- NEGATIVE (must be ABSENT from bindings — coverage-dropped, never referenced):
+--   bad_ref   -- &T param        → census INADMISSIBLE → DROP
+--   bad_local -- T: Serialize + Local (crate-local unmodellable) → DROP
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Sky.Core.Json.Decode as Decode
+import Rust.Serdetraitcrate79 as Repo
+import Std.Log exposing (println)
+
+
+-- POSITIVE: async serde trait round-trip.
+--   put_obj_from_db : String -> Db -> Task Error ()   (serde param)
+--   get_obj_from_db : Db -> Task Error String          (serde return = JSON text)
+--   get_inherent_from_db : Db -> Result Error String   (CONTROL #47 inherent, sync)
+checkRoundTrip : Task Error ()
+checkRoundTrip =
+    case Repo.new_from_db () of
+        Err _ ->
+            Task.fail (Error.unexpected "Db.new failed")
+
+        Ok db ->
+            -- 1. put a JSON object (Sky String) THROUGH the serde Serialize param.
+            --    Receiver is arg0 (Db -> String), so the Db comes first.
+            Repo.put_obj_from_db db "{\"name\":\"sky\"}"
+                |> Task.andThen
+                    (\_ ->
+                        -- 2. get the trait method's serde-Deserialize return as JSON String.
+                        Repo.get_obj_from_db db
+                            |> Task.andThen
+                                (\json ->
+                                    -- The crate's get_obj deserialises {"k":1}; the Sky side
+                                    -- re-serialises the Value → a JSON String. Decode the "k"
+                                    -- field back to prove the round-trip is well-formed.
+                                    case Decode.decodeString (Decode.field "k" Decode.int) json of
+                                        Ok 1 ->
+                                            -- 3. CONTROL: the inherent #47 path still binds (sync Result).
+                                            case Repo.get_inherent_from_db db of
+                                                Ok inh ->
+                                                    case Decode.decodeString (Decode.field "inherent" Decode.bool) inh of
+                                                        Ok True ->
+                                                            println "[ALL OK]"
+
+                                                        _ ->
+                                                            Task.fail (Error.unexpected ("inherent decode UNEXPECTED: " ++ inh))
+
+                                                Err _ ->
+                                                    Task.fail (Error.unexpected "get_inherent failed")
+
+                                        other ->
+                                            Task.fail (Error.unexpected ("get_obj round-trip UNEXPECTED: " ++ json))
+                                )
+                    )
+
+
+main : Task Error ()
+main =
+    checkRoundTrip

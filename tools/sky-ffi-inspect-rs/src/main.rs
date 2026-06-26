@@ -192,6 +192,15 @@ struct Call {
     /// the historical `path::method` callee (constraint 9).
     #[serde(rename = "traitQualifier", skip_serializing_if = "Option::is_none")]
     trait_qualifier: Option<(String, String)>,
+    /// [WALL 3a / #59] Whether the host method is `async fn`. The generic-wrapper
+    /// emitter (`synthesiseGenericWrapper`) emits ONLY a sync `ok_res(<body>)`
+    /// body; an async serde trait method (firestore `get_obj`/`create_obj`)
+    /// needs the async `Box::pin(async move { tokio::task::spawn(... .await) })`
+    /// shape (compose with #44 async→Task + #54 self-receiver Send). `false`
+    /// (every sync stub) ⇒ OMITTED from the wire ⇒ byte-identical to a pre-WALL-3a
+    /// stub.
+    #[serde(rename = "isAsync", skip_serializing_if = "std::ops::Not::not")]
+    is_async: bool,
 }
 
 /// The receiver of a method call: which wrapper value-arg supplies it + borrow.
@@ -282,6 +291,14 @@ enum TypeRef {
         arg_types: Vec<TypeRef>,
         ret: Box<TypeRef>,
     },
+    /// [WALL 3a / #59] `{serdeValue:true}` — a serde-bound generic param/return
+    /// reduced to `serde_json::Value`.  Sky-facing type is `String` (the JSON
+    /// text); the Haskell `TRSerdeValue` renders it as `serde_json::Value` and
+    /// the generic-wrapper body emitter injects the `from_str` prelude (param) /
+    /// `to_string` return-wrap + the method-level `::<serde_json::Value>`
+    /// turbofish.  Replaces the position-blind `{"__sky_serde_value":true}`
+    /// sig-substitution sentinel with a typed call-AST node on the UFCS path.
+    SerdeValue,
 }
 
 impl Serialize for TypeRef {
@@ -324,6 +341,12 @@ impl Serialize for TypeRef {
                 );
                 let mut m = s.serialize_map(Some(1))?;
                 m.serialize_entry("closure", &serde_json::Value::Object(inner))?;
+                m.end()
+            }
+            TypeRef::SerdeValue => {
+                // `{serdeValue:true}` — the typed serde-Value node (WALL 3a).
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("serdeValue", &true)?;
                 m.end()
             }
         }
@@ -6008,6 +6031,13 @@ fn type_to_typeref(
     val: &serde_json::Value,
     param_idx: &HashMap<String, usize>,
 ) -> Result<TypeRef, GenericDrop> {
+    // [WALL 3a / #59] The serde-Value sentinel the mono pre-pass substituted in
+    // place of a serde-bound generic param. Becomes the typed `TRSerdeValue`
+    // call-AST node (Sky surface String; Rust `serde_json::Value`). MUST precede
+    // the `generic` / `resolved_path` arms — it is a distinct object key.
+    if val.get("__sky_serde_value").is_some() {
+        return Ok(TypeRef::SerdeValue);
+    }
     if let Some(g) = val.get("generic").and_then(|g| g.as_str()) {
         return match param_idx.get(g) {
             Some(i) => Ok(TypeRef::Param(*i)),
@@ -6130,7 +6160,19 @@ fn type_to_typeref(
         // Mutable refs and non-string-coercible borrowed refs → not bindable.
         return Err(GenericDrop::NotBindable(describe_type_shape(val)));
     }
-    // dyn_trait / impl_trait / function_pointer / tuple / slice /
+    // [WALL 3a / #59] The UNIT type `()` (rustdoc encodes it as an EMPTY tuple
+    // `{"tuple": []}`). Common as the Ok payload of a serde TRAIT method that
+    // mutates and returns nothing (`async fn put_obj<T: Serialize>(&self, v: T)
+    // -> Result<(), String>` → Ok type `()`). Render it as the unit ctor
+    // `TRCtor("()", [])`: `sky_of_typeref` yields `"()"` (so `parametric_function`
+    // emits no result Param → Sky `Task Error ()`) and `renderTypeRef` yields
+    // the Rust `()`. A NON-empty tuple stays unbindable (no Sky product-coercion).
+    if let Some(items) = val.get("tuple").and_then(|t| t.as_array()) {
+        if items.is_empty() {
+            return Ok(TypeRef::Ctor("()".to_string(), Vec::new()));
+        }
+    }
+    // dyn_trait / impl_trait / function_pointer / non-empty tuple / slice /
     // array / qualified_path / raw_pointer → outside the bindable subset.
     Err(GenericDrop::NotBindable(describe_type_shape(val)))
 }
@@ -6163,6 +6205,8 @@ fn typeref_is_clone(tr: &TypeRef) -> bool {
         // derives Clone when its args do.
         TypeRef::Ctor(_, args) => args.iter().all(typeref_is_clone),
         TypeRef::Closure { .. } => false,
+        // serde_json::Value is Clone.
+        TypeRef::SerdeValue => true,
     }
 }
 
@@ -6673,8 +6717,45 @@ fn try_parametric_stub(
                 }
                 mono_map.insert(tv.clone(), concrete);
                 to_remove.push(tv.clone());
+            } else if bounds_are_all_serde_or_marker(bounds_for) {
+                // ── WALL 3a (#59): serde fallback on the parametric/UFCS path ──
+                // resolve_param_bounds returned None, but EVERY real bound on
+                // this param is a serde trait (Serialize / Deserialize /
+                // DeserializeOwned), confirmed by RESOLVED canonical path
+                // (`is_serde_trait_bound`, never last-segment — constraint 4: a
+                // crate-local `trait Serialize` does NOT match). Mirror the #47
+                // inherent arm (8112-8120) on the parametric path: reduce
+                // T → serde_json::Value, surfaced as a Sky JSON String.
+                //
+                // Constraint 3 (census BEFORE substitution): the serde census
+                // (`fn_serde_param_all_admissible`) must pass — every occurrence
+                // of `tv` sits in an admissible owned position (by-value param,
+                // owned return, Result/Vec/Option wrapper). A `&T` / tuple /
+                // map-value occurrence → the whole method DROPS (the
+                // position-blind `subst_generic_json` can't be trusted to
+                // emit a sound `&serde_json::Value`).
+                //
+                // Constraint 5 (per-param independence + sibling drop): handled
+                // by `bounds_are_all_serde_or_marker` — a `T: Serialize + Local`
+                // (sibling crate-local unmodellable) is NOT all-serde, so this
+                // arm is SKIPPED, `tv` stays in tyvars, and the BoundCrossImpl /
+                // classify backstop DROPS the whole method (never reduce the
+                // serde half + silently drop the other).
+                //
+                // Constraint 7 (DeserializeOwned soundness): serde_json::Value
+                // is Serialize + DeserializeOwned, and DeserializeOwned ⟹
+                // Deserialize<'de> ∀'de, so Value satisfies both bound shapes —
+                // sound by subtyping, no over-gate.
+                if !fn_serde_param_all_admissible(fn_data, tv) {
+                    return Err(GenericDrop::UnmodellableBound(format!(
+                        "serde-mono-inadmissible: param `{tv}` occurs in a \
+                         non-owned position (&T / tuple / map-value)"
+                    )));
+                }
+                mono_map.insert(tv.clone(), serde_json_value_node());
+                to_remove.push(tv.clone());
             }
-            // If resolve_param_bounds returns None: leave this tyvar in tyvars →
+            // If neither arm fired: leave this tyvar in tyvars →
             // full_union_bounds + BoundCrossImpl will decide (drop or parametric).
         }
         // Constraint 3: remove mono'd params from tyvars and order so they never
@@ -6753,6 +6834,33 @@ fn try_parametric_stub(
         sig_mono_owned = subst_generic_json(sig, &mono_map, BoundPos::Param);
         &sig_mono_owned
     };
+
+    // ── WALL 3a (#59) constraint 9: async self-receiver Send gate ───────────
+    // An async host method's generic wrapper drives the call under
+    // `tokio::task::spawn(async move { … .await })` (mirrors emitRustFnSimple's
+    // async shape — #44). The spawned future captures the receiver by value, so
+    // the receiver type MUST be provably `Send` (#54). A `Db` with all-Send
+    // fields is in PROVABLY_SEND_RECV_NAMES; a `!Send` receiver (Rc-bearing)
+    // would make the `async move` block non-Send → E0277 at cargo. Gate it HERE
+    // (the parametric path skips the `parse_fn_item` output-Send gate entirely),
+    // fail-CLOSED with a coverage drop. The serde-Value payload itself is
+    // Send + Sync, so only the receiver's Send-ness is in question.
+    let host_is_async = fn_data["header"]["is_async"].as_bool().unwrap_or(false);
+    let recv_is_self = sig["inputs"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|i| i[0].as_str())
+        .map(|n| n == "self")
+        .unwrap_or(false);
+    if host_is_async && recv_is_self {
+        let recv_rust = recv.map(|(_, r)| r).unwrap_or("");
+        if !recv_provably_async_send(recv_rust) {
+            return Err(GenericDrop::UnmodellableBound(format!(
+                "async generic method `{method_name}`: receiver `{recv_rust}` not \
+                 provably Send (the spawned `async move` future would be !Send)"
+            )));
+        }
+    }
 
     // Build the call AST.
     let inputs = sig["inputs"].as_array().cloned().unwrap_or_default();
@@ -6934,6 +7042,9 @@ fn try_parametric_stub(
             // #21: the UFCS qualifier for a trait-impl method; `None` for an
             // inherent impl (byte-identical to a pre-#21 stub).
             trait_qualifier: trait_ctx.map(|tc| tc.qualifier.clone()),
+            // [WALL 3a / #59] async host method → the generic-wrapper emitter
+            // must build the async (`Box::pin(async move { … .await })`) body.
+            is_async: fn_data["header"]["is_async"].as_bool().unwrap_or(false),
         },
         // [#58 WALL 2]: true iff at least one type-param was resolved by the
         // mono pre-pass.  Distinguishes "fully mono because AsRef<str>+Send
@@ -7558,6 +7669,13 @@ fn parametric_function(
     //   recv_type non-empty).  The combined condition
     //   `(isInstance || isStaticFn) && hasGenericRecvParam` evaluates True →
     //   `_bindings.rs` emits an empty body (no duplication, no E0425).
+    // [WALL 3a / #59] An async host method surfaces in Sky as `Task Error _`
+    // (FfiGen lifts an `effect == "effectful"` wrapper from the sync `Result
+    // Error _` to `Task Error _`). A sync method stays `pure` → `Result Error _`
+    // (every FFI surface is fallible — the serde from_str / boundary failure is
+    // carried by that Result regardless). Read from the call's `is_async` flag
+    // (set from `header.is_async` at construction).
+    let mono_effect = if generic.call.is_async { "effectful" } else { "pure" };
     if is_wall2_mono {
         if !is_trait_method {
             // Inherent mono: emit as regular function, no generic data.
@@ -7565,7 +7683,7 @@ fn parametric_function(
                 name: method_name.to_string(),
                 params,
                 results,
-                effect: "pure".into(),
+                effect: mono_effect.into(),
                 exported: true,
                 recv_type: recv_sky_parametric.clone(),
                 recv_rust_type: self_rust.to_string(),
@@ -7582,7 +7700,7 @@ fn parametric_function(
                 name: method_name.to_string(),
                 params,
                 results,
-                effect: "pure".into(),
+                effect: mono_effect.into(),
                 exported: true,
                 recv_type: recv_sky_parametric.clone(),
                 recv_rust_type: format!("{}<M>", self_rust),
@@ -7704,8 +7822,27 @@ fn sky_of_typeref(tr: &TypeRef, tyvars: &[String], self_sky: &str) -> String {
         TypeRef::Ctor(name, args) => {
             // The receiver/foreign ctor: use the Sky head from self_sky when the
             // path matches the receiver; otherwise the last `::` segment.
+            let last = name.rsplit("::").next().unwrap_or(name);
+            // [WALL 3a / #59] A `Result<T, E>` host return (the firestore
+            // `get_obj`/`put_obj -> Result<T, String>` shape) maps to Sky
+            // `Result E T` (error-FIRST), matching `rustdoc_type_to_sky` (4666).
+            // Rendering it positionally as `Result T E` would put the OK type in
+            // the error slot — `wrapperSkyType`'s `stripResultLayer` then keeps
+            // the wrong arg (it drops the first two tokens), so
+            // `Result<(), String>` would surface as `Task Error String` instead
+            // of `Task Error ()`. Reorder here so the downstream peel is correct.
+            if last == "Result" && args.len() == 2 {
+                let ok = {
+                    let s = sky_of_typeref(&args[0], tyvars, self_sky);
+                    if s.contains(' ') { format!("({s})") } else { s }
+                };
+                let err = {
+                    let s = sky_of_typeref(&args[1], tyvars, self_sky);
+                    if s.contains(' ') { format!("({s})") } else { s }
+                };
+                return format!("Result {err} {ok}");
+            }
             let head = {
-                let last = name.rsplit("::").next().unwrap_or(name);
                 // Prefer the receiver's Sky name for the receiver ctor.
                 if self_sky.split_whitespace().next() == Some(last) {
                     self_sky.split_whitespace().next().unwrap_or(last).to_string()
@@ -7745,6 +7882,10 @@ fn sky_of_typeref(tr: &TypeRef, tyvars: &[String], self_sky: &str) -> String {
             };
             format!("({arrow})")
         }
+        // [WALL 3a / #59] A serde-reduced param/return surfaces in Sky as
+        // `String` (the JSON text), exactly as the #47 inherent arm does
+        // (`rustdoc_type_to_sky`'s `__sky_serde_value` → "String").
+        TypeRef::SerdeValue => "String".to_string(),
     }
 }
 
@@ -9821,6 +9962,7 @@ mod tests {
                 iter_adapters: vec![],
                 borrow_as_ref_args: vec![],
                 trait_qualifier: None,
+                is_async: false,
             },
             mono_resolved: false,
         };

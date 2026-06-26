@@ -119,6 +119,14 @@ data Call = Call
       --   case) renders the historical @path::method@ / @path::\<…\>::method@
       --   callee BYTE-IDENTICALLY (guardian constraint 9). Rust-backend-only; the
       --   Go pipeline never produces or reads it.
+    , _call_isAsync :: !Bool
+      -- ^ [WALL 3a / #59] Whether the host method is @async fn@. @True@ ⇒ the
+      --   generic-wrapper emitter ('FfiInstance.synthesiseGenericWrapper') builds
+      --   the async @Box::pin(async move { tokio::task::spawn(… .await) … })@
+      --   body (compose with #44 async→Task + #54 self-receiver Send) instead of
+      --   the sync @ok_res(\<body\>)@ form. DEFAULT @False@ (the parsed @call@
+      --   omits @"isAsync"@) keeps every sync stub byte-identical. Rust-backend-
+      --   only; the Go pipeline never produces or reads it.
     }
     deriving (Show, Eq)
 
@@ -171,6 +179,16 @@ data TypeRef
     | TRClosure !ClosureKind !Bool ![TypeRef] !TypeRef
       -- ^ @{closure:{kind,byRef,argTypes,ret}}@ — a closure-typed wrapper arg.
       --   @byRef=True@ ⇒ the foreign param is @Fn(&A)@ (owned-clone bridge, Phase 3).
+    | TRSerdeValue
+      -- ^ [WALL 3a / #59] @{serdeValue:true}@ — a serde-bound generic param /
+      --   return reduced to @serde_json::Value@. 'renderTypeRef' emits
+      --   @serde_json::Value@; the Sky-facing surface is @String@ (the JSON
+      --   text). The generic-wrapper body emitter
+      --   ('FfiInstance.synthesiseGenericWrapper') pattern-matches this node to
+      --   inject the @from_str@ param prelude / @to_string@ return-wrap and the
+      --   method-level @::\<serde_json::Value\>@ turbofish. Carries NO param
+      --   index (it is fully concrete), so it contributes nothing to
+      --   'allTypeRefs' / 'hasClosure'.
     deriving (Show, Eq)
 
 
@@ -292,6 +310,7 @@ allTypeRefs c =
     paramIdxs (TRPrim _)           = []
     paramIdxs (TRCtor _ args)      = concatMap paramIdxs args
     paramIdxs (TRClosure _ _ as r) = concatMap paramIdxs as ++ paramIdxs r
+    paramIdxs TRSerdeValue         = []
 
 
 -- | @True@ if a 'TRClosure' appears anywhere in the PROPER subtree of this
@@ -330,6 +349,15 @@ renderCall c params =
         turbofish = case _call_typeArgs c of
             []  -> ""
             trs -> "::<" ++ intercalate ", " (map (renderTypeRef params) trs) ++ ">"
+        -- [WALL 3a / #59] Whether the call boundary touches serde-Value (return
+        -- or any wrapper value-arg). Drives the UFCS method-level turbofish.
+        -- RECURSIVE: a serde return is commonly NESTED inside `Result<Value, E>`
+        -- (the firestore `get_obj -> Result<T, String>` shape), so a top-level
+        -- `isSerdeRef` check would miss it and drop the (load-bearing) turbofish.
+        callTouchesSerde =
+            anySerde (_call_ret c)
+            || any anySerde (_call_argTypes c)
+        serdeTurbofish = if callTouchesSerde then "::<serde_json::Value>" else ""
         -- The callee. For an assoc-fn/method on a TYPE (`_call_assocOnType`),
         -- the type-args bind the impl Self-type, so the turbofish sits on the
         -- path BEFORE the method (`::box1::Box1::<A>::make`,
@@ -352,7 +380,17 @@ renderCall c params =
             -- via @_call_receiver@, identical to the inherent path.
             Just (selfP, traitP) ->
                 let m = maybe "" id (_call_method c)
-                in "<" ++ selfP ++ " as " ++ traitP ++ ">::" ++ m
+                -- [WALL 3a / #59, constraint 1 — MAKE-OR-BREAK] When the trait
+                -- method's return OR any arg is a serde-reduced `serde_json::Value`,
+                -- Rust cannot infer the method type-param `T` (the call site sees
+                -- only `Value`s — a `from_str::<Value>(..)` arg pins nothing about
+                -- `T`, and a `to_string(&(...))` return likewise). So emit a
+                -- METHOD-LEVEL `::<serde_json::Value>` turbofish AFTER `::method`,
+                -- NOT on the Self type (`<Self::<V> as …>` is E0107). This mirrors
+                -- the #55 DEFECT-2 inherent-method turbofish onto the trait branch.
+                -- Single-serde-param assumption: every serde param/return reduces
+                -- to the SAME `serde_json::Value`, so one turbofish arg suffices.
+                in "<" ++ selfP ++ " as " ++ traitP ++ ">::" ++ m ++ serdeTurbofish
             Nothing -> case _call_method c of
                 Just m
                   | _call_assocOnType c -> pathStr ++ turbofish ++ "::" ++ m
@@ -383,6 +421,14 @@ renderCall c params =
         []       -> Nothing
     renderValueArg j (Just (TRClosure _ True borrowedArgTRs _)) =
         ownedCloneBridge j (length borrowedArgTRs)
+    -- [WALL 3a / #59, constraint 2 — MAKE-OR-BREAK] A serde-reduced value-arg is
+    -- passed as the deserialised `sv_j` local that
+    -- 'FfiInstance.synthesiseGenericWrapper' binds in its prelude
+    -- (`let sv_j: serde_json::Value = from_str::<Value>(&argJ)?`). The wrapper
+    -- param itself is a Sky `String` (the JSON text), so a bare `argJ` here would
+    -- be `String` where the host wants `serde_json::Value` (E0308). Naming the
+    -- local closes that — mirrors emitRustFnSimple's `sv_` arg ref.
+    renderValueArg j (Just TRSerdeValue) = "sv_" ++ show j
     -- C6: an `Iterator<Item=T>`-bound arg (in `iterAdapters`) is passed
     -- `argJ.into_iter()` — a `Vec<T>` is not itself an `Iterator`, so the host
     -- `impl Iterator` param needs the adapter. An `IntoIterator`-bound arg (NOT
@@ -395,6 +441,17 @@ renderCall c params =
         -- `String: AsRef<str> + AsRef<Path> + AsRef<OsStr>` → one adapter form.
         | j `elem` _call_borrowAsRefArgs c = argName j ++ ".as_ref()"
         | otherwise                        = argName j
+
+    -- [WALL 3a / #59] A serde-reduced `TypeRef` node at the TOP level.
+    isSerdeRef TRSerdeValue = True
+    isSerdeRef _            = False
+    -- [WALL 3a / #59] A serde-reduced node ANYWHERE in the tree (e.g. the OK arm
+    -- of `Result<Value, E>`). Drives the method-level turbofish, which must fire
+    -- whenever the host's inferred `T` is unconstrained at the call site.
+    anySerde TRSerdeValue       = True
+    anySerde (TRCtor _ args)    = any anySerde args
+    anySerde (TRClosure _ _ as_ r) = any anySerde as_ || anySerde r
+    anySerde _                  = False
 
 
 -- | Render the wrapper RETURN type (the @_@ inside @SkyResult<SkyError, _>@)
@@ -532,6 +589,12 @@ renderTypeRef params tr = case tr of
     TRCtor nm args ->
         nm ++ "<" ++ intercalate ", " (map (renderTypeRef params) args) ++ ">"
     TRClosure{} -> "F?"  -- unreachable in arg-position context; total fallback
+    -- [WALL 3a / #59] The serde-reduced node renders as the concrete Rust
+    -- `serde_json::Value`. The wrapper PARAM type is NOT this, though — a serde
+    -- param surfaces as a Sky `String` and the body deserialises it (see
+    -- 'FfiInstance.synthesiseGenericWrapper' 'serdeWrapperArgType'); this render
+    -- is the type the turbofish + boundary coercion key off.
+    TRSerdeValue -> "serde_json::Value"
 
 
 -- ─── JSON decoding (validating) ──────────────────────────────────────
@@ -567,13 +630,19 @@ instance A.FromJSON TypeRef where
         mp <- o .:? "param"
         mq <- o .:? "prim"
         mc <- o .:? "ctor"
+        -- WALL 3a (#59): the serde-Value node `{serdeValue:true}` carries no
+        -- other discriminator. Checked AFTER param/prim/ctor so a malformed
+        -- two-discriminator object still fails.
+        msv <- o .:? "serdeValue" .!= False
         case (mp, mq, mc) of
             (Just i, Nothing, Nothing) -> pure (TRParam i)
             (Nothing, Just p, Nothing) -> pure (TRPrim p)
             (Nothing, Nothing, Just nm) -> do
                 args <- o .:? "args" .!= []
                 pure (TRCtor nm args)
-            (Nothing, Nothing, Nothing) ->
+            (Nothing, Nothing, Nothing)
+                | msv       -> pure TRSerdeValue
+                | otherwise ->
                 -- Try the closure branch (only when no other discriminator
                 -- is present — keeps the "two discriminators" rejection
                 -- working for param+prim etc.).
@@ -582,7 +651,7 @@ instance A.FromJSON TypeRef where
                               <*> c .:? "byRef" .!= False
                               <*> c .: "argTypes"
                               <*> c .: "ret")
-                <|> fail "TypeRef must have exactly one of `param`, `prim`, `ctor`, or `closure`"
+                <|> fail "TypeRef must have exactly one of `param`, `prim`, `ctor`, `closure`, or `serdeValue`"
             _ -> fail "TypeRef must have exactly one of `param`, `prim`, or `ctor`"
 
 
@@ -625,6 +694,9 @@ parseCall nParams = A.withObject "Call" $ \o -> do
     -- #21: default Nothing ⇒ no qualifier ⇒ byte-identical to a pre-#21 stub.
     -- A trait-impl method carries @"traitQualifier": [selfPath, traitPath]@.
     traitQualifier <- o .:? "traitQualifier"
+    -- WALL 3a (#59): default False ⇒ sync wrapper body ⇒ byte-identical to a
+    -- pre-WALL-3a stub. An async host method carries @"isAsync": true@.
+    isAsync <- o .:? "isAsync" .!= False
     let c = Call
             { _call_kind     = kind
             , _call_path     = path
@@ -638,6 +710,7 @@ parseCall nParams = A.withObject "Call" $ \o -> do
             , _call_iterAdapters = iterAdapters
             , _call_borrowAsRefArgs = borrowAsRefArgs
             , _call_traitQualifier = traitQualifier
+            , _call_isAsync = isAsync
             }
     case validateCall nParams c of
         Right ok -> pure ok

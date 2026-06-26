@@ -17,6 +17,49 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — WALL 3a (#59): serde-bound generic on the concrete-Self trait path (firestore get_obj/create_obj)
+
+The LAST firestore wall + the data path. `get_obj<T: DeserializeOwned>(&self) ->
+Result<T,E>` / `create_obj<T: Serialize>(&self, T)` dropped `unmodellable-bound`
+on the concrete-Self TRAIT-method (parametric/UFCS) path — #47's serde→Value
+reduction was INHERENT-only (same routing class #58/#60 fixed). Now they bind:
+serde `T` monomorphizes to `serde_json::Value`, surfaced as a Sky JSON String.
+
+- **Inspector** (`main.rs`): serde fallback in the #58 per-param mono pre-pass —
+  `bounds_are_all_serde_or_marker` (canonical-path, crate-local-safe) +
+  `fn_serde_param_all_admissible` (census) → `serde_json_value_node()`, param
+  removed from tyvars/order. New `TypeRef::SerdeValue` ADT node (retires the
+  position-blind `__sky_serde_value` sentinel). Multi-bound per-PARAM
+  (`Serialize+Local`→drop; `&T`→census-drop). `Result<T,E>`→Sky `Result E T`
+  reorder + unit-`()` arm in the parametric return renderer (both were dead for
+  pre-#59 fixtures — zero blast radius). Async self-recv Send gate + `is_async`
+  threading on the parametric path.
+- **Codegen** (`FfiCall.hs`): `renderCall` UFCS branch emits a method-level
+  `::<serde_json::Value>` turbofish (`anySerde` recurses into `Result<Value,E>`);
+  serde value-arg → `sv_j`. (`FfiInstance.hs`) `synthesiseGenericWrapper` gains
+  the serde from_str→`sv_j` prelude (fallible→Err, no unwrap) + `to_string`
+  return-wrap + an ASYNC body (`Box::pin(async move{ spawn(UFCS.await).await }`,
+  Ok(Ok)/Ok(Err)/panic arms — malformed JSON→Err, foreign panic→Err per #44 C5).
+
+**Proof:** fixture `79-ffi-serde-trait` — async `put_obj`(encode)→`get_obj`(decode)
+round-trip + a sync inherent control, `[ALL OK]`; `bad_ref`(&T)/`bad_local`
+(Serialize+local-trait) ABSENT. 25 ffi-fixtures ok, 166 inspector unit tests,
+cabal `--match Rust` 106 examples 0 failures (+4 FfiCallSpec WALL-3a tests),
+SKY_DCE=0 clean, clippy clean. Guardian-final APPROVE (Result-reorder zero blast
+radius proven, async body total, census drops verified).
+
+Side-fix (no-deferral): FfiInstanceSpec's 8 Call constructions lacked the
+`_call_borrowAsRefArgs` (added by #60) + `_call_isAsync` strict fields → suite now
+compiles. Filed: pre-existing local-rustc-1.92.0 rustdoc drift on 48/51
+(`make_from_box1` vs `Box1.make`; identical on HEAD inspector, orthogonal to #59).
+
+**Affected:** `tools/sky-ffi-inspect-rs/src/main.rs` · `src/Sky/Build/Rust/FfiCall.hs`
+· `src/Sky/Build/Rust/FfiInstance.hs` · `test/Sky/Build/Rust/{FfiCallSpec,FfiInstanceSpec}.hs`
+· `runtime-rust/tests/sky/79-ffi-serde-trait/` · `ffi-fixtures-test.sh`.
+
+**🎉 WALL 3 complete (#57/#58/#59/#60/#61) — firestore get_obj/create_obj/get_doc/
+delete_by_id + FirestoreDb::new now have their structural blockers closed.**
+
 ## 2026-06-26 — WALL 3c (#61): async constructor returning a provably-Send opaque handle binds
 
 `FirestoreDb::new(project) -> Result<FirestoreDb, _>` (async, opaque-return) was

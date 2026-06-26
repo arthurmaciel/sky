@@ -59,6 +59,7 @@ spec = do
                 , _call_iterAdapters = []
                 , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
+                , _call_isAsync = False
                 }
         it "decodes a method call with a ref receiver `left : Pair a b -> a`" $ do
             let j = A.object
@@ -89,6 +90,7 @@ spec = do
                 , _call_iterAdapters = []
                 , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
+                , _call_isAsync = False
                 }
         it "decodes a prim TypeRef leaf in ret (`count : Keyed a -> Int`)" $ do
             let j = A.object
@@ -205,6 +207,7 @@ spec = do
                 , _call_iterAdapters = []
                 , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
+                , _call_isAsync = False
                 }
         it "accepts a valid single-param call" $
             validateCall 1 okCall `shouldSatisfy` isRight
@@ -242,6 +245,7 @@ spec = do
                     , _call_iterAdapters = []
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
+                    , _call_isAsync = False
                     }
             -- C-A: real params ["a","b"] → TRParam 0 → A, TRParam 1 → B
             closureBounds call ["a", "b"] `shouldBe` ["F1: Fn(A) -> B + ::core::clone::Clone"]
@@ -261,6 +265,7 @@ spec = do
                     , _call_iterAdapters = []
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
+                    , _call_isAsync = False
                     }
             -- C-B: a closure nested inside Vec<_> must be rejected by validateCall
             isLeft (validateCall 1 call) `shouldBe` True
@@ -280,6 +285,7 @@ spec = do
                     , _call_iterAdapters = []
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
+                    , _call_isAsync = False
                     }
             renderCall c ["a"]    `shouldBe` "::box1::Box1::<A>::make(arg0)"
             renderRetType c ["a"] `shouldBe` "::box1::Box1<A>"
@@ -298,6 +304,7 @@ spec = do
                     , _call_iterAdapters = []
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
+                    , _call_isAsync = False
                     }
             renderCall c ["k", "v"] `shouldBe`
                 "::mycrate::Pair::<K, V>::left(&arg0)"
@@ -324,6 +331,7 @@ spec = do
                     , _call_iterAdapters = []
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
+                    , _call_isAsync = False
                     }
             renderCall c ["a", "b"] `shouldBe`
                 "::clo::map_each(arg0, arg1)"
@@ -346,6 +354,7 @@ spec = do
                 , _call_iterAdapters = adapters
                 , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
+                , _call_isAsync = False
                 }
         it "an Iterator-kind arg (in iterAdapters) renders arg0.into_iter()" $
             renderCall (iterCall [0]) [] `shouldBe` "::iter::go(arg0.into_iter())"
@@ -367,6 +376,7 @@ spec = do
                     , _call_iterAdapters = [1]
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
+                    , _call_isAsync = False
                     }
             renderCall c [] `shouldBe` "::iter::zip2(arg0, arg1.into_iter())"
         it "validateCall REJECTS an out-of-range iterAdapters index" $ do
@@ -383,6 +393,7 @@ spec = do
                     , _call_iterAdapters = [3]   -- arity is 1 → out of range
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
+                    , _call_isAsync = False
                     }
             isLeft' (validateCall 0 bad) `shouldBe` True
         it "validateCall REJECTS an iterAdapters index on a non-Vec arg" $ do
@@ -399,6 +410,7 @@ spec = do
                     , _call_iterAdapters = [0]
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
+                    , _call_isAsync = False
                     }
             isLeft' (validateCall 0 bad) `shouldBe` True
         it "validateCall ACCEPTS a well-formed iterAdapters index on a Vec arg" $ do
@@ -415,6 +427,7 @@ spec = do
                     , _call_iterAdapters = [0]
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
+                    , _call_isAsync = False
                     }
             isRight (validateCall 0 ok) `shouldBe` True
 
@@ -438,6 +451,7 @@ spec = do
                 , _call_iterAdapters = []
                 , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
+                , _call_isAsync = False
                 }
         it "byRef closure arg passes an owned-clone bridge, not arg1 directly" $
             renderCall (keepCall True) ["a"] `shouldContain`
@@ -462,6 +476,7 @@ spec = do
                     , _call_iterAdapters = []
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
+                    , _call_isAsync = False
                     }
             renderCall zipCall ["a", "b"] `shouldContain`
                 "move |__r0, __r1| { let __v0 = __r0.clone(); \
@@ -526,6 +541,71 @@ spec = do
                 Right c -> do
                     _call_traitQualifier c `shouldBe` Nothing
                     renderCall c ["A"] `shouldBe` "::box1::Box1::<A>::make(arg0)"
+
+    describe "WALL 3a (#59) — serde-Value on the UFCS trait-method path" $ do
+        -- A serde-reduced TRAIT method whose return is `Result<Value, String>`
+        -- (the firestore `get_obj<T: DeserializeOwned>(&self) -> Result<T,_>`
+        -- shape after the inspector's mono pre-pass). The serde-Value nests in
+        -- the OK arm, so the method-level `::<serde_json::Value>` turbofish MUST
+        -- fire (constraint 1 — without it Rust can't infer `T`, E0282/E0283).
+        let getObjJson = A.object
+                [ "kind"     A..= ("method" :: String)
+                , "path"     A..= (["::db", "Db"] :: [String])
+                , "method"   A..= ("get_obj" :: String)
+                , "receiver" A..= A.object
+                    [ "arg" A..= (0 :: Int), "by" A..= ("ref" :: String) ]
+                , "args"     A..= ([] :: [Int])
+                , "argTypes" A..= [ A.object ["ctor" A..= ("::db::Db" :: String)] ]
+                , "ret"      A..= A.object
+                    [ "ctor" A..= ("::core::result::Result" :: String)
+                    , "args" A..=
+                        [ A.object ["serdeValue" A..= True]
+                        , A.object ["ctor" A..= ("::std::string::String" :: String)] ] ]
+                , "traitQualifier" A..= (["::db::Db", "::db::Repo"] :: [String])
+                , "isAsync" A..= True
+                ]
+        it "decodes the serdeValue node + isAsync flag" $ do
+            case decodeCall 0 getObjJson of
+                Left e  -> expectationFailure ("decode failed: " ++ e)
+                Right c -> do
+                    _call_isAsync c `shouldBe` True
+                    _call_ret c `shouldBe`
+                        TRCtor "::core::result::Result"
+                            [TRSerdeValue, TRCtor "::std::string::String" []]
+        it "emits the method-level ::<serde_json::Value> turbofish (serde nested in Result)" $ do
+            case decodeCall 0 getObjJson of
+                Left e  -> expectationFailure ("decode failed: " ++ e)
+                Right c -> do
+                    let r = renderCall c []
+                    r `shouldBe`
+                        "<::db::Db as ::db::Repo>::get_obj::<serde_json::Value>(&arg0)"
+        it "renders a serde value-arg as the deserialised sv_j local" $ do
+            -- `put_obj<T: Serialize>(&self, v: T)` — the serde param at arg1 must
+            -- render `sv_1` (the from_str local), not `arg1` (a Sky String).
+            let putObjJson = A.object
+                    [ "kind"     A..= ("method" :: String)
+                    , "path"     A..= (["::db", "Db"] :: [String])
+                    , "method"   A..= ("put_obj" :: String)
+                    , "receiver" A..= A.object
+                        [ "arg" A..= (0 :: Int), "by" A..= ("ref" :: String) ]
+                    , "args"     A..= ([1] :: [Int])
+                    , "argTypes" A..=
+                        [ A.object ["ctor" A..= ("::db::Db" :: String)]
+                        , A.object ["serdeValue" A..= True] ]
+                    , "ret"      A..= A.object
+                        [ "ctor" A..= ("::core::result::Result" :: String)
+                        , "args" A..=
+                            [ A.object ["ctor" A..= ("()" :: String)]
+                            , A.object ["ctor" A..= ("::std::string::String" :: String)] ] ]
+                    , "traitQualifier" A..= (["::db::Db", "::db::Repo"] :: [String])
+                    , "isAsync" A..= True
+                    ]
+            case decodeCall 0 putObjJson of
+                Left e  -> expectationFailure ("decode failed: " ++ e)
+                Right c -> renderCall c [] `shouldBe`
+                    "<::db::Db as ::db::Repo>::put_obj::<serde_json::Value>(&arg0, sv_1)"
+        it "renderTypeRef on TRSerdeValue is serde_json::Value" $
+            renderTypeRef [] TRSerdeValue `shouldBe` "serde_json::Value"
   where
     isLeft  = either (const True) (const False)
     isRight = either (const False) (const True)
