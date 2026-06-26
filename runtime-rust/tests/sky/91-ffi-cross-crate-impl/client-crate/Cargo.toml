@@ -1,0 +1,10 @@
+[package]
+name = "client-crate"
+version = "0.1.0"
+edition = "2021"
+
+# client-crate (the `async-stripe` facade analog) impls wire-crate's `Wire` trait,
+# so it depends on wire-crate. Staged as a sibling git repo by setup.sh; the path
+# below matches the cache dir setup.sh writes.
+[dependencies]
+wire-crate = { git = "file:///home/arthur/.cache/sky/91-ffi-cross-crate-impl-wire", branch = "master" }

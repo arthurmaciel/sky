@@ -1,0 +1,47 @@
+module Main exposing (main)
+
+-- 91-ffi-cross-crate-impl: WALL-G (#84) proof — CROSS-CRATE unique-impl mono.
+--
+-- `wire-crate` defines `trait Wire` + `Req::op<C: Wire>(&self, c: &C)` but holds NO
+-- `impl Wire`. The unique `impl Wire for RealClient` lives in the SIBLING
+-- `client-crate`. WALL-G builds a global canonical-path-keyed concrete-impl index
+-- across BOTH project crates, resolves `op`'s `C: Wire` bound to the cross-crate
+-- `RealClient`, and emits an `op_from_req` wrapper referencing
+-- `client_crate::RealClient`. This is the stripe `send<C: StripeClient>` shape (send
+-- in client-core, unique `impl StripeClient for Client` in the async-stripe facade).
+--
+-- POSITIVE: new Req "hi" → Ok req ; new RealClient → Ok client ;
+--           op req client → "real:hi".
+-- PRE-WALL-G RED: `op_from_req` does not exist (op drops trait-bounded-param-
+--           ambiguous, 0 in-crate impls) → this module fails to build.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Error as Error
+import Rust.Wire_crate as W
+import Rust.Client_crate as CC
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    case W.new_from_req "hi" of
+        Ok req ->
+            case CC.new_from_realClient () of
+                Ok client ->
+                    -- The cross-crate call: `op_from_req` (wire-crate bindings) takes
+                    -- a `client_crate::RealClient` — the mono'd `C`. Returns "real:hi".
+                    case W.op_from_req req client of
+                        Ok res ->
+                            if res == "real:hi" then
+                                println "op=real:hi [ALL OK]"
+
+                            else
+                                println ("op=UNEXPECTED " ++ res)
+
+                        Err e ->
+                            println ("op-failed: " ++ Error.toString e)
+
+                Err e ->
+                    println ("client-new-failed: " ++ Error.toString e)
+
+        Err e ->
+            println ("req-new-failed: " ++ Error.toString e)

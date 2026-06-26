@@ -1,0 +1,13 @@
+[project]
+name = "91-ffi-cross-crate-impl"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# WALL-G (#84): TWO sibling crates. wire-crate defines `trait Wire` + `Req::op<C: Wire>`
+# (no impl); client-crate holds the UNIQUE `impl Wire for RealClient`. The cross-crate
+# concrete-impl index resolves `op`'s `C: Wire` to `client_crate::RealClient`. setup.sh
+# git-inits both at the cache paths below (wire first — client-crate git-deps on it).
+["rust.dependencies"]
+wire-crate = { git = "file:///home/arthur/.cache/sky/91-ffi-cross-crate-impl-wire", branch = "master" }
+client-crate = { git = "file:///home/arthur/.cache/sky/91-ffi-cross-crate-impl-client", branch = "master" }
