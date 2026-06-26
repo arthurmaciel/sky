@@ -444,3 +444,33 @@ normalization (finding 4); (c) THEN the genuine open-T (multi-impl-Decode) param
 B1 miniserde allowlist — which is the part that truly needs WALL-I to be usable. Findings (a)+(b)
 are bindable + testable on a unique-impl-Decode fixture WITHOUT WALL-I (T mono's to concrete);
 (c) is the inert-without-WALL-I part.
+
+### 9.1 Deeper root cause (2026-06-26, implementation attempt) — the async drop is RECEIVER-Send
+
+Attempted finding (a) [register the Self-mono'd concrete's frozen Send into
+PROVABLY_SEND_OPAQUE_NAMES + have `is_provably_send_opaque_return` consult it]. It did NOT
+bind `send` — REVERTED (no unverified partial). Precise diagnosis from the attempt:
+
+- `self_mono_subst` IS applied to the method sig BEFORE `parse_fn_item` (main.rs:1483-1488,
+  "Runs FIRST so … parse_fn_item sees the concrete sig"). So the async gate already sees the
+  CONCRETE `Customizable<Resp>` receiver + `Resp` output — the output-registration idea was
+  not the blocker.
+- **The blocker is the RECEIVER Send proof.** The async wrapper MOVES `self`
+  (`Customizable<Resp>`, by value) into the `async move {}` spawn block → needs
+  `Customizable<Resp>: Send`. But every async-Send gate (`is_provably_send_opaque_return`
+  5306, `recv_provably_async_send` 4250, `is_async_send_output` 5279) **rejects any
+  `<`-containing type outright** — a generic INSTANTIATION like `Customizable<Resp>` can't be
+  proven Send by the current name-set machinery. (`send_blocking` binds because the sync path
+  has no spawn → no receiver-Send obligation.)
+- This is exactly guardian B5: `Customizable<T>` is CONDITIONALLY-Send-on-T. Proving
+  `Customizable<Resp>: Send` requires STRUCTURAL conditional-Send reasoning — "the generic
+  struct is Send when all its type-args are Send" — which the inspector does not do (it
+  proves Send only for non-generic named types via the 3 sources).
+
+**Revised WALL-H first target (supersedes §9 (a)):** teach the async-Send proof to admit a
+generic-instantiation receiver/output `Struct<A1,..,An>` as Send when (i) the base `Struct`
+is auto-Send-when-args-Send (rustdoc synthetic-Send / all-fields-Send modulo the PhantomData
+args) AND (ii) every `Ai` is provably Send (primitive / String / a frozen-Send opaque). This
+is a NEW structural-Send capability (the `<`-reject is currently a hard wall), and it is the
+genuine WALL-H core — narrower than "impl-declared-T threading" (that already works for sync)
+but deeper than a name-set registration. Needs its own guardian design + cargo-verify.
