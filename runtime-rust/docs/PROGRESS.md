@@ -17,6 +17,31 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — #72: mixed-generic turbofish arity → firestore get_obj compiles clean
+
+A method with TWO generics reduced/mono'd by DIFFERENT mechanisms —
+`get_obj<T: DeserializeOwned, S: AsRef<str>>(&self, id: S)` (T→serde_json::Value
+via WALL-3a, S→String via WALL-2) — emitted only `::<serde_json::Value>` (1 of 2,
+both removed from the Sky-visible order) → E0107. Fix: new `Call.method_turbofish:
+Vec<TypeRef>` carrying ALL the method's OWN generics in DECLARATION order, each
+resolved to its concrete (serde→SerdeValue, mono→Prim/Ctor, remaining→Param);
+FfiCall.hs renders the full `::<C1,C2,…>`. Empty list (single-generic / closure /
+iterator methods) → legacy single-serde fallback (byte-identical). Fail-closed: a
+closure/iterator generic co-occurring with a serde/mono one → DROP (no partial
+turbofish). Decl-order proven by a mono-FIRST fixture method `get_rev<S, T>` →
+`::<String, serde_json::Value>` (a transposition would be E0277 `Value: AsRef<str>`).
+
+**Real firestore `get_obj` now compiles clean:** `<FirestoreDb as
+FirestoreGetByIdSupport>::get_obj::<serde_json::Value, String>(&arg0,
+arg1.as_ref(), arg2).await`. Only firestore residual = #67 (owned-String ctor).
+Fixture `83-ffi-mixed-generic-turbofish` (async-trait get_obj + 3-gen pick + sync
+get_obj_sync + mono-first get_rev) [ALL OK]; 29 ffi-fixtures ok, 192 unit tests,
+Haskell specs 95/0, SKY_DCE=0 + clippy clean. Guardian-final APPROVE.
+
+**Affected:** `tools/sky-ffi-inspect-rs/src/main.rs` · `src/Sky/Build/Rust/FfiCall.hs`
+· `test/Sky/Build/Rust/{FfiCallSpec,FfiInstanceSpec}.hs` ·
+`runtime-rust/tests/sky/83-ffi-mixed-generic-turbofish/` · `ffi-fixtures-test.sh`.
+
 ## 2026-06-26 — WALL 4 (#64, KEYSTONE): #[async_trait] desugar recognition → ALL firestore CRUD binds 🎉
 
 The keystone. firestore CRUD trait methods dropped `not-bindable: dyn_trait`

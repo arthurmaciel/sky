@@ -1,0 +1,14 @@
+[project]
+name = "83-ffi-mixed-generic-turbofish"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local mixedgenericcrate83 crate — WALL 4 stretch (#72): the firestore
+# `get_obj<T: DeserializeOwned, S: AsRef<str>>(&self, id: S) -> Result<T, String>`
+# shape — a method with TWO generics, each reduced by a DIFFERENT mechanism (T
+# serde→Value, S AsRef→String). The method-level turbofish must name a concrete
+# per generic in declaration order (`::<serde_json::Value, String>`), not just
+# the serde one. Staged via setup.sh; file:// git dep.
+["rust.dependencies"]
+mixedgenericcrate83 = { git = "file:///home/arthur/.cache/sky/83-ffi-mixed-generic-turbofish-crate", branch = "master" }

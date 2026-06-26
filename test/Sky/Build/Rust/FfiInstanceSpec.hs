@@ -74,6 +74,7 @@ makeCall = Call.Call
     , Call._call_traitQualifier = Nothing
     , Call._call_borrowAsRefArgs = []
     , Call._call_isAsync = False
+    , Call._call_methodTurbofish = []
     }
 
 -- An instance over a single param `a` at type `ty`, with the given bounds.
@@ -239,6 +240,7 @@ spec = do
                 , Call._call_traitQualifier = Nothing
                 , Call._call_borrowAsRefArgs = []
                 , Call._call_isAsync = False
+                , Call._call_methodTurbofish = []
                 }
             -- `Idx::of : a -> Idx a` — a bounded ctor for the bounds-render test.
             idxOfCall = Call.Call
@@ -255,6 +257,7 @@ spec = do
                 , Call._call_traitQualifier = Nothing
                 , Call._call_borrowAsRefArgs = []
                 , Call._call_isAsync = False
+                , Call._call_methodTurbofish = []
                 }
         it "emits a generic <T> wrapper for an unconstrained fn (TVar→UpperCamel)" $ do
             let src = okSrc (synthesiseGenericWrapper (mkFn [] makeCall))
@@ -301,6 +304,7 @@ spec = do
                     , Call._call_traitQualifier = Just ("::tm::Circle", "::tm::Scale")
                     , Call._call_borrowAsRefArgs = []
                     , Call._call_isAsync = False
+                    , Call._call_methodTurbofish = []
                     }
                 src = okSrc (synthesiseGenericWrapper keyedFn)
             -- by-ref receiver: immutable param binding + `&arg0` UFCS first-arg.
@@ -334,6 +338,7 @@ spec = do
                     , Call._call_traitQualifier = Just ("::tm::Bag", "::tm::Insertable")
                     , Call._call_borrowAsRefArgs = []
                     , Call._call_isAsync = False
+                    , Call._call_methodTurbofish = []
                     }
                 src = okSrc (synthesiseGenericWrapper pushFn)
             -- by-mut-ref receiver: `mut arg0` binding + `&mut arg0` first-arg.
@@ -413,6 +418,7 @@ spec = do
                 , Call._call_traitQualifier = Nothing
                 , Call._call_borrowAsRefArgs = []
                 , Call._call_isAsync = False
+                , Call._call_methodTurbofish = []
                 }
         it "maps each closure-typed argTypes slot to its ClosureKind by index" $ do
             Call.closureSlotKinds (twoArg Call.FnKind)
@@ -481,6 +487,7 @@ spec = do
                 , Call._call_traitQualifier = Nothing
                 , Call._call_borrowAsRefArgs = []
                 , Call._call_isAsync = False
+                , Call._call_methodTurbofish = []
                 }
             okSrc' r = case r of WrapperOk _ _ s -> s; _ -> ""
         it "carries the <Fj: Fn(..) -> R + Clone> bound in the generics clause" $ do
@@ -554,6 +561,7 @@ spec = do
                 , Call._call_traitQualifier = Nothing
                 , Call._call_borrowAsRefArgs = []
                 , Call._call_isAsync = False
+                , Call._call_methodTurbofish = []
                 }
             mkKeepFn bs = GenericFn
                 { _gf_kernelName = "Rust_Clo"

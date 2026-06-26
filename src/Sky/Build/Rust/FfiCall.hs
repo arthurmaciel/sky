@@ -127,6 +127,23 @@ data Call = Call
       --   the sync @ok_res(\<body\>)@ form. DEFAULT @False@ (the parsed @call@
       --   omits @"isAsync"@) keeps every sync stub byte-identical. Rust-backend-
       --   only; the Go pipeline never produces or reads it.
+    , _call_methodTurbofish :: ![TypeRef]
+      -- ^ [#72] The METHOD's OWN generics' resolved concretes, in DECLARATION
+      --   order — the method-level turbofish list @::\<C1, C2, …\>@ for a
+      --   UFCS\/inherent @Method::\<…\>@ call. A method with N generics, some
+      --   serde-reduced (@T → serde_json::Value@) and some mono'd
+      --   (@S: AsRef\<str\> → String@), removes ALL of them from the Sky-visible
+      --   @order@ — so the path @typeArgs@ is empty — yet the Rust method still
+      --   declares @\<T, S\>@, so the call MUST name a concrete per generic
+      --   (@get_obj::\<serde_json::Value, String\>@). DEFAULT @[]@ (the parsed
+      --   @call@ omits @"methodTurbofish"@): the renderer falls back to the
+      --   historical single-serde @::\<serde_json::Value\>@ turbofish — which is
+      --   byte-identical for a method with exactly ONE own generic that is
+      --   serde-reduced (every pre-#72 serde stub: @put\<T: Serialize\>@,
+      --   @create_obj\<T\>@). NON-empty ⇒ the renderer emits a concrete per entry
+      --   (@TRSerdeValue → serde_json::Value@, @TRPrim "String" → String@,
+      --   @TRParam i → the i-th param name@), closing the @E0107@ arity gap.
+      --   Rust-backend-only; the Go pipeline never produces or reads it.
     }
     deriving (Show, Eq)
 
@@ -265,9 +282,11 @@ validateCall nParams c = do
     -- and emit invalid Rust (Vec<F?> → cargo E0412). Reject here.
     unless (not (any nestedClosure (_call_argTypes c))
             && not (any hasClosure (_call_typeArgs c))
+            && not (any hasClosure (_call_methodTurbofish c))
             && not (hasClosure (_call_ret c))) $
         Left "a closure type may only appear as a direct wrapper argument, \
-             \not nested inside a container, return, or type-argument"
+             \not nested inside a container, return, type-argument, or \
+             \method turbofish"
     -- (7) C6: every `iterAdapters` index must reference a real value-arg slot
     -- whose argType is a `Vec<_>` ctor. The adapter emits `argJ.into_iter()`,
     -- which is sound ONLY when argJ is a `Vec` (an `Iterator`-bound host param
@@ -318,7 +337,8 @@ validateCall nParams c = do
 -- bound param refs. Recurses into 'TRClosure' arg/ret positions.
 allTypeRefs :: Call -> [Int]
 allTypeRefs c =
-    concatMap paramIdxs (_call_typeArgs c ++ _call_argTypes c ++ [_call_ret c])
+    concatMap paramIdxs
+        (_call_typeArgs c ++ _call_argTypes c ++ _call_methodTurbofish c ++ [_call_ret c])
   where
     paramIdxs (TRParam i)          = [i]
     paramIdxs (TRPrim _)           = []
@@ -372,7 +392,30 @@ renderCall c params =
         callTouchesSerde =
             anySerde (_call_ret c)
             || any anySerde (_call_argTypes c)
-        serdeTurbofish = if callTouchesSerde then "::<serde_json::Value>" else ""
+        -- [#72] The METHOD-LEVEL turbofish (`::<C1, C2, …>` AFTER `::method`).
+        -- When the inspector recorded the method's OWN generics' ordered
+        -- concretes (`_call_methodTurbofish`, non-empty), render a concrete per
+        -- generic in declaration order — REQUIRED whenever the method declares
+        -- more than one own generic and any of them is reduced/mono'd (the
+        -- firestore `get_obj<T: DeserializeOwned, S: AsRef<str>>` shape →
+        -- `::<serde_json::Value, String>`). The historical single-serde fallback
+        -- (`::<serde_json::Value>` when the call touches serde) is kept ONLY for
+        -- the legacy wire shape that omits `methodTurbofish` — byte-identical for
+        -- a method with exactly one serde-reduced own generic (every pre-#72
+        -- serde stub). A non-serde, non-mono method (empty list, no serde) emits
+        -- no method turbofish, exactly as before.
+        -- The explicit ordered list rendered as a turbofish (empty string when
+        -- the inspector recorded no method-own generics).
+        explicitMethodTurbofish = case _call_methodTurbofish c of
+            []  -> ""
+            trs -> "::<" ++ intercalate ", " (map (renderTypeRef params) trs) ++ ">"
+        -- UFCS branch: prefer the explicit ordered list; fall back to the legacy
+        -- single-serde turbofish (byte-identical for the one-own-serde-generic
+        -- stubs that predate `methodTurbofish` on the wire).
+        methodTurbofish
+            | not (null (_call_methodTurbofish c)) = explicitMethodTurbofish
+            | callTouchesSerde                     = "::<serde_json::Value>"
+            | otherwise                            = ""
         -- The callee. For an assoc-fn/method on a TYPE (`_call_assocOnType`),
         -- the type-args bind the impl Self-type, so the turbofish sits on the
         -- path BEFORE the method (`::box1::Box1::<A>::make`,
@@ -405,11 +448,17 @@ renderCall c params =
                 -- the #55 DEFECT-2 inherent-method turbofish onto the trait branch.
                 -- Single-serde-param assumption: every serde param/return reduces
                 -- to the SAME `serde_json::Value`, so one turbofish arg suffices.
-                in "<" ++ selfP ++ " as " ++ traitP ++ ">::" ++ m ++ serdeTurbofish
+                in "<" ++ selfP ++ " as " ++ traitP ++ ">::" ++ m ++ methodTurbofish
             Nothing -> case _call_method c of
+                -- [#72] An inherent generic method routed through the Call-AST
+                -- path emits the method-level turbofish AFTER `::m` too (the
+                -- path-level `turbofish` binds the Self type's struct generics,
+                -- a DISTINCT slot). `methodTurbofish` is empty unless the method
+                -- declares own generics (or — legacy fallback — the call touches
+                -- serde), so a non-generic inherent method stays byte-identical.
                 Just m
-                  | _call_assocOnType c -> pathStr ++ turbofish ++ "::" ++ m
-                  | otherwise           -> pathStr ++ "::" ++ m
+                  | _call_assocOnType c -> pathStr ++ turbofish ++ "::" ++ m ++ explicitMethodTurbofish
+                  | otherwise           -> pathStr ++ "::" ++ m ++ explicitMethodTurbofish
                 Nothing -> pathStr ++ turbofish
         -- Receiver argument (if any), borrow-formed, prepended to the value args.
         recvArg = case _call_receiver c of
@@ -731,6 +780,10 @@ parseCall nParams = A.withObject "Call" $ \o -> do
     -- WALL 3a (#59): default False ⇒ sync wrapper body ⇒ byte-identical to a
     -- pre-WALL-3a stub. An async host method carries @"isAsync": true@.
     isAsync <- o .:? "isAsync" .!= False
+    -- #72: default [] ⇒ no method-level turbofish list ⇒ the renderer keeps the
+    -- legacy single-serde turbofish path. A method with own generics carries the
+    -- ordered @"methodTurbofish": [<concrete>, …]@.
+    methodTurbofish <- o .:? "methodTurbofish" .!= []
     let c = Call
             { _call_kind     = kind
             , _call_path     = path
@@ -745,6 +798,7 @@ parseCall nParams = A.withObject "Call" $ \o -> do
             , _call_borrowAsRefArgs = borrowAsRefArgs
             , _call_traitQualifier = traitQualifier
             , _call_isAsync = isAsync
+            , _call_methodTurbofish = methodTurbofish
             }
     case validateCall nParams c of
         Right ok -> pure ok

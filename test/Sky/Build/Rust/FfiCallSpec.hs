@@ -60,6 +60,7 @@ spec = do
                 , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
                 , _call_isAsync = False
+                , _call_methodTurbofish = []
                 }
         it "decodes a method call with a ref receiver `left : Pair a b -> a`" $ do
             let j = A.object
@@ -91,6 +92,7 @@ spec = do
                 , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
                 , _call_isAsync = False
+                , _call_methodTurbofish = []
                 }
         it "decodes a prim TypeRef leaf in ret (`count : Keyed a -> Int`)" $ do
             let j = A.object
@@ -208,6 +210,7 @@ spec = do
                 , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
                 , _call_isAsync = False
+                , _call_methodTurbofish = []
                 }
         it "accepts a valid single-param call" $
             validateCall 1 okCall `shouldSatisfy` isRight
@@ -246,6 +249,7 @@ spec = do
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     , _call_isAsync = False
+                    , _call_methodTurbofish = []
                     }
             -- C-A: real params ["a","b"] → TRParam 0 → A, TRParam 1 → B
             closureBounds call ["a", "b"] `shouldBe` ["F1: Fn(A) -> B + ::core::clone::Clone"]
@@ -266,6 +270,7 @@ spec = do
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     , _call_isAsync = False
+                    , _call_methodTurbofish = []
                     }
             -- C-B: a closure nested inside Vec<_> must be rejected by validateCall
             isLeft (validateCall 1 call) `shouldBe` True
@@ -286,6 +291,7 @@ spec = do
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     , _call_isAsync = False
+                    , _call_methodTurbofish = []
                     }
             renderCall c ["a"]    `shouldBe` "::box1::Box1::<A>::make(arg0)"
             renderRetType c ["a"] `shouldBe` "::box1::Box1<A>"
@@ -305,6 +311,7 @@ spec = do
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     , _call_isAsync = False
+                    , _call_methodTurbofish = []
                     }
             renderCall c ["k", "v"] `shouldBe`
                 "::mycrate::Pair::<K, V>::left(&arg0)"
@@ -332,9 +339,86 @@ spec = do
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     , _call_isAsync = False
+                    , _call_methodTurbofish = []
                     }
             renderCall c ["a", "b"] `shouldBe`
                 "::clo::map_each(arg0, arg1)"
+
+    describe "#72 — method-level turbofish names a concrete PER own generic" $ do
+        -- The firestore `get_obj<T: DeserializeOwned, S: AsRef<str>>(&self, id: S)
+        -- -> Result<T, String>` shape on a concrete-Self TRAIT method. T serde→
+        -- Value, S AsRef→String; both leave the Sky `order` empty, so typeArgs is
+        -- []. The method-level turbofish MUST name BOTH concretes in declaration
+        -- order — `::<serde_json::Value, String>` — or the call supplies 1 of 2
+        -- generics (E0107). The ordered list comes from `_call_methodTurbofish`.
+        it "renders ::<serde_json::Value, String> on a UFCS trait method (2 generics)" $ do
+            let c = Call
+                    { _call_kind     = CallMethod
+                    , _call_path     = ["::c", "Db"]
+                    , _call_typeArgs = []
+                    , _call_method   = Just "get_obj"
+                    , _call_receiver = Just (Receiver 0 ByRef)
+                    , _call_args     = [1]
+                    , _call_argTypes = [ TRCtor "::c::Db" [], TRPrim "String" ]
+                    , _call_ret      = TRCtor "::core::result::Result"
+                                          [ TRSerdeValue, TRPrim "String" ]
+                    , _call_assocOnType = True
+                    , _call_iterAdapters = []
+                    , _call_borrowAsRefArgs = []
+                    , _call_traitQualifier = Just ("::c::Db", "::c::Repo")
+                    , _call_isAsync = True
+                    , _call_methodTurbofish = [ TRSerdeValue, TRPrim "String" ]
+                    }
+            renderCall c [] `shouldBe`
+                "<::c::Db as ::c::Repo>::get_obj::<serde_json::Value, String>(&arg0, arg1)"
+        it "renders three concretes in declaration order (3-generic control)" $ do
+            -- `pick<A: Serialize, B: AsRef<str>, C: DeserializeOwned>(&self, key:
+            -- B, payload: A) -> Result<C, String>` — A→Value (serde IN, sv_2),
+            -- B→String (arg1), C→Value (serde OUT). The turbofish names A, B, C in
+            -- DECLARATION order, NOT arg order.
+            let c = Call
+                    { _call_kind     = CallMethod
+                    , _call_path     = ["::c", "Db"]
+                    , _call_typeArgs = []
+                    , _call_method   = Just "pick"
+                    , _call_receiver = Just (Receiver 0 ByRef)
+                    , _call_args     = [1, 2]
+                    , _call_argTypes = [ TRCtor "::c::Db" [], TRPrim "String", TRSerdeValue ]
+                    , _call_ret      = TRCtor "::core::result::Result"
+                                          [ TRSerdeValue, TRPrim "String" ]
+                    , _call_assocOnType = True
+                    , _call_iterAdapters = []
+                    , _call_borrowAsRefArgs = []
+                    , _call_traitQualifier = Just ("::c::Db", "::c::Repo")
+                    , _call_isAsync = True
+                    , _call_methodTurbofish =
+                        [ TRSerdeValue, TRPrim "String", TRSerdeValue ]
+                    }
+            renderCall c [] `shouldBe`
+                "<::c::Db as ::c::Repo>::pick::<serde_json::Value, String, serde_json::Value>(&arg0, arg1, sv_2)"
+        it "empty methodTurbofish keeps the legacy single-serde turbofish (byte-identical)" $ do
+            -- A single-own-serde-generic stub (`put<T: Serialize>`) carries an
+            -- EMPTY methodTurbofish; the renderer falls back to the historical
+            -- single `::<serde_json::Value>` — the pre-#72 shape, unchanged.
+            let c = Call
+                    { _call_kind     = CallMethod
+                    , _call_path     = ["::c", "Db"]
+                    , _call_typeArgs = []
+                    , _call_method   = Just "put"
+                    , _call_receiver = Just (Receiver 0 ByRef)
+                    , _call_args     = [1]
+                    , _call_argTypes = [ TRCtor "::c::Db" [], TRSerdeValueRef ]
+                    , _call_ret      = TRCtor "::core::result::Result"
+                                          [ TRCtor "()" [], TRPrim "String" ]
+                    , _call_assocOnType = True
+                    , _call_iterAdapters = []
+                    , _call_borrowAsRefArgs = []
+                    , _call_traitQualifier = Just ("::c::Db", "::c::Repo")
+                    , _call_isAsync = True
+                    , _call_methodTurbofish = []
+                    }
+            renderCall c [] `shouldBe`
+                "<::c::Db as ::c::Repo>::put::<serde_json::Value>(&arg0, &sv_1)"
 
     describe "#30 — iterator param call form (Iterator → arg.into_iter())" $ do
         -- `sum_all<I: IntoIterator<Item=i64>>(xs: I) -> i64` — the Vec arg passes
@@ -355,6 +439,7 @@ spec = do
                 , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
                 , _call_isAsync = False
+                , _call_methodTurbofish = []
                 }
         it "an Iterator-kind arg (in iterAdapters) renders arg0.into_iter()" $
             renderCall (iterCall [0]) [] `shouldBe` "::iter::go(arg0.into_iter())"
@@ -377,6 +462,7 @@ spec = do
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     , _call_isAsync = False
+                    , _call_methodTurbofish = []
                     }
             renderCall c [] `shouldBe` "::iter::zip2(arg0, arg1.into_iter())"
         it "validateCall REJECTS an out-of-range iterAdapters index" $ do
@@ -394,6 +480,7 @@ spec = do
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     , _call_isAsync = False
+                    , _call_methodTurbofish = []
                     }
             isLeft' (validateCall 0 bad) `shouldBe` True
         it "validateCall REJECTS an iterAdapters index on a non-Vec arg" $ do
@@ -411,6 +498,7 @@ spec = do
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     , _call_isAsync = False
+                    , _call_methodTurbofish = []
                     }
             isLeft' (validateCall 0 bad) `shouldBe` True
         it "validateCall ACCEPTS a well-formed iterAdapters index on a Vec arg" $ do
@@ -428,6 +516,7 @@ spec = do
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     , _call_isAsync = False
+                    , _call_methodTurbofish = []
                     }
             isRight (validateCall 0 ok) `shouldBe` True
 
@@ -452,6 +541,7 @@ spec = do
                 , _call_borrowAsRefArgs = []
                 , _call_traitQualifier = Nothing
                 , _call_isAsync = False
+                , _call_methodTurbofish = []
                 }
         it "byRef closure arg passes an owned-clone bridge, not arg1 directly" $
             renderCall (keepCall True) ["a"] `shouldContain`
@@ -477,6 +567,7 @@ spec = do
                     , _call_borrowAsRefArgs = []
                     , _call_traitQualifier = Nothing
                     , _call_isAsync = False
+                    , _call_methodTurbofish = []
                     }
             renderCall zipCall ["a", "b"] `shouldContain`
                 "move |__r0, __r1| { let __v0 = __r0.clone(); \

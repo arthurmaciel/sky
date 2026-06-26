@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -605,6 +605,54 @@ run_serde_ref() {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 83-ffi-mixed-generic-turbofish — WALL 4 stretch (#72): a method with N generics
+# each reduced by a DIFFERENT mechanism (T serde→Value, S AsRef→String). The
+# method-level turbofish must name a concrete PER generic in declaration order
+# (`::<serde_json::Value, String>`), not just the serde one. Pre-#72: a single
+# `::<serde_json::Value>` → E0107.
+# POSITIVE: get_obj (2-gen async) + pick (3-gen async) + get_obj_sync (2-gen sync
+#           concrete-Self trait) all BIND and emit the FULL ordered turbofish.
+# Asserts [ALL OK] on the round-trip program.
+# ─────────────────────────────────────────────────────────────────────────────
+run_mixed_turbofish() {
+  local base=83-ffi-mixed-generic-turbofish
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+
+  local wd; wd="$(stage_workdir "$src")" || { _fail "$base (stage failed)"; return; }
+  local bin;  bin="$(build_fixture "$wd")"  || { _fail "$base (build failed — E0107 turbofish-arity?)"; rm -rf "$wd"; return; }
+
+  # POSITIVE: the method-level turbofish must name a concrete PER generic in
+  # declaration order — the make-or-break #72 codegen. The generic wrappers live
+  # in sky_ffi_generics.rs.
+  local gen="$wd/sky-out/rust/src/sky_ffi_generics.rs"
+  # get_obj<T: DeserializeOwned, S: AsRef<str>> → ::<serde_json::Value, String>
+  if ! rg -q 'get_obj::<serde_json::Value, String>' "$gen" 2>/dev/null; then
+    _fail "$base: get_obj turbofish does NOT name both concretes (::<serde_json::Value, String>) — E0107 gap"; rm -rf "$wd"; return
+  fi
+  # pick<A: Serialize, B: AsRef<str>, C: DeserializeOwned> → 3 concretes in order
+  if ! rg -q 'pick::<serde_json::Value, String, serde_json::Value>' "$gen" 2>/dev/null; then
+    _fail "$base: pick (3-generic) turbofish does NOT name all three concretes in order"; rm -rf "$wd"; return
+  fi
+  # get_obj_sync (sync concrete-Self trait) → ::<serde_json::Value, String>
+  if ! rg -q 'get_obj_sync::<serde_json::Value, String>' "$gen" 2>/dev/null; then
+    _fail "$base: get_obj_sync (sync) turbofish does NOT name both concretes"; rm -rf "$wd"; return
+  fi
+
+  # [ALL OK] output.
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (get_obj ::<Value,String> · pick ::<Value,String,Value> · get_obj_sync ::<Value,String> · cargo-clean no E0107 · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
 # ── Drive ────────────────────────────────────────────────────────────────────
 FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -619,6 +667,7 @@ for n in "${FIXTURES[@]}"; do
     61-ffi-result-string-err) run_handstub_basic "$n" ;;
     73-ffi-serde)             run_serde ;;
     81-ffi-serde-ref)         run_serde_ref ;;
+    83-ffi-mixed-generic-turbofish) run_mixed_turbofish ;;
     *)                        run_basic "$n" ;;
   esac
 done

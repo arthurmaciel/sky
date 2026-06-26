@@ -201,6 +201,25 @@ struct Call {
     /// stub.
     #[serde(rename = "isAsync", skip_serializing_if = "std::ops::Not::not")]
     is_async: bool,
+    /// [#72] The METHOD's OWN generics' resolved concretes, in DECLARATION order
+    /// — the method-level turbofish list `::<C1, C2, …>` for a UFCS/inherent
+    /// `Method::<…>` call. A method with TWO generics each reduced by a DIFFERENT
+    /// mechanism (the firestore `get_obj<T: DeserializeOwned, S: AsRef<str>>`
+    /// shape: T serde→Value, S AsRef→String) leaves the Sky-visible generic
+    /// `order` EMPTY, so the path `type_args` carries nothing — but the Rust
+    /// method STILL declares `<T, S>`, so the call MUST name a concrete per
+    /// generic (`::<serde_json::Value, String>`). Pre-#72 the codegen hardcoded a
+    /// single `::<serde_json::Value>` whenever the call touched serde → `E0107
+    /// method takes N generic arguments but 1 was supplied`. Each entry is the
+    /// generic's resolved concrete: a serde-reduced one → `SerdeValue`
+    /// (`serde_json::Value`), an AsRef/etc-mono'd one → its `Prim`/`Ctor`
+    /// concrete, a genuinely-remaining one → `Param(idx)`. EMPTY ⇒ omitted from
+    /// the wire ⇒ the Haskell renderer falls back to the historical single-serde
+    /// `::<serde_json::Value>` turbofish (byte-identical for a method with one
+    /// own generic, which is every pre-#72 serde stub). FAIL-CLOSED: a method
+    /// whose generic can't be resolved to a concrete DROPS before reaching here.
+    #[serde(rename = "methodTurbofish", skip_serializing_if = "Vec::is_empty")]
+    method_turbofish: Vec<TypeRef>,
 }
 
 /// The receiver of a method call: which wrapper value-arg supplies it + borrow.
@@ -7451,6 +7470,60 @@ fn try_parametric_stub(
 
     let ret = type_to_typeref(&sig["output"], &param_idx)?;
 
+    // [#72] The METHOD's OWN generics, in DECLARATION order, each resolved to its
+    // concrete — the method-level turbofish `::<C1, C2, …>`. The Rust method
+    // `Method::<…>` turbofish names ONLY the method's own generics (impl/struct
+    // generics bind on the Self type, never here), so `type_param_order(
+    // method_generics)` is the exact ordered set.
+    //
+    // A turbofish is NEEDED only when at least one method-own generic was
+    // serde-reduced / mono'd (it appears in `mono_map`): such a generic is
+    // INVISIBLE at the call site (a `from_str::<Value>(..)` arg / `to_string(&..)`
+    // return pins nothing about it, an AsRef param lowered to `String` likewise),
+    // so Rust can't infer it. When that happens the turbofish must name a
+    // concrete for EVERY own generic in declaration order, or the method takes N
+    // generics but the call supplies < N (E0107). When NO own generic is mono'd
+    // (e.g. a closure / iterator method whose every generic is inferred from a
+    // typed value-arg), the historical full-inference path stands — EMPTY list ⇒
+    // omitted from the wire ⇒ the Haskell renderer emits no method turbofish.
+    //
+    // Per-generic resolution when a turbofish is needed:
+    //   * mono'd / serde-reduced → its concrete from `mono_map` (`type_to_typeref`
+    //     maps the serde `{__sky_serde_value}` sentinel to `SerdeValue` and a
+    //     concrete rustdoc node to `Prim`/`Ctor`);
+    //   * a genuinely-remaining generic (still in `order`) → `Param(idx)`.
+    // FAIL-CLOSED: a generic that is consumed into an argType (a closure `F` → the
+    // wrapper's fresh `Fj`, an iterator `I` → a `Vec<ItemT>`) CANNOT be named in a
+    // turbofish, so a method mixing a serde/mono generic with a closure/iterator
+    // generic DROPS rather than emit an unnameable / partial turbofish (over-drop
+    // is sound; serde and closures do not co-occur in practice).
+    let method_own_generics = type_param_order(method_generics);
+    let needs_method_turbofish =
+        method_own_generics.iter().any(|g| mono_map.contains_key(g));
+    let method_turbofish: Vec<TypeRef> = if !needs_method_turbofish {
+        Vec::new()
+    } else {
+        let mut tf: Vec<TypeRef> = Vec::with_capacity(method_own_generics.len());
+        for g in &method_own_generics {
+            let tr = if let Some(concrete) = mono_map.get(g) {
+                type_to_typeref(concrete, &param_idx)?
+            } else if let Some(idx) = param_idx.get(g) {
+                TypeRef::Param(*idx)
+            } else {
+                // Consumed into an argType (closure → `Fj`, iterator → `Vec<_>`)
+                // or otherwise unnameable — can't slot it into the turbofish.
+                return Err(GenericDrop::UnmodellableBound(format!(
+                    "method generic `{g}` is consumed into an argType (closure / \
+                     iterator) but a sibling generic is serde/mono-reduced and \
+                     needs a method-level turbofish — cannot name `{g}` there \
+                     (would E0107); dropping the method"
+                )));
+            };
+            tf.push(tr);
+        }
+        tf
+    };
+
     let bounds: std::collections::BTreeMap<String, Vec<String>> = bounds_map
         .into_iter()
         .filter(|(_, v)| !v.is_empty())
@@ -7476,6 +7549,9 @@ fn try_parametric_stub(
             // [WALL 3a / #59] async host method → the generic-wrapper emitter
             // must build the async (`Box::pin(async move { … .await })`) body.
             is_async: fn_data["header"]["is_async"].as_bool().unwrap_or(false),
+            // [#72] The ordered method-level turbofish concretes (one per method
+            // own generic). EMPTY ⇒ omitted ⇒ Haskell keeps the single-serde path.
+            method_turbofish,
         },
         // [#58 WALL 2]: true iff at least one type-param was resolved by the
         // mono pre-pass.  Distinguishes "fully mono because AsRef<str>+Send
@@ -10524,6 +10600,7 @@ mod tests {
                 borrow_as_ref_args: vec![],
                 trait_qualifier: None,
                 is_async: false,
+                method_turbofish: vec![],
             },
             mono_resolved: false,
         };
@@ -10538,6 +10615,45 @@ mod tests {
         // #21 constraint 9: a non-trait Call (trait_qualifier=None) MUST NOT
         // serialise a `traitQualifier` key — byte-identical to a pre-#21 stub.
         assert!(v["call"].get("traitQualifier").is_none());
+        // #72: an EMPTY method_turbofish MUST NOT serialise a `methodTurbofish`
+        // key — byte-identical to a pre-#72 stub (the legacy single-serde path).
+        assert!(v["call"].get("methodTurbofish").is_none());
+    }
+
+    #[test]
+    fn test_method_turbofish_wire_shape() {
+        // #72: a method with TWO own generics, each reduced by a DIFFERENT
+        // mechanism (T serde→Value, S AsRef→String), must serialise the ordered
+        // `methodTurbofish` list the Haskell renderer reads — a concrete PER
+        // generic in declaration order. The firestore `get_obj<T: DeserializeOwned,
+        // S: AsRef<str>>` shape.
+        let call = Call {
+            kind: "method".into(),
+            path: vec!["::c".into(), "Db".into()],
+            type_args: vec![],
+            method: Some("get_obj".into()),
+            receiver: Some(Receiver { arg: 0, by: "ref".into() }),
+            args: vec![1],
+            arg_types: vec![
+                TypeRef::Ctor("::c::Db".into(), vec![]),
+                TypeRef::Prim("String".into()),
+            ],
+            ret: TypeRef::Ctor(
+                "::core::result::Result".into(),
+                vec![TypeRef::SerdeValue, TypeRef::Prim("String".into())],
+            ),
+            iter_adapters: vec![],
+            borrow_as_ref_args: vec![],
+            trait_qualifier: Some(("::c::Db".into(), "::c::Repo".into())),
+            is_async: true,
+            // T → serde_json::Value (serdeValue), S → String (prim).
+            method_turbofish: vec![TypeRef::SerdeValue, TypeRef::Prim("String".into())],
+        };
+        let v = serde_json::to_value(&call).unwrap();
+        assert_eq!(
+            v["methodTurbofish"],
+            serde_json::json!([{ "serdeValue": true }, { "prim": "String" }])
+        );
     }
 
     // ── Phase 5: closure-param metadata ────────────────────────────────
