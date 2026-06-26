@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -701,6 +701,59 @@ run_mixed_turbofish() {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 89-ffi-static-str-into — WALL-E (#78): a method param bounded by
+# `Into<&'static str>` is UNSATISFIABLE from a runtime-owned Sky `String` (a
+# String can LEND a borrow but never BECOME a `&'static str`). The inspector
+# must FAIL-CLOSED DROP it (no wrapper). Pre-WALL-E it mono'd `P → String` and
+# emitted `arg0.build(&arg1)` → `E0277: &'static str: From<&String>` (the exact
+# firebase `ApiUriBuilder::build<PathT: Into<&'static str>>` shape).
+# Built under FORCED SKY_DCE=0 so the no-E0277 + drop is proven over the FULL
+# bound surface (not just the DCE-reachable subset).
+# NEGATIVE: `build_from_router` must NOT appear (fail-closed drop).
+# POSITIVE: `tag_from_router` (AsRef<str>→String #58) + `label_from_router`
+#   (Into<String> OWNED target — the discriminator: owned-Into stays sound) +
+#   `new_from_router` (owned-String ctor #67) bind, and the program runs [ALL OK].
+# ─────────────────────────────────────────────────────────────────────────────
+run_static_str_into() {
+  local base=89-ffi-static-str-into
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+
+  local wd; wd="$(stage_workdir "$src")" || { _fail "$base (stage failed)"; return; }
+  local binds; binds="$(bindings_file "$wd")" || { _fail "$base (cannot derive bindings path)"; rm -rf "$wd"; return; }
+  # FORCE a full emit so EVERY bound wrapper must cargo-compile — the WALL-E
+  # E0277 lives on `build`, which DCE would tree-shake away (Main can't call a
+  # dropped fn), masking the regression. SKY_DCE=0 keeps the full surface.
+  local bin; bin="$(SKY_DCE=0 build_fixture "$wd")" || { _fail "$base (build failed — E0277 &'static str: From<&String> not dropped?)"; rm -rf "$wd"; return; }
+
+  # NEGATIVE: the `Into<&'static str>` method must be fail-closed dropped.
+  if rg -q 'SKY-FFI-WRAPPER BEGIN build_from_router' "$binds" 2>/dev/null; then
+    _fail "$base: build (Into<&'static str>) wrapper leaked into bindings (WALL-E over-admit → E0277)"; rm -rf "$wd"; return
+  fi
+  if rg -q '\.build\(&arg' "$binds" 2>/dev/null; then
+    _fail "$base: an `arg0.build(&arg1)` call (the WALL-E bug) is present in bindings"; rm -rf "$wd"; return
+  fi
+  # POSITIVE controls must keep binding (no over-drop).
+  for w in new_from_router tag_from_router label_from_router; do
+    if ! rg -q "SKY-FFI-WRAPPER BEGIN $w" "$binds" 2>/dev/null; then
+      _fail "$base: control wrapper '$w' missing — WALL-E over-dropped a sound bind"; rm -rf "$wd"; return
+    fi
+  done
+
+  # [ALL OK] output (build was already cargo-clean to reach here).
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (build Into<&'static str> DROPPED · tag AsRef<str> + label Into<String> bind · cargo-clean no E0277 · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 85-ffi-vec-struct-field — WALL-A (#74): a foreign struct with a
 # `Vec<StructType>` field. The field SETTER's param type must be the REAL
 # `Vec<Inner>` (Inner a bound Clone-opaque), NEVER the bug's `Vec<String>` —
@@ -767,6 +820,7 @@ for n in "${FIXTURES[@]}"; do
     83-ffi-mixed-generic-turbofish) run_mixed_turbofish ;;
     85-ffi-vec-struct-field)  run_vec_struct_field ;;
     86-ffi-transitive-dep-path) run_transitive_dep ;;
+    89-ffi-static-str-into)   run_static_str_into ;;
     *)                        run_basic "$n" ;;
   esac
 done

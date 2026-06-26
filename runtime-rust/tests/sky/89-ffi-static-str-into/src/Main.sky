@@ -1,0 +1,72 @@
+module Main exposing (main)
+
+-- 89-ffi-static-str-into: WALL-E (#78) proof.
+--
+-- static-str-crate exposes `Router::build<P: Into<&'static str>>(&self, path: P)`
+-- — UNSATISFIABLE from a runtime Sky `String` (a String can lend a borrow but
+-- never BECOME a `&'static str`). Pre-WALL-E the inspector mono'd `P → String`
+-- and the codegen emitted `arg0.build(&arg1)` → `E0277: &'static str:
+-- From<&String>` (the exact firebase `ApiUriBuilder::build` shape). The fix
+-- fail-closed DROPS it (no `build_from_router` wrapper), so the bound surface
+-- cargo-compiles.
+--
+-- This Sky program can ONLY reference the POSITIVE controls (`new` / `tag` /
+-- `label`); `build` is gone by design, so the gate also asserts (statically)
+-- that `build_from_router` never appears in the bindings.
+--
+-- Coverage:
+--   new   — owned-String ctor (#67); mints the opaque Router.
+--   tag   — `AsRef<str>` param → String (#58 control; must keep binding).
+--   label — `Into<String>` (OWNED target) → String; the discriminator: WALL-E
+--           drops `Into<&'static str>` (borrowed) but NOT `Into<String>` (owned).
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Static_str_crate as R
+import Std.Log exposing (println)
+
+
+checkTag : Task Error ()
+checkTag =
+    case R.new_from_router "host" of
+        Ok router ->
+            case R.tag_from_router router "v1" of
+                Ok tagged ->
+                    if tagged == "host#v1" then
+                        println "tag=ok"
+
+                    else
+                        Task.fail (Error.unexpected ("tag=UNEXPECTED " ++ tagged))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+
+checkLabel : Task Error ()
+checkLabel =
+    case R.new_from_router "host" of
+        Ok router ->
+            case R.label_from_router router "main" of
+                Ok labelled ->
+                    if labelled == "host@main" then
+                        println "label=ok"
+
+                    else
+                        Task.fail (Error.unexpected ("label=UNEXPECTED " ++ labelled))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+
+main : Task Error ()
+main =
+    checkTag
+        |> Task.andThen (\_ -> checkLabel)
+        |> Task.andThen (\_ -> println "[ALL OK]")

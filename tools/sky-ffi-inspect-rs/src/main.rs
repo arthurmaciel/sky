@@ -6061,6 +6061,21 @@ fn bound_to_concrete(bound: &serde_json::Value, pos: BoundPos) -> Option<serde_j
                     _ => None,
                 }
             } else {
+                // [#78 WALL-E] `Into<X>`/`From<X>` mean "this value can BECOME an
+                // X" — distinct from `AsRef<X>`/`Borrow<X>` ("can LEND an &X"). A
+                // runtime-owned Sky value (String/Vec/…) can lend a borrow but can
+                // NEVER produce one by value: `String: Into<&'static str>` is
+                // false (the only `T: Into<&'static str>` is `&'static str`
+                // itself, which we can't mint from a runtime owned value). So an
+                // Into/From bound whose target is a borrowed reference (e.g.
+                // firebase `ApiUriBuilder::build<PathT: Into<&'static str>>`) is
+                // unsatisfiable by any owned concrete we'd substitute → fail-closed
+                // drop (over-drop is sound; an unsound String→&'static str admit
+                // is E0277). AsRef/Borrow KEEP the borrowed see-through — lending a
+                // borrow is their whole purpose (`String: AsRef<str>` holds).
+                if matches!(name, "Into" | "From") && arg.get("borrowed_ref").is_some() {
+                    return None;
+                }
                 concrete_for_inner_type(arg)
             }
         }
@@ -9614,6 +9629,25 @@ mod tests {
         assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("u16")]), BoundPos::Param), None);
         // A truly unsupported inner type still returns None
         assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![serde_json::json!({ "resolved_path": { "name": "SomeWeirdType", "path": "SomeWeirdType", "id": 0, "args": null } })]), BoundPos::Param), None);
+
+        // [#78 WALL-E] Into<&'static str> / From<&str> drop — a runtime owned Sky
+        // value can never BECOME a borrowed reference (firebase
+        // `ApiUriBuilder::build<PathT: Into<&'static str>>`). `String:
+        // Into<&'static str>` is false, so substituting String is E0277.
+        let static_str = serde_json::json!({
+            "borrowed_ref": { "lifetime": "'static", "is_mutable": false, "type": { "primitive": "str" } }
+        });
+        assert_eq!(bound_to_concrete(&trait_bound("Into", vec![static_str.clone()]), BoundPos::Param), None,
+            "Into<&'static str> must DROP — String can lend but never become a &'static str");
+        let elided_str = serde_json::json!({
+            "borrowed_ref": { "lifetime": null, "is_mutable": false, "type": { "primitive": "str" } }
+        });
+        assert_eq!(bound_to_concrete(&trait_bound("From", vec![elided_str]), BoundPos::Param), None,
+            "From<&str> must DROP — same borrowed-target soundness hole as the 'static case");
+        // CONTRAST: AsRef<&str>-shaped borrowed target KEEPS the see-through —
+        // lending an &str is exactly what AsRef means (String: AsRef<str>).
+        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![static_str]), BoundPos::Param), Some(string_node()),
+            "AsRef sees through a borrowed target — only Into/From drop on it");
     }
 
     #[test]

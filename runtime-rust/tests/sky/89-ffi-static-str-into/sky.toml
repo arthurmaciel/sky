@@ -1,0 +1,13 @@
+[project]
+name = "89-ffi-static-str-into"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local static-str-crate: tests WALL-E (#78) — a `P: Into<&'static str>` param
+# must FAIL-CLOSED DROP (a runtime Sky String can never become a &'static str;
+# pre-fix it mono'd P→String → E0277). The AsRef<str> (#58) + Into<String> (#67)
+# controls must keep binding (no over-drop). setup.sh git-inits the crate into
+# the cache path below.
+["rust.dependencies"]
+static-str-crate = { git = "file:///home/arthur/.cache/sky/89-ffi-static-str-into-crate", branch = "master" }

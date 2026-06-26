@@ -17,6 +17,55 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — WALL-E (#78): `Into<&'static str>` param → fail-closed drop · 🎉 firebase bound surface cargo-CLEAN
+
+firebase's last cargo error under `SKY_DCE=0` was a single E0277 on
+`ApiUriBuilder::build<PathT: Into<&'static str>>(&self, path: PathT)`: the inspector
+mono'd `PathT → String` (saw through `&'static str` → `str` → `String`) and codegen
+emitted `arg0.build(&arg1)` → `error[E0277]: &'static str: From<&String>`.
+
+**Root cause + fix.** `Into<X>`/`From<X>` mean "this value can BECOME an X" — NOT
+`AsRef<X>`'s "can LEND an &X". A runtime-owned Sky value can lend a borrow but can
+never produce a `&'static str` by value (`String: Into<&'static str>` is false; the
+only `T: Into<&'static str>` is `&'static str` itself, unmintable from a runtime
+value). Fix: in `bound_to_concrete`'s `AsRef|Borrow|Into|From` arm, gate the
+non-primitive branch — `if matches!(name,"Into"|"From") && arg.is borrowed_ref →
+return None` (fail-closed DROP). AsRef/Borrow keep the borrowed see-through (their
+whole purpose). `classify_param_bound` already drops bare `Into` via
+`UnmodellableBound`, so `bound_to_concrete` is the single authoritative admit site.
+
+**Soundness (guardian APPROVE).** No owned T the inspector substitutes
+(String/Vec/i64/f64/bool/char) satisfies `Into<&'static str>` → zero over-drop on a
+real bind. Sibling shapes (`Cow<'static,str>`, alias paths) already fall to
+`concrete_for_inner_type`'s owned allowlist → `None` → dropped anyway; never an
+unsound admit. Over-drop is sound; the unsound admit is E0277.
+
+**Proof.** `ApiUriBuilder::build` 382→381 fns (dropped); firebase full build under
+`SKY_DCE=0` → **0 cargo errors** (was 1) — entire bound surface compiles shim-free.
+Inspector 201 unit tests (extended: `Into<&'static str>`→None, `From<&str>`→None,
+`AsRef<&'static str>`→Some(String) contrast). New fixture
+`89-ffi-static-str-into` (crate `static-str-crate`/`Router`): NEGATIVE
+`build<Into<&'static str>>` must drop; POSITIVE `tag<AsRef<str>>` +
+`label<Into<String>>` (owned-Into discriminator) + `new(String)` bind. Custom gate
+runner `run_static_str_into` forces `SKY_DCE=0`, asserts `build_from_router` absent
++ no `.build(&arg` + controls present + `[ALL OK]`. **Full FFI gate 35 ok · 0 fail.**
+
+**WALL-F is NOT this fix.** firebase's actual CRUD (`create_user`/`get_user`) is
+still unbound — but those are `trait-method-generic-self` drops on `App<C>` /
+`FirebaseAuth<ApiHttpClientT>`, AND the `--all-features` rustdoc build FAILS so the
+inspector falls back to default features (hiding the feature-gated auth surface).
+That structural wall is split to #81 (sibling of #68). WALL-E only closes the
+compile-blocker on the surface that IS bound.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (`bound_to_concrete` gate +
+`test_bound_to_concrete` asserts); `runtime-rust/tests/sky/89-ffi-static-str-into/*`
+(new fixture); `runtime-rust/scripts/ffi-fixtures-test.sh` (`run_static_str_into` +
+`ALL_FIXTURES`/dispatch). Context: WALL-C (`e1ada425`, #76 — HashMap public-path)
+and WALL-D (`5bcc26ff`, #77 — Default UFCS) landed between WALL-B and here without
+their own PROGRESS entries.
+
+---
+
 ## 2026-06-26 — WALL-B (#75): transitive-dep crates added to generated Cargo.toml with CANONICAL names + locked versions
 
 Generic/UFCS wrappers emit `::<crate>::` paths for transitive deps (firebase
