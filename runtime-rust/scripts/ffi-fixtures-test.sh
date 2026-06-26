@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -754,6 +754,51 @@ run_static_str_into() {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 90-ffi-default-trait-method-mono — WALL-F (#81): a trait with DEFAULT-body RPITIT
+# async methods, impl'd for a generic Self `Handle<C>` whose `C` is bounded by the
+# UNIQUE-impl trait `Client`, plus an inherent ctor returning the concrete
+# `Handle<RealClient>`. WALL-F (a) monomorphizes the Self via the unique impl, (b)
+# projects the trait's default methods (which live on the trait DEF, never under
+# the impl), recognises the RPITIT `-> impl Future + Send`, proves the receiver
+# Send via the `: Send` supertrait, exempts the `Result` error slot.
+# Built under FORCED SKY_DCE=0 so the projected wrapper must cargo-compile.
+# POSITIVE: `op_from_handle` (DEFAULT + RPITIT) binds + runs ("real:hi").
+# NEGATIVE: op_nosend (?Send) · op_extra (where C: Extra) · op_count (usize param)
+#   must ALL be absent (fail-closed).
+# ─────────────────────────────────────────────────────────────────────────────
+run_default_trait_mono() {
+  local base=90-ffi-default-trait-method-mono
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+
+  local wd; wd="$(stage_workdir "$src")" || { _fail "$base (stage failed)"; return; }
+  local gen; gen="$wd/sky-out/rust/src/sky_ffi_generics.rs"
+  local bin; bin="$(SKY_DCE=0 build_fixture "$wd")" || { _fail "$base (build failed — projected RPITIT wrapper cargo-fail?)"; rm -rf "$wd"; return; }
+
+  # POSITIVE: the projected default RPITIT method binds (UFCS generic wrapper).
+  if ! rg -q 'fn default_trait_crate_op_from_handle' "$gen" 2>/dev/null; then
+    _fail "$base: projected default method 'op' did NOT bind (WALL-F (b) projection broken)"; rm -rf "$wd"; return
+  fi
+  # NEGATIVE: the three fail-closed default methods must be ABSENT everywhere.
+  for banned in op_nosend op_extra op_count; do
+    if rg -q "$banned" "$wd"/sky-out/rust/src/*.rs 2>/dev/null; then
+      _fail "$base: fail-closed default method '$banned' leaked into bindings"; rm -rf "$wd"; return
+    fi
+  done
+
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (default RPITIT 'op' projected+bound+ran 'real:hi' · op_nosend/op_extra/op_count fail-closed · cargo-clean · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 85-ffi-vec-struct-field — WALL-A (#74): a foreign struct with a
 # `Vec<StructType>` field. The field SETTER's param type must be the REAL
 # `Vec<Inner>` (Inner a bound Clone-opaque), NEVER the bug's `Vec<String>` —
@@ -821,6 +866,7 @@ for n in "${FIXTURES[@]}"; do
     85-ffi-vec-struct-field)  run_vec_struct_field ;;
     86-ffi-transitive-dep-path) run_transitive_dep ;;
     89-ffi-static-str-into)   run_static_str_into ;;
+    90-ffi-default-trait-method-mono) run_default_trait_mono ;;
     *)                        run_basic "$n" ;;
   esac
 done

@@ -1168,7 +1168,24 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
         // The self type is under "for" (NOT "for_") in the rustdoc JSON.
         if let Some(impl_data) = inner.get("impl") {
             // "for" is a Rust keyword but JSON keys can be anything.
-            let for_val = impl_data.get("for").or_else(|| impl_data.get("for_"));
+            let for_val_raw = impl_data.get("for").or_else(|| impl_data.get("for_"));
+            let impl_generics = impl_data.get("generics");
+            // [WALL-F / #81 (a)] If Self is a GENERIC `Struct<P>` whose `P` is an
+            // impl type-param bounded by a unique-impl crate-local trait, build the
+            // monomorphization map `{P → unique-concrete}` and substitute it across
+            // Self (here), the trait node (below — UFCS qualifier), and every method
+            // sig (in the items loop). Turns `FirebaseAuth<ApiHttpClientT>` into the
+            // closed-monomorphic `FirebaseAuth<ReqwestApiClient>` the #45 path binds.
+            // `None` → no substitution → every line below is byte-identical to the
+            // pre-WALL-F behaviour (the `trait-method-generic-self` drop stands).
+            let self_mono_subst = for_val_raw
+                .and_then(|fv| impl_self_mono_subst(fv, impl_generics));
+            let for_val_owned: Option<serde_json::Value> =
+                match (&self_mono_subst, for_val_raw) {
+                    (Some(map), Some(fv)) => Some(subst_generic_json(fv, map, BoundPos::Param)),
+                    _ => None,
+                };
+            let for_val = for_val_owned.as_ref().or(for_val_raw);
             let self_sky = for_val
                 .map(|v| rustdoc_type_to_sky(v, &aliases))
                 .unwrap_or_default();
@@ -1216,16 +1233,25 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
             // A trait impl threads its trait node (for the Q2-A trait-def bound
             // union + the UFCS qualifier); an inherent impl threads `None`.
             let is_inherent_impl = trait_name.is_empty();
-            let trait_node = impl_data
-                .get("trait")
-                .filter(|_| !is_inherent_impl);
+            // [WALL-F / #81 (a)] Substitute the trait node with the SAME Self-mono
+            // map (invariant B) so the UFCS qualifier names the concrete trait args
+            // (`FirebaseAuthService<ReqwestApiClient>`, not `<ApiHttpClientT>`).
+            let trait_node_owned: Option<serde_json::Value> =
+                match (&self_mono_subst, impl_data.get("trait")) {
+                    (Some(map), Some(tn)) if !is_inherent_impl =>
+                        Some(subst_generic_json(tn, map, BoundPos::Param)),
+                    _ => None,
+                };
+            let trait_node = trait_node_owned
+                .as_ref()
+                .or_else(|| impl_data.get("trait").filter(|_| !is_inherent_impl));
             // Constraint 11: a TRAIT impl over a generic Self is out of scope
-            // UNLESS the Self is closed-monomorphic (#45).
+            // UNLESS the Self is closed-monomorphic (#45) — which the WALL-F (a)
+            // substitution above makes it (FirebaseAuth<ReqwestApiClient>).
             let trait_self_concrete = match for_val {
                 Some(fv) => self_is_concrete_named(fv) || self_is_closed_monomorphic(fv),
                 None => false,
             };
-            let impl_generics = impl_data.get("generics");
             let struct_generics = for_val.and_then(|v| struct_generics_of(v, index));
 
             if std::env::var("SKY_FFI_DBG").is_ok() {
@@ -1262,6 +1288,18 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                         }
                         let method_name = method_item["name"].as_str().unwrap_or("");
                         if let Some(fn_data_raw) = method_item["inner"].get("function") {
+                            // [WALL-F / #81 (a)] Apply the impl-Self monomorphization
+                            // to THIS method's sig with the SAME map (invariant B): a
+                            // method using the impl param (`get_client(&self) -> &C`)
+                            // becomes `-> &ReqwestApiClient`. Runs FIRST so every
+                            // downstream decision (#52 param-mono, de-async,
+                            // generic-bearing, parse_fn_item) sees the concrete sig.
+                            let self_mono_owned: Option<serde_json::Value> =
+                                self_mono_subst.as_ref().map(|map| {
+                                    subst_generic_json(fn_data_raw, map, BoundPos::Param)
+                                });
+                            let fn_data_raw: &serde_json::Value =
+                                self_mono_owned.as_ref().unwrap_or(fn_data_raw);
                             // [#52] Concrete-impl monomorphization (BEFORE any
                             // generic-bearing decision / census — constraint 3). A
                             // generic param `C: Trait` bounded by a single
@@ -1428,6 +1466,73 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                             if let Some(f) = _dbg_f {
                                 functions.push(f);
                             }
+                        }
+                    }
+                }
+            }
+
+            // [WALL-F / #81 (b)] Project the trait's INHERITED DEFAULT methods onto
+            // a concrete-Self trait impl (the impl's `items` list only its OWN
+            // overrides; create_user/get_user have bodies on the trait DEF). Each
+            // projected method routes through the SAME concrete-Self UFCS path as an
+            // in-impl method. SCOPED to impls (a) just monomorphized via a unique
+            // impl (`self_mono_subst.is_some()`) — the minimal blast radius that
+            // delivers the firebase CRUD case; an already-concrete trait impl's
+            // default methods are a sound broadening left to a follow-up. The helper
+            // is fail-closed (crate-local trait def only, has-body, dedupe, where-bound).
+            if !is_inherent_impl && trait_self_concrete && self_mono_subst.is_some() {
+                if let Some(projected) =
+                    project_trait_default_methods(trait_node, impl_data, for_val, index)
+                {
+                    // [WALL-F / #81 (b)] Receiver async-Send proof: a trait with a
+                    // `Send` supertrait (`FirebaseAuthService: Send + Sync`)
+                    // GUARANTEES every impl's `Self: Send` — the impl would not
+                    // compile otherwise. So the concrete Self is a provably-Send
+                    // receiver; register it so the async Send gate (C1c) admits the
+                    // spawned `async move` future. SOUND: the compiler already proved
+                    // `Self: Send` to accept the impl. (Reuses the #52
+                    // `SEND_SUPERTRAIT_TRAIT_IDS` source.)
+                    let trait_has_send_supertrait = trait_node
+                        .and_then(|tn| tn.get("id"))
+                        .map(|id| {
+                            let key = item_id_to_str(id);
+                            SEND_SUPERTRAIT_TRAIT_IDS.with(|s| s.borrow().contains(&key))
+                        })
+                        .unwrap_or(false);
+                    if trait_has_send_supertrait && !self_rust.is_empty() {
+                        PROVABLY_SEND_RECV_NAMES
+                            .with(|c| c.borrow_mut().insert(self_rust.clone()));
+                    }
+                    for (pm_name, pm_fn_data) in projected {
+                        // de-async (RPITIT #81 / async_trait #64) then route concrete-Self.
+                        let de = de_async_clone(&pm_fn_data);
+                        let fn_data: &serde_json::Value = de.as_ref().unwrap_or(&pm_fn_data);
+                        let bound_source = match route_concrete_method(
+                            trait_node, &pm_name, for_val, impl_data, index,
+                        ) {
+                            Ok(bs) => bs,
+                            Err(drop) => {
+                                record_generic_drop(&pm_name, drop);
+                                continue;
+                            }
+                        };
+                        match try_parametric_stub(
+                            &pm_name,
+                            fn_data,
+                            Some((&self_sky, &self_rust)),
+                            impl_generics,
+                            struct_generics,
+                            bound_source.ctx(),
+                        ) {
+                            Ok(generic) => {
+                                record_generic_bound();
+                                if let Some(f) = parametric_function(
+                                    &pm_name, fn_data, &self_sky, &self_rust, generic,
+                                ) {
+                                    functions.push(f);
+                                }
+                            }
+                            Err(drop) => record_generic_drop(&pm_name, drop),
                         }
                     }
                 }
@@ -6241,6 +6346,12 @@ enum TraitMethodDropTag {
     /// receiver and a still-generic `T` return — an E0308 mismatch in the body.
     /// Over-drop these rather than emit an ill-typed wrapper.
     BlanketImplOnlyVar,
+    /// [WALL-F / #81 (b), invariant A] A projected trait DEFAULT method carries a
+    /// `where`-predicate on a trait generic param we monomorphized to a concrete
+    /// (`where C: Extra`, `C → ReqwestApiClient`). We can't prove the concrete
+    /// satisfies the extra bound, so projecting it would emit an uncallable UFCS
+    /// wrapper (E0599/E0277). Over-drop — never emit a maybe-uncompilable wrapper.
+    DefaultMethodWhereUnsatisfied,
 }
 
 impl TraitMethodDropTag {
@@ -6252,6 +6363,8 @@ impl TraitMethodDropTag {
             TraitMethodDropTag::NonRustAbi => "trait-method-nonrust-abi",
             TraitMethodDropTag::TraitUnreachable => "trait-method-trait-unreachable",
             TraitMethodDropTag::BlanketImplOnlyVar => "trait-method-blanket-impl-only-var",
+            TraitMethodDropTag::DefaultMethodWhereUnsatisfied =>
+                "trait-method-default-where-unsatisfied",
         }
     }
 }
@@ -6783,6 +6896,27 @@ fn type_to_typeref(
             .and_then(|a| a.get("angle_bracketed"))
             .and_then(|ab| ab.get("args"))
             .and_then(|a| a.as_array());
+        // [WALL-F / #81 (d), invariant D] A `Result<T, E>`'s ERROR slot is ALWAYS
+        // normalized to SkyError at codegen (#32/#34) — the wrapper consumes it via
+        // Display/Debug (`format!("{e:?}")`), NEVER names E. So an external /
+        // unnameable error (error-stack `Report<ApiClientError>` — firebase CRUD)
+        // must NOT drop the method on the error slot's nameability. Render the Ok
+        // arg normally (it IS the real payload, must bind); render the error arg
+        // best-effort, substituting the SkyError-normalized sentinel (`String`, the
+        // #34 path) ONLY when its own nameability fails. A nameable error
+        // (firestore `FirestoreError`) keeps its rendering — byte-identical.
+        if raw_name.rsplit("::").next().unwrap_or(raw_name) == "Result" {
+            if let Some(arr) = args {
+                let types: Vec<&serde_json::Value> =
+                    arr.iter().filter_map(|a| a.get("type")).collect();
+                if types.len() == 2 {
+                    let ok_tref = type_to_typeref(types[0], param_idx)?;
+                    let err_tref = type_to_typeref(types[1], param_idx)
+                        .unwrap_or_else(|_| TypeRef::Prim("String".to_string()));
+                    return Ok(TypeRef::Ctor(path, vec![ok_tref, err_tref]));
+                }
+            }
+        }
         let mut trefs: Vec<TypeRef> = Vec::new();
         if let Some(arr) = args {
             for arg in arr {
@@ -8496,13 +8630,18 @@ fn parametric_function(
     let emitted_name = if is_trait_method {
         if let Some((self_path, _)) = &generic.call.trait_qualifier {
             if self_path.contains('<') {
-                // Extract last `::`-delimited segment, strip `<…>` suffix.
+                // Extract the base type's last `::`-delimited segment. STRIP the
+                // `<…>` generic args FIRST, THEN take the last `::` segment — the
+                // args can themselves contain `::` (`FirebaseAuth<a::b::ReqwestApiClient>`),
+                // so splitting on `::` before stripping `<…>` would grab the inner
+                // `ReqwestApiClient>` (trailing `>` → invalid identifier). The #45
+                // `Holder<i64>` case worked only because `i64` carries no `::`.
                 let seg = self_path
-                    .split("::")
-                    .last()
-                    .unwrap_or(self_path)
                     .split('<')
                     .next()
+                    .unwrap_or(self_path)
+                    .split("::")
+                    .last()
                     .unwrap_or("")
                     .trim();
                 if !seg.is_empty() {
@@ -8907,6 +9046,269 @@ fn monomorphize_concrete_impl_params(
         // else: leave it unrecorded — the async Send gate drops it (conservative).
     }
     Some(Some(rewritten))
+}
+
+/// [WALL-F / #81 (a)] Build the substitution map for an impl block's generic
+/// params that appear in a GENERIC SELF type (`impl<P: Trait> … for Struct<P>`),
+/// when each such `P` is bounded by a single UNIQUE-impl crate-local trait —
+/// substituting `P` to that unique concrete. The firebase shape
+/// `impl<ApiHttpClientT: ApiHttpClient> FirebaseAuthService<ApiHttpClientT> for
+/// FirebaseAuth<ApiHttpClientT>` with the UNIQUE `impl ApiHttpClient for
+/// ReqwestApiClient` → `{ApiHttpClientT → ReqwestApiClient}`, turning the Self into
+/// the closed-monomorphic `FirebaseAuth<ReqwestApiClient>` that the #45 path
+/// already binds (and that `App::auth()` actually returns).
+///
+/// Returns `Some(map)` ONLY when EVERY free type-var in `for_val` resolves this way
+/// — one fully-determined monomorphization (invariant B: the SAME map is applied by
+/// the caller across Self + trait-args + every method sig, in one pass). FAIL-CLOSED
+/// `None` (→ the existing `trait-method-generic-self` drop, never a guess) when:
+///   * `for_val` has NO free type-var (concrete/closed already — caller's path),
+///   * a free var is not an impl-declared type param,
+///   * a free var's bounds are not the single-unique-impl-crate-local-trait shape
+///     (`single_concrete_impl_trait_key` = None — modellable/serde/external/>1
+///     bound), or the impl count is 0/>1 (`concrete_for_unique_impl` = None).
+/// Reuses the #52 unique-impl machinery verbatim — same soundness contract.
+fn impl_self_mono_subst(
+    for_val: &serde_json::Value,
+    impl_generics: Option<&serde_json::Value>,
+) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+    let mut free: HashSet<String> = HashSet::new();
+    collect_generic_names(for_val, &mut free);
+    if free.is_empty() {
+        return None; // concrete / closed-monomorphic Self — not our case.
+    }
+    let generics = impl_generics?;
+    // Gather each impl type-param's bounds (inline `params[].kind.type.bounds` +
+    // `where_predicates`), keyed by param name — same gather as the #52 method path.
+    let mut param_bounds: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    if let Some(params) = generics.get("params").and_then(|p| p.as_array()) {
+        for p in params {
+            if p.get("kind").and_then(|k| k.get("type")).is_none() {
+                continue; // lifetime / const param — never a Self type-arg we mono.
+            }
+            let name = match p.get("name").and_then(|n| n.as_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let bs = p["kind"]["type"]["bounds"].as_array().cloned().unwrap_or_default();
+            param_bounds.entry(name).or_default().extend(bs);
+        }
+    }
+    if let Some(wps) = generics.get("where_predicates").and_then(|w| w.as_array()) {
+        for wp in wps {
+            if let Some(bp) = wp.get("bound_predicate") {
+                if let Some(g) = bp.get("type").and_then(|t| t.get("generic")).and_then(|g| g.as_str()) {
+                    if let Some(bs) = bp.get("bounds").and_then(|b| b.as_array()) {
+                        param_bounds.entry(g.to_string()).or_default().extend(bs.iter().cloned());
+                    }
+                }
+            }
+        }
+    }
+    let mut subst: HashMap<String, serde_json::Value> = HashMap::new();
+    // Deterministic order (BTreeSet would too) — irrelevant to the map, but every
+    // var MUST resolve or the whole monomorphization fails closed.
+    for var in &free {
+        let bounds = param_bounds.get(var)?; // free var not an impl param → drop.
+        let trait_key = single_concrete_impl_trait_key(bounds)?; // not our shape → drop.
+        let concrete = concrete_for_unique_impl(&trait_key)?; // 0/>1 impls → drop.
+        subst.insert(var.clone(), concrete);
+    }
+    Some(subst)
+}
+
+/// [WALL-F / #81 (b), invariant A] True if a projected trait default method has a
+/// `where`-predicate whose subject is a trait generic param we monomorphized to a
+/// concrete type (present in `proj`, other than `Self`). Such a `where C: Bound`
+/// became `where ConcreteType: Bound`, which we can't prove → projecting it risks
+/// an uncallable UFCS wrapper (E0277). `Self`-subject predicates are exempt: the
+/// concrete Self satisfies the trait by construction, and the existing
+/// associated-/nameability gates already cover `Self::Assoc` shapes.
+fn projected_method_has_unverifiable_where(
+    fn_data: &serde_json::Value,
+    proj: &std::collections::HashMap<String, serde_json::Value>,
+) -> bool {
+    let Some(wps) = fn_data
+        .get("generics")
+        .and_then(|g| g.get("where_predicates"))
+        .and_then(|w| w.as_array())
+    else {
+        return false;
+    };
+    for wp in wps {
+        if let Some(bp) = wp.get("bound_predicate") {
+            if let Some(g) = bp
+                .get("type")
+                .and_then(|t| t.get("generic"))
+                .and_then(|g| g.as_str())
+            {
+                if g != "Self" && proj.contains_key(g) {
+                    return true; // a where-bound on a monomorphized param → drop.
+                }
+            }
+        }
+    }
+    false
+}
+
+/// [WALL-F / #81 (b)] True if a type node contains, ANYWHERE, an integer/float
+/// primitive that the PARAMETRIC wrapper path cannot coerce at the call site. Sky
+/// `Int`=i64 / `Float`=f64; the parametric `renderValueArg` passes a bare `argJ`,
+/// so a host param of any OTHER numeric width (`usize`/`u32`/`i32`/`f32`/…) gets an
+/// i64/f64 where it wants the narrower/wider type → E0308 (firebase
+/// `list_users(users_per_page: usize, …)`). The non-generic path casts these
+/// (`as usize`), but the parametric path has no host-width info — a general gap
+/// (sibling of #16 for returns). Until that lands, a projected method with such a
+/// param is fail-closed DROPPED rather than emitted as a cargo-fail.
+fn type_has_uncoercible_numeric(node: &serde_json::Value) -> bool {
+    if let Some(p) = node.get("primitive").and_then(|p| p.as_str()) {
+        return matches!(
+            p,
+            "i8" | "i16" | "i32" | "i128" | "isize"
+                | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+                | "f32"
+        );
+    }
+    match node {
+        serde_json::Value::Object(o) => o.values().any(type_has_uncoercible_numeric),
+        serde_json::Value::Array(a) => a.iter().any(type_has_uncoercible_numeric),
+        _ => false,
+    }
+}
+
+/// [WALL-F / #81 (b)] Project a concrete-Self trait impl's INHERITED DEFAULT
+/// methods. The impl's own `items` list ONLY the methods it overrides; a trait's
+/// provided (`has_body == true`) methods are callable on the concrete Self but
+/// never appear under the impl in rustdoc. For the firebase shape, the impl
+/// `FirebaseAuthService for FirebaseAuth<ReqwestApiClient>` provides only the two
+/// required accessors, while `create_user`/`get_user`/… live (with bodies) on the
+/// trait DEF — so without this they are never walked.
+///
+/// Returns `(method_name, projected_fn_data)` pairs, each with the projection subst
+/// `{ trait-param_i → impl-trait-arg_i (already concrete post-(a)), Self → concrete
+/// for_val }` applied (invariant B: ONE map). The caller routes each through the
+/// SAME `route_concrete_method` + `try_parametric_stub` path as an in-impl method,
+/// so de-async (#64/#81 RPITIT), Send gates, nameability + UFCS qualifier all reuse.
+///
+/// FAIL-CLOSED drops (never an uncompilable emit):
+///   * a method already overridden by the impl (dedupe — invariant F),
+///   * a method without a body (a still-abstract required method — uncallable),
+///   * a method with a `where`-bound on a monomorphized trait param (invariant A,
+///     `projected_method_has_unverifiable_where`) → drop
+///     `trait-method-default-where-unsatisfied`.
+/// `None` when there is nothing to project (no trait node / no trait def / no
+/// eligible method) — caller's behaviour byte-identical to pre-WALL-F.
+fn project_trait_default_methods(
+    trait_node: Option<&serde_json::Value>,
+    impl_data: &serde_json::Value,
+    for_val: Option<&serde_json::Value>,
+    index: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<(String, serde_json::Value)>> {
+    let trait_node = trait_node?;
+    let for_val = for_val?;
+    let trait_id = item_id_to_str(trait_node.get("id")?);
+    let trait_def = index.get(&trait_id)?.get("inner")?.get("trait")?;
+
+    // Names the impl OVERRIDES (a function item in the impl's items) — dedupe set.
+    let mut impl_methods: HashSet<String> = HashSet::new();
+    if let Some(items) = impl_data.get("items").and_then(|i| i.as_array()) {
+        for id in items {
+            if let Some(mi) = index.get(&item_id_to_str(id)) {
+                if mi.get("inner").and_then(|i| i.get("function")).is_some() {
+                    if let Some(n) = mi.get("name").and_then(|n| n.as_str()) {
+                        impl_methods.insert(n.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Projection subst (invariant B): trait declared type-params → the impl's trait
+    // args (already concrete after (a)'s `subst_generic_json` on `trait_node`), plus
+    // `Self → concrete for_val`.
+    let mut proj: HashMap<String, serde_json::Value> = HashMap::new();
+    proj.insert("Self".to_string(), for_val.clone());
+    let trait_params: Vec<String> = trait_def
+        .get("generics")
+        .and_then(|g| g.get("params"))
+        .and_then(|p| p.as_array())
+        .map(|ps| {
+            ps.iter()
+                .filter(|p| p.get("kind").and_then(|k| k.get("type")).is_some())
+                .filter_map(|p| p.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let trait_args: Vec<serde_json::Value> = trait_node
+        .get("args")
+        .and_then(|a| a.get("angle_bracketed"))
+        .and_then(|ab| ab.get("args"))
+        .and_then(|a| a.as_array())
+        .map(|args| args.iter().filter_map(|a| a.get("type").cloned()).collect())
+        .unwrap_or_default();
+    for (i, pname) in trait_params.iter().enumerate() {
+        if let Some(arg) = trait_args.get(i) {
+            proj.insert(pname.clone(), arg.clone());
+        }
+    }
+
+    let mut out: Vec<(String, serde_json::Value)> = Vec::new();
+    if let Some(items) = trait_def.get("items").and_then(|i| i.as_array()) {
+        for id in items {
+            let Some(mi) = index.get(&item_id_to_str(id)) else { continue };
+            let Some(fnd) = mi.get("inner").and_then(|i| i.get("function")) else { continue };
+            // PROVIDED (default-body) method only — a required (bodyless) method is
+            // not callable on the impl.
+            if !fnd.get("has_body").and_then(|b| b.as_bool()).unwrap_or(false) {
+                continue;
+            }
+            let name = mi.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if name.is_empty() || impl_methods.contains(name) {
+                continue; // unnamed / overridden (dedupe — invariant F).
+            }
+            // [invariant A] where-bound on a monomorphized trait param → drop.
+            if projected_method_has_unverifiable_where(fnd, &proj) {
+                record_generic_drop(
+                    name,
+                    GenericDrop::TraitMethodDrop(
+                        TraitMethodDropTag::DefaultMethodWhereUnsatisfied,
+                        format!("default method `{name}` has a where-bound on a monomorphized trait param"),
+                    ),
+                );
+                continue;
+            }
+            let projected = subst_generic_json(fnd, &proj, BoundPos::Param);
+            // [WALL-F / #81 (b)] Fail-closed drop a method with a param the
+            // parametric wrapper can't numeric-coerce (`usize`/`u32`/`f32`/… —
+            // firebase `list_users`). General param-coercion gap (sibling of #16);
+            // over-drop until it lands rather than emit a cargo-fail.
+            let has_bad_param = projected
+                .get("sig")
+                .or_else(|| projected.get("decl"))
+                .and_then(|s| s.get("inputs"))
+                .and_then(|i| i.as_array())
+                .map(|ins| ins.iter().any(|inp| {
+                    inp.get(1).map(type_has_uncoercible_numeric).unwrap_or(false)
+                }))
+                .unwrap_or(false);
+            if has_bad_param {
+                record_generic_drop(
+                    name,
+                    GenericDrop::NotBindable(format!(
+                        "default method `{name}` has a numeric param the parametric \
+                         wrapper can't coerce (usize/u32/f32/… — pending param-width coercion)"
+                    )),
+                );
+                continue;
+            }
+            out.push((name.to_string(), projected));
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// [#52] Last-segment trait NAME for a resolved trait-id key, recovered from the

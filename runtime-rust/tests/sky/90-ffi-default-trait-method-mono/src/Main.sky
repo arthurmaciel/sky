@@ -1,0 +1,41 @@
+module Main exposing (main)
+
+-- 90-ffi-default-trait-method-mono: WALL-F (#81) proof.
+--
+-- default-trait-crate mirrors the firebase `FirebaseAuthService` shape: a trait
+-- with DEFAULT-body RPITIT async methods, impl'd for a generic Self `Handle<C>`
+-- whose `C` is bounded by the unique-impl trait `Client` (impl'd once for
+-- `RealClient`), plus an inherent ctor `make` returning the concrete
+-- `Handle<RealClient>`.
+--
+-- WALL-F binds `op` (a DEFAULT method living on the trait DEF, never under the
+-- impl) by: (a) monomorphizing `Handle<C>` → `Handle<RealClient>` via the unique
+-- `Client` impl; (b) projecting the trait's default methods; recognising the
+-- RPITIT `-> impl Future + Send`; proving the receiver Send via the `: Send`
+-- supertrait; exempting the `Result` error slot from nameability.
+--
+-- POSITIVE: make () → Ok handle ; op handle "hi" → "real:hi".
+-- NEGATIVE (asserted absent by the gate runner): op_nosend (?Send), op_extra
+-- (where C: Extra, RealClient !Extra), op_count (usize param).
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Default_trait_crate as D
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    case D.make_from_handle () of
+
+        Ok handle ->
+            -- `op` is the projected DEFAULT RPITIT method. It returns "real:hi"
+            -- (`<tag>:<arg>`) — printing the value proves the projection threaded
+            -- the receiver + arg through the spawned future and back.
+            D.op_from_handle handle "hi"
+                |> Task.andThen (\res -> println ("op=" ++ res ++ " [ALL OK]"))
+                |> Task.onError
+                       (\e -> println ("op-failed: " ++ Error.toString e))
+
+        Err e ->
+            println ("make-failed: " ++ Error.toString e)

@@ -17,6 +17,69 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — WALL-F (#81) COMPLETE: 🎉 firebase auth CRUD binds shim-free + cargo-compiles
+
+`App::emulated() → app.auth(url) → fauth.create_user(NewUser …)` now works from Sky
+against rs-firebase-admin-sdk 4.3.0 with NO wrapper crate — 6 CRUD methods bind +
+cargo-compile: create_user / get_user / get_users / delete_user / delete_users /
+update_user. The structural wall the firestore/firebase campaign had left open.
+
+**Two mechanisms (both extend existing machinery, both fail-closed):**
+
+- **(a) unique-impl Self-mono** (`impl_self_mono_subst`): the auth ops live on
+  `impl<ApiHttpClientT> FirebaseAuthService<ApiHttpClientT> for
+  FirebaseAuth<ApiHttpClientT>` — a generic Self. `ApiHttpClient` has a UNIQUE impl
+  `ReqwestApiClient`, so substitute `{ApiHttpClientT → ReqwestApiClient}` across Self
+  + trait-args + every method sig (ONE map — invariant B), turning Self into the
+  closed-monomorphic `FirebaseAuth<ReqwestApiClient>` the #45 path already binds (and
+  that `App::auth()` actually returns). Reuses the #52 unique-impl machinery
+  (`single_concrete_impl_trait_key` + `concrete_for_unique_impl`). Fail-closed: any
+  free Self var that doesn't resolve → keep the `trait-method-generic-self` drop.
+
+- **(b) trait default-method projection** (`project_trait_default_methods`): the impl
+  provides ONLY the two required accessors; create_user/get_user are DEFAULT (bodied)
+  methods on the trait DEF, never walked under the impl. For a concrete-Self trait
+  impl, enumerate the trait def's `has_body` methods not overridden, substitute
+  `{trait-param → concrete, Self → concrete}`, route each through the SAME
+  `route_concrete_method`+`try_parametric_stub` UFCS path. Scoped to
+  `self_mono_subst.is_some()` (minimal blast radius).
+
+**Supporting fixes (each a sub-wall):** RPITIT `impl Future + Send` recognition
+(the committed keystone `61f469ba`); receiver async-Send proof via the trait's
+`Send` supertrait (`SEND_SUPERTRAIT_TRAIT_IDS` → register the concrete Self in
+`PROVABLY_SEND_RECV_NAMES` — sound: a `: Send` supertrait forces every impl's
+`Self: Send`); Result error-slot exemption (invariant D — `Report<ApiClientError>`
+is external/unnameable but #32/#34 normalize the error to SkyError and the wrapper
+consumes it via `{e:?}`, so render the err arm as the SkyError sentinel when its
+nameability fails); wrapper-name `<…>` strip (the dedup-suffix split `::` BEFORE
+stripping `<…>` → `FirebaseAuth<a::b::ReqwestApiClient>` produced the invalid
+identifier `ReqwestApiClient>`; strip `<…>` first).
+
+**Fail-closed gates (invariant A + numeric):** `projected_method_has_unverifiable_where`
+drops a default method with a `where C: Extra` bound the concrete `C` doesn't satisfy
+(`trait-method-default-where-unsatisfied`); `type_has_uncoercible_numeric` drops a
+projected method with a `usize`/`u32`/`f32`/… param the parametric wrapper can't
+coerce (firebase `list_users(usize)` — a general param-coercion gap, sibling of #16,
+filed #82).
+
+**Proof:** firebase SKY_DCE=0 → **0 cargo errors**, 6 CRUD bind+compile. Inspector
+205 unit tests (4 `wallf_rpitit_*`). New fixture `90-ffi-default-trait-method-mono`
+(crate `default-trait-crate`/`Handle<C>`/`Svc`) — `op` (DEFAULT RPITIT) projects +
+binds + RUNS "real:hi"; `op_nosend` (?Send) / `op_extra` (where C:Extra) / `op_count`
+(usize) all fail-closed absent. Gate runner `run_default_trait_mono` (SKY_DCE=0).
+**Full FFI gate 36 ok · 0 fail.** Guardian-final APPROVE (no unsound admit across 5
+adversarial axes). Follow-ups #82 (numeric param coercion) + #83 (non-Debug foreign
+error E0277 — latent, pre-existing).
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (`impl_self_mono_subst`,
+`project_trait_default_methods`, `projected_method_has_unverifiable_where`,
+`type_has_uncoercible_numeric`, the impl-walk integration, `type_to_typeref` Result
+exemption, the `<…>`-strip fix, `DefaultMethodWhereUnsatisfied` drop tag);
+`runtime-rust/tests/sky/90-ffi-default-trait-method-mono/*` (new fixture);
+`runtime-rust/scripts/ffi-fixtures-test.sh` (`run_default_trait_mono`).
+
+---
+
 ## 2026-06-26 — WALL-F keystone (#81): RPITIT `impl Future<Output=T> + Send` recognition
 
 First implementation chunk of WALL-F (firebase CRUD). The guardian design-gate

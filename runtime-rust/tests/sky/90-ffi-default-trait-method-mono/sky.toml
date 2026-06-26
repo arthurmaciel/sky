@@ -1,0 +1,11 @@
+[project]
+name = "90-ffi-default-trait-method-mono"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local default-trait-crate: WALL-F (#81) — projects a trait's DEFAULT RPITIT
+# async methods onto a unique-impl-monomorphized concrete Self. setup.sh git-inits
+# the crate into the cache path below.
+["rust.dependencies"]
+default-trait-crate = { git = "file:///home/arthur/.cache/sky/90-ffi-default-trait-method-mono-crate", branch = "master" }
