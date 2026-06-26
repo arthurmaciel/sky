@@ -1,0 +1,45 @@
+module Main exposing (main)
+
+-- 93-ffi-customize-chain: WALL-I (#88) — the stripe `.customize()` PRODUCER chain.
+-- `CreateThing::new(seed).customize().send(&client)` — a PROVIDED trait method
+-- (`customize`) projected onto the concrete resource `CreateThing` with `Self::Output`
+-- resolved to `Resp`, yielding `Customizable<Resp>`, then WALL-H's async `send`.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Thing_crate as T
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    case T.new_from_createThing "seed" of
+        Ok req ->
+            case T.customize req of
+                Ok cust ->
+                    case T.new_from_localClient () of
+                        Ok client ->
+                            T.send_from_customizable cust client
+                                |> Task.andThen
+                                    (\resp ->
+                                        case T.shown_from_resp resp of
+                                            Ok s ->
+                                                if s == "decoded:seed" then
+                                                    println "chain=decoded:seed [ALL OK]"
+
+                                                else
+                                                    println ("chain=UNEXPECTED " ++ s)
+
+                                            Err e ->
+                                                println ("shown-failed: " ++ Error.toString e)
+                                    )
+                                |> Task.onError (\e -> println ("send-failed: " ++ Error.toString e))
+
+                        Err e ->
+                            println ("client-failed: " ++ Error.toString e)
+
+                Err e ->
+                    println ("customize-failed: " ++ Error.toString e)
+
+        Err e ->
+            println ("new-failed: " ++ Error.toString e)

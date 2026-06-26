@@ -1,0 +1,12 @@
+[package]
+name = "thing-crate"
+version = "0.1.0"
+edition = "2021"
+
+# thing-crate mirrors a stripe PRODUCT crate: the resource request `CreateThing`, its
+# `WireReq` (StripeRequest analog) impl with `type Output = Resp` + the PROVIDED
+# `customize()` producer, the concrete response `Resp`, and the `Customizable<T>` +
+# async `send<C: Wire>`. All co-located (orphan rule + the real stripe layout). WALL-I
+# binds the chain `CreateThing::new(..).customize().send(&client)`.
+[dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

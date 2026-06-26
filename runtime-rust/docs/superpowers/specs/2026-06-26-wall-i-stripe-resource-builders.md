@@ -92,3 +92,30 @@ WALL-I's customize-chain is a DISTINCT REGIME, not plumbing over the shipped mec
 **Next-session order:** build `93-ffi-customize-chain` (single-crate) RED → confirm whether
 `customize` projects + `Self::Output` resolves today (probe) → implement the gap → GREEN under
 SKY_DCE=0 → then the feature-gated real-stripe resource crate.
+
+## 7. SHIPPED — the customize-chain MECHANISM (provided-method projection + Self::Output)
+
+Fixture `93-ffi-customize-chain` (single thing-crate). Implemented + verified at the inspector
+level the producer mechanism:
+1. **Concrete-Self provided-method projection.** Relaxed the WALL-F projection gate
+   (`main.rs` ~1691) from `self_mono_subst.is_some()` to ALSO project onto an already-CONCRETE
+   trait impl (`impl WireReq for CreateThing`). Bounded: `project_trait_default_methods` is
+   fail-closed to crate-local trait DEFS (a std trait's def isn't in `index`).
+2. **`Self::Output` resolution** via `subst_assoc_json` + `impl_assoc_bindings` (`type Output
+   = Resp`), so `customize(self) -> Customizable<Self::Output>` → `Customizable<Resp>`.
+3. **Trivially-true Self-bound strip** (`where Self: Sized` → `where CreateThing: Sized`, a
+   non-generic predicate the bound resolver rejected).
+
+Result: the full chain BINDS at the skyi level —
+`customize : CreateThing -> Result Error (Customizable Resp)`; full FFI gate **38 ok · 0 fail**
+(no regression); 209 unit tests.
+
+### Remaining gap (one separable Sky-type-rendering consistency)
+
+`customize`'s return renders `Customizable<Resp>` PARAMETRICALLY (`Customizable Resp`, the
+parametric-stub return path keeps the arg), but `send`'s RECEIVER renders the SAME type as the
+bare opaque `Customizable` (#45 generic-Self-mono `self_sky`). Sky HM can't unify them →
+`Variable 'cust' type mismatch`. Fix: render a crate-local generic-struct INSTANTIATION
+consistently across return + receiver. `resolve_path_to_sky`'s `_` arm already renders it BARE
+(drops args); the parametric-stub return path does not. Contained codegen fix (next session).
+Fixture 93 committed but NOT gate-wired (RED on this consistency until the fix lands).

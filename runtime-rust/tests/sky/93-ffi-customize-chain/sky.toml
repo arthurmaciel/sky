@@ -1,0 +1,11 @@
+[project]
+name = "93-ffi-customize-chain"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# WALL-I (#88): single thing-crate with the resource `CreateThing`, its `WireReq` impl +
+# PROVIDED `customize()`, the response `Resp`, the client `LocalClient`, and `Customizable`
+# + async `send`. The chain `CreateThing::new(..).customize().send(&client)` binds.
+["rust.dependencies"]
+thing-crate = { git = "file:///home/arthur/.cache/sky/93-ffi-customize-chain-thing", branch = "master" }

@@ -1688,7 +1688,15 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
             // delivers the firebase CRUD case; an already-concrete trait impl's
             // default methods are a sound broadening left to a follow-up. The helper
             // is fail-closed (crate-local trait def only, has-body, dedupe, where-bound).
-            if !is_inherent_impl && trait_self_concrete && self_mono_subst.is_some() {
+            // [WALL-I #88] Also project onto an ALREADY-CONCRETE trait impl (the documented
+            // WALL-F follow-up): `impl WireReq for CreateThing` (Self concrete, no
+            // self-mono) projects WireReq's PROVIDED `customize()` — the stripe
+            // `.customize()` producer. `project_trait_default_methods` is fail-closed to
+            // crate-local trait DEFS only (a std trait's def isn't in `index` → None), so
+            // the broadening can't pull in `Iterator::*`/etc. blanket provided methods.
+            if !is_inherent_impl && trait_self_concrete
+                && (self_mono_subst.is_some() || trait_node.is_some())
+            {
                 if let Some(projected) =
                     project_trait_default_methods(trait_node, impl_data, for_val, index)
                 {
@@ -9780,6 +9788,12 @@ fn project_trait_default_methods(
         }
     }
 
+    // [WALL-I #88] The impl's CONCRETE associated-type bindings (`type Output = Resp;`),
+    // so a projected provided method's `Self::Output` projection resolves to the concrete
+    // response type (`customize(self) -> Customizable<Self::Output>` → `Customizable<Resp>`).
+    // Without this the return keeps an unresolved `qualified_path` → drops downstream.
+    let assoc = impl_assoc_bindings(impl_data, index);
+
     let mut out: Vec<(String, serde_json::Value)> = Vec::new();
     if let Some(items) = trait_def.get("items").and_then(|i| i.as_array()) {
         for id in items {
@@ -9805,7 +9819,32 @@ fn project_trait_default_methods(
                 );
                 continue;
             }
-            let projected = subst_generic_json(fnd, &proj, BoundPos::Param);
+            // [WALL-I #88] Self-subst first, THEN resolve `Self::Output`-style assoc
+            // projections to the impl's concrete bindings (`type Output = Resp`), so a
+            // provided method returning `Customizable<Self::Output>` becomes the concrete
+            // `Customizable<Resp>` rather than dropping on an unresolved qualified_path.
+            let mut projected = subst_assoc_json(&subst_generic_json(fnd, &proj, BoundPos::Param), &assoc);
+            // [WALL-I #88] Strip trivially-true where-predicates whose subject became the
+            // CONCRETE Self after substitution (`where Self: Sized` → `where CreateThing:
+            // Sized`). They are guaranteed by the impl's existence; left in, the bound
+            // resolver rejects them as a `non-generic-predicate` (a concrete-type bound is
+            // not a generic param to resolve), dropping an otherwise-bindable provided
+            // method (`customize`). A non-Self concrete-subject bound was ALREADY dropped
+            // by `projected_method_has_unverifiable_where` above, so only the trivially-true
+            // Self-subject ones reach here. (Predicates with a `{generic:…}` subject — real
+            // method type-params — are KEPT.)
+            if let Some(wps) = projected
+                .get_mut("generics")
+                .and_then(|g| g.get_mut("where_predicates"))
+                .and_then(|w| w.as_array_mut())
+            {
+                wps.retain(|wp| {
+                    wp.get("bound_predicate")
+                        .and_then(|bp| bp.get("type"))
+                        .map(|t| t.get("generic").is_some())
+                        .unwrap_or(true)
+                });
+            }
             // [WALL-F / #81 (b)] Fail-closed drop a method with a param the
             // parametric wrapper can't numeric-coerce (`usize`/`u32`/`f32`/… —
             // firebase `list_users`). General param-coercion gap (sibling of #16);
