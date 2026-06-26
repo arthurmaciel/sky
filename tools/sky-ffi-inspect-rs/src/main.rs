@@ -9158,6 +9158,51 @@ fn async_trait_future_output(node: &serde_json::Value) -> Option<&serde_json::Va
     constraint_equality_type(principal.get("args"), "Output")
 }
 
+/// [WALL-F / #81] Recognise a RETURN-position RPITIT `impl Future<Output = T> +
+/// Send` and return T (the de-RPITIT'd return). SIBLING of
+/// `async_trait_future_output`: that one matches the `#[async_trait]` proc-macro
+/// desugar `Pin<Box<dyn Future<Output=T> + Send>>`; THIS one matches native
+/// return-position-impl-Trait-in-trait, a DISTINCT rustdoc shape — an `impl_trait`
+/// bound list with `header.is_async = false` and NO `Pin`/`Box`/`dyn`. The
+/// firebase `FirebaseAuthService::create_user(&self, NewUser) -> impl
+/// Future<Output = Result<User, Report<…>>> + Send` is exactly this.
+///
+/// Without this the `impl_traits_resolvable` gate drops the method
+/// (`bound_to_concrete` has no `Future` arm → `resolve_param_bounds` → None →
+/// drop) — fail-closed, but it ships ZERO async-trait-default CRUD bindings.
+///
+/// FAIL-CLOSED (mirrors C1–C4 of the async_trait sibling): any deviation → `None`,
+/// leaving the existing drop intact.
+///   * `impl_trait` bound LIST (an array of `{trait_bound}` / lifetime bounds) —
+///     NOT a `dyn_trait`, NOT a `Pin<Box>` (those are the sibling's shape).
+///   * the principal bound resolves to canonical `core::future::Future` by RESOLVED
+///     IDENTITY (`std_trait_tag`, #25 class) — a crate-local `trait Future`
+///     (crate_id 0) or any look-alike is rejected. Found by id, order-independent.
+///   * `+ Send` REQUIRED among the bounds (a `?Send` RPITIT → `None` → drop
+///     `async-future-not-send`; a multi-thread tokio Task spawn needs
+///     `Output: Send`, else a host E0277 — same gate as the sibling's C3).
+///   * Output extracted from the Future bound's `constraints[]` via
+///     `constraint_equality_type` (never the stale `bindings` reader).
+/// Total over malformed JSON — no panic/index.
+fn impl_future_output(node: &serde_json::Value) -> Option<&serde_json::Value> {
+    let bounds = node.get("impl_trait")?.as_array()?;
+    // The principal Future bound, located by canonical id (NOT position — robust to
+    // bound ordering). A lifetime/outlives bound carries no `trait_bound`, skipped.
+    let future_trait = bounds
+        .iter()
+        .filter_map(|b| b.get("trait_bound").and_then(|tb| tb.get("trait")))
+        .find(|tr| std_trait_tag(tr) == Some("Future"))?;
+    // REQUIRE `+ Send` (multi-thread Task spawn — Output: Send, else host E0277).
+    let send_present = bounds
+        .iter()
+        .filter_map(|b| b.get("trait_bound").and_then(|tb| tb.get("trait")))
+        .any(|tr| std_trait_tag(tr) == Some("Send"));
+    if !send_present {
+        return None;
+    }
+    constraint_equality_type(future_trait.get("args"), "Output")
+}
+
 /// [WALL 4 / #64] If `fn_data`'s `sig.output` is the `#[async_trait]` future box,
 /// produce a CLONE (C5 — never mutate the shared index node) whose `sig.output`
 /// is the unwrapped `Output = T` and whose `header.is_async = true`, so the rest
@@ -9167,7 +9212,15 @@ fn async_trait_future_output(node: &serde_json::Value) -> Option<&serde_json::Va
 /// original `fn_data` verbatim — byte-identical to pre-WALL-4 behaviour).
 fn de_async_clone(fn_data: &serde_json::Value) -> Option<serde_json::Value> {
     let output = fn_data.get("sig").or_else(|| fn_data.get("decl"))?.get("output")?;
-    let unwrapped = async_trait_future_output(output)?.clone();
+    // Two async return shapes flow through the same is_async=true unwrap:
+    //   * `#[async_trait]` desugar `Pin<Box<dyn Future<Output=T> + Send>>`
+    //     (`async_trait_future_output`, #64).
+    //   * native RPITIT `impl Future<Output=T> + Send` (`impl_future_output`, #81).
+    // Both REQUIRE `+ Send` (their own gates) so the #44/#54/#61 Send machinery is
+    // sound on either. Neither matched → `None` → caller uses fn_data verbatim.
+    let unwrapped = async_trait_future_output(output)
+        .or_else(|| impl_future_output(output))?
+        .clone();
     let mut owned = fn_data.clone();
     // Rewrite sig.output (or decl.output for the older format) to the unwrapped T.
     if owned.get("sig").is_some() {
@@ -14494,6 +14547,111 @@ mod tests {
         with_doc_provenance(&doc, || {
             assert!(async_trait_future_output(&boxed).is_some(),
                 "id 4 must resolve to canonical std Future via doc paths");
+        });
+    }
+
+    // ── WALL-F / #81 — native RPITIT `impl Future<Output=T> + Send` ───────────
+    //
+    // A trait method written `-> impl Future<Output=T> + Send` (return-position
+    // impl-Trait-in-trait — the firebase `FirebaseAuthService::create_user` shape).
+    // DISTINCT from the `#[async_trait]` `Pin<Box<dyn Future>>` desugar: an
+    // `impl_trait` bound LIST, `is_async=false`, no Pin/Box. `impl_future_output`
+    // recognises it; `de_async_clone` routes it through the SAME is_async=true path.
+
+    /// `impl Future<Output=out> + <autos>` — a return-position RPITIT bound list.
+    fn impl_future_node(
+        principal_path: &str,
+        principal_id: u64,
+        out: serde_json::Value,
+        autos: &[(&str, u64)],
+    ) -> serde_json::Value {
+        let mut bounds = vec![serde_json::json!({
+            "trait_bound": { "trait": {
+                "path": principal_path, "name": principal_path, "id": principal_id,
+                "args": { "angle_bracketed": {
+                    "args": [],
+                    "constraints": [ {
+                        "name": "Output", "args": null,
+                        "binding": { "equality": { "type": out } }
+                    } ]
+                } }
+            }, "generic_params": [] }
+        })];
+        for (p, id) in autos {
+            bounds.push(serde_json::json!({
+                "trait_bound": { "trait": { "path": p, "name": p, "id": id, "args": null },
+                    "generic_params": [] }
+            }));
+        }
+        serde_json::json!({ "impl_trait": bounds })
+    }
+
+    #[test]
+    fn wallf_rpitit_positive_recognises_and_extracts_output() {
+        // `impl Future<Output=Result<i64,String>> + Send` → Output is the REAL
+        // Result<i64,String> (so de-async → Task String Int, NEVER Task Error ()).
+        let imp = impl_future_node(
+            "::core::future::Future", 4, result_i64_string(),
+            &[("::core::marker::Send", 6)],
+        );
+        let out = impl_future_output(&imp)
+            .expect("RPITIT impl Future<Output=T> + Send must be recognised");
+        assert_eq!(rustdoc_type_to_sky(out, &HashMap::new()), "Result String Int",
+            "Output must be the real T, not ()");
+        // de_async_clone must route RPITIT through the SAME is_async=true unwrap.
+        let fn_data = desugared_fn(imp);
+        let clone = de_async_clone(&fn_data).expect("RPITIT fn must de-async");
+        assert_eq!(clone["header"]["is_async"], serde_json::json!(true));
+        assert_eq!(rustdoc_type_to_sky(&clone["sig"]["output"], &HashMap::new()),
+            "Result String Int");
+        // SHARED node unmutated (clone isolation).
+        assert_eq!(fn_data["header"]["is_async"], serde_json::json!(false));
+        assert!(fn_data["sig"]["output"].get("impl_trait").is_some());
+    }
+
+    #[test]
+    fn wallf_rpitit_negative_no_send_drops() {
+        // `impl Future<Output=i64>` WITHOUT + Send → drop `async-future-not-send`
+        // (a multi-thread Task spawn needs Output: Send, else host E0277).
+        let imp = impl_future_node(
+            "::core::future::Future", 4, serde_json::json!({ "primitive": "i64" }),
+            &[],  // no Send
+        );
+        assert!(impl_future_output(&imp).is_none(),
+            "an RPITIT Future without +Send must NOT bind (E0277-prone)");
+        assert!(de_async_clone(&desugared_fn(imp)).is_none(),
+            "and de_async_clone must leave it for the drop");
+    }
+
+    #[test]
+    fn wallf_rpitit_negative_non_future_principal_drops() {
+        // `impl SomeStream + Send` — principal is NOT Future → not an async return.
+        let imp = impl_future_node(
+            "::futures::Stream", 70, serde_json::json!({ "primitive": "i64" }),
+            &[("::core::marker::Send", 6)],
+        );
+        assert!(impl_future_output(&imp).is_none(),
+            "a non-Future impl-trait return must NOT be treated as async");
+    }
+
+    #[test]
+    fn wallf_rpitit_negative_crate_local_future_drops() {
+        // last segment `Future` but id 10 → crate-local trait (crate_id 0).
+        // std_trait_tag (#25 class) must reject it; only the real core Future binds.
+        let doc = serde_json::json!({
+            "index": { "10": { "crate_id": 0, "inner": { "trait": {} } } },
+            "paths": {
+                "10": { "crate_id": 0, "kind": "trait", "path": ["mycrate", "Future"] },
+                "6":  { "crate_id": 2, "kind": "trait", "path": ["core", "marker", "Send"] }
+            }
+        });
+        let imp = impl_future_node(
+            "mycrate::Future", 10, result_i64_string(),
+            &[("::core::marker::Send", 6)],
+        );
+        with_doc_provenance(&doc, || {
+            assert!(impl_future_output(&imp).is_none(),
+                "a crate-local `Future` (crate_id 0) must NOT be treated as std Future");
         });
     }
 }

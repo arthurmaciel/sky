@@ -17,6 +17,41 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — WALL-F keystone (#81): RPITIT `impl Future<Output=T> + Send` recognition
+
+First implementation chunk of WALL-F (firebase CRUD). The guardian design-gate
+caught that the existing async detector (`async_trait_future_output`) ONLY matches
+the `#[async_trait]` desugar `Pin<Box<dyn Future>>` — a native RETURN-position
+impl-Trait-in-trait `-> impl Future<Output=T> + Send` (the firebase
+`FirebaseAuthService::create_user` shape) has `is_async=false` + an `impl_trait`
+bound list, so it DROPS `impl-traits-not-resolvable` (`bound_to_concrete` has no
+Future arm). Fail-closed, but it would ship ZERO async-trait-default CRUD bindings.
+
+Fix: `impl_future_output` (sibling of `async_trait_future_output`) — match an
+`impl_trait` bound list whose principal resolves to canonical `core::future::Future`
+by id (#25 class; crate-local `trait Future` rejected), REQUIRE `+ Send` (else drop
+`async-future-not-send`), extract `Output=T` via `constraint_equality_type`. Wired
+into `de_async_clone` via `.or_else(|| impl_future_output(output))` so RPITIT flows
+the SAME `is_async=true` path as the #64 desugar (#44/#54/#61 Send machinery reused).
+General improvement: ANY foreign method returning `impl Future + Send` now de-async's
+to a Task instead of dropping — not firebase-specific.
+
+4 unit tests (`wallf_rpitit_*`): positive recognise+extract+de-async-clone · `?Send`
+RPITIT drops · non-Future principal drops · crate-local Future drops. Suite 201→205.
+
+LATENT until WALL-F (a)+(b) land: it's only EXERCISED once the default-method
+projection feeds RPITIT-returning trait-default methods to it (no current fixture
+returns RPITIT), so this commit changes no observed binding — full FFI gate stays
+green. Remaining WALL-F: (a) unique-impl Self-mono `FirebaseAuth<ApiHttpClientT>` →
+`FirebaseAuth<ReqwestApiClient>` (extend #52 via `subst_generic_json`), (b) trait
+default-method projection (create_user/get_user have bodies on the trait DEF, never
+walked under the impl) + where-bound gate + no-secret-in-error. Plan in task #81.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (`impl_future_output` +
+`de_async_clone` or_else + 4 `wallf_rpitit_*` tests).
+
+---
+
 ## 2026-06-26 — WALL-E (#78): `Into<&'static str>` param → fail-closed drop · 🎉 firebase bound surface cargo-CLEAN
 
 firebase's last cargo error under `SKY_DCE=0` was a single E0277 on
