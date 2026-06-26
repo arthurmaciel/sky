@@ -9081,6 +9081,25 @@ mod tests {
     }
 
     #[test]
+    fn owned_string_vs_borrowed_str_rust_type_distinct() {
+        // [#67] The codegen's argCall branches on the host param's OWNED-vs-
+        // BORROWED Rust type to decide between by-value (`Opts::new(arg0)`) and
+        // borrowed (`fn(&arg0)` / `arg0.as_ref()`) passing. Both lower to the
+        // SAME Sky surface (`String`), so the only carrier of the distinction is
+        // `rust_type`. Pin it: an OWNED `String` param renders `"String"`, a
+        // borrowed `&str` renders `"&str"` — the exact pair argCall keys on.
+        // (A regression here — e.g. owned String rendering `"&String"` — would
+        // reintroduce the firestore `FirestoreDbOptions::new` E0308.)
+        assert_eq!(rustdoc_type_to_rust_str(&path("String")), "String");
+        assert_eq!(rustdoc_type_to_rust_str(&borrowed(prim("str"))), "&str");
+        assert_eq!(rustdoc_type_to_rust_str(&borrowed(path("String"))), "&String");
+        // Both collapse to the Sky `String` surface (proving the Sky type alone
+        // CANNOT distinguish owned from borrowed — `rust_type` must).
+        assert_eq!(sky(&path("String")), "String");
+        assert_eq!(sky(&borrowed(prim("str"))), "String");
+    }
+
+    #[test]
     fn test_generic_containers() {
         assert_eq!(sky(&path_with_args("Vec", vec![prim("u64")])), "List Int");
         assert_eq!(

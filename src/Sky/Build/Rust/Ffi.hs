@@ -879,8 +879,20 @@ emitRustFile kernelName pkg =
                         -- The JSON is deserialized in `serdePrelude` and bound to `sv_j`;
                         -- `argCall` just names that local (to be used at the call site).
                         | rawTy == "serde_json::Value" -> "sv_" ++ show j
+                        -- [#67] OWNED `String` host param (the firestore
+                        -- `FirestoreDbOptions::new(project_id: String)` shape).
+                        -- The wrapper holds an owned Sky `String` (`argN:
+                        -- String`); the foreign fn wants an owned `String` BY
+                        -- VALUE, so pass the bare `base` (no `&`). This is the
+                        -- INVERSE of the #60 borrowed-`&str` arm below: a bare
+                        -- `&base` here would be `&String` where the host wants
+                        -- `String` → E0308. Gate on the inspector's RAW Rust
+                        -- type being exactly the owned `String` so genuinely-
+                        -- borrowed params (`&str`/`&String`) and synthetic
+                        -- bridges (empty rawTy) keep their borrowed pass.
+                        | declTy == "String" && rawTy == "String" -> base -- Sky String → owned String, by value
                         | declTy == "String" && rawTy == "&str" -> base ++ ".as_ref()" -- Sky String → &str/&Path/&OsStr via AsRef
-                        | declTy == "String" -> "&" ++ base          -- Sky String → &str (deref coercion fallback)
+                        | declTy == "String" -> "&" ++ base          -- Sky String → &str / &String (borrowed: &base)
                         | null rawTy || rawTy == declTy -> base      -- same type, pass through
                         | isNumericRust rawTy && (declTy == "i64" || declTy == "f64")
                             -> base ++ " as " ++ rawTy               -- narrowing cast (e.g. i64 → u32)

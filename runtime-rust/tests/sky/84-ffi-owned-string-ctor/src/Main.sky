@@ -1,0 +1,69 @@
+module Main exposing (main)
+
+-- 84-ffi-owned-string-ctor: #67 owned-`String` constructor-arg proof.
+--
+-- owned-string-crate exposes `Opts::new(project: String)` — an OWNED `String`
+-- ctor param, exactly the firestore `FirestoreDbOptions::new(project_id: String)`
+-- shape. Pre-#67 the codegen emitted `Opts::new(&arg0)` (passing `&String`) →
+-- E0308 (host wants owned `String`). The fix makes argCall pass an owned-String
+-- host param BY VALUE (`Opts::new(arg0)`).
+--
+-- Coverage:
+--   new        — OWNED String ctor param (the #67 target; by-value pass).
+--   project    — getter, verifies the owned value threaded through.
+--   with_label — CONTROL: borrowed &str param keeps the #60 borrowed pass.
+--   label      — getter, verifies the borrowed arg threaded through.
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Owned_string_crate as O
+import Std.Log exposing (println)
+
+checkNew : Task Error ()
+checkNew =
+    case O.new_from_opts "myproj" of
+        Ok opts ->
+            case O.project_from_opts opts of
+                Ok project ->
+                    if project == "myproj" then
+                        println "new=ok"
+
+                    else
+                        Task.fail (Error.unexpected ("new=UNEXPECTED " ++ project))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+-- #60 no-regress: borrowed &str builder still works.
+checkWithLabel : Task Error ()
+checkWithLabel =
+    case O.new_from_opts "p" of
+        Ok opts ->
+            case O.with_label_from_opts opts "x" of
+                Ok labelled ->
+                    case O.label_from_opts labelled of
+                        Ok label ->
+                            if label == "x" then
+                                println "with_label=ok"
+
+                            else
+                                Task.fail (Error.unexpected ("with_label=UNEXPECTED " ++ label))
+
+                        Err e ->
+                            Task.fail e
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+main : Task Error ()
+main =
+    checkNew
+        |> Task.andThen (\_ -> checkWithLabel)
+        |> Task.andThen (\_ -> println "[ALL OK]")

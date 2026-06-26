@@ -1,0 +1,12 @@
+[project]
+name = "84-ffi-owned-string-ctor"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local owned-string-crate: tests #67 (owned `String` ctor param must pass
+# by-value `Opts::new(arg0)`, not borrowed `Opts::new(&arg0)`), plus the #60
+# no-regress control (`with_label(&str)` keeps the borrowed pass).
+# setup.sh git-inits ./owned-string-crate into the cache path below.
+["rust.dependencies"]
+owned-string-crate = { git = "file:///home/arthur/.cache/sky/84-ffi-owned-string-ctor-crate", branch = "master" }

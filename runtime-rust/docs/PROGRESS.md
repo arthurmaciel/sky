@@ -17,6 +17,37 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — #67 owned-String ctor + 🎉 FIRESTORE PHASE 1 COMPLETE: real mint+CRUD cargo-builds shim-free
+
+#67: an owned-`String` host param (firestore `FirestoreDbOptions::new(project:
+String)`) emitted `new(&arg0)` → E0308. Codegen fix (`Ffi.hs argCall`): new arm
+`declTy=="String" && rawTy=="String" → base` (pass owned by value), placed before
+the `String → "&"++base` borrowed arm and gated on EXACT `rawTy=="String"` so
+`&str` (#60 `.as_ref()`), `&String`, and synthetic-bridge (empty rawTy) keep their
+borrowed pass. Inverse of #60; inspector already records owned `String` vs `&str`
+distinctly (structurally disjoint in rustdoc). Fixture `84-ffi-owned-string-ctor`
+[ALL OK] (`Opts::new(arg0)` owned + `with_label(arg1.as_ref())` borrowed control);
+30 ffi-fixtures ok, 193 unit tests, SKY_DCE=0 + clippy clean. Guardian-final APPROVE.
+
+**🎉 FIRESTORE PHASE 1 COMPLETE.** A real Sky program — `FirestoreDbOptions.new
+"proj"` (+ `with_*` builders) → `with_options |> Task.run` → a CRUD op (get_obj/
+create_obj) — **cargo-builds shim-free, DCE-on, ZERO errors.** All firestore CRUD
+binds (854 fns) and the common mint+CRUD path compiles + runs without any
+wrapper-crate shim. The campaign's core goal (real firestore ops bind shim-free via
+`sky add` only) is MET.
+
+**Honest residuals (DCE-on harmless — real programs drop unused wrappers; filed):**
+- `for_default_project_id` E0599 on firestore 0.43.1 (a method/version gap, not a
+  wall — inspector saw a newer rustdoc) → #73.
+- Under SKY_DCE=0 the FULL 854-binding surface has 66 errors in OTHER wrapper
+  classes: return-position `AsRef<str>`-returns-`&str`, generic-result holes → #74.
+  These don't affect a DCE-on program; the SKY_DCE=0 "type-checks⇒builds" floor for
+  the full surface is the next hardening.
+- #68 (fluent API), #66 (WALL5 hardening) remain low-priority firestore polish.
+
+**Affected:** `src/Sky/Build/Rust/Ffi.hs` · `tools/sky-ffi-inspect-rs/src/main.rs`
+(unit test) · `runtime-rust/tests/sky/84-ffi-owned-string-ctor/` · `ffi-fixtures-test.sh`.
+
 ## 2026-06-26 — #72: mixed-generic turbofish arity → firestore get_obj compiles clean
 
 A method with TWO generics reduced/mono'd by DIFFERENT mechanisms —
