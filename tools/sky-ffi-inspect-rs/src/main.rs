@@ -299,6 +299,16 @@ enum TypeRef {
     /// turbofish.  Replaces the position-blind `{"__sky_serde_value":true}`
     /// sig-substitution sentinel with a typed call-AST node on the UFCS path.
     SerdeValue,
+    /// [WALL 3a-&I / #65] `{serdeValueRef:true}` — a `&T` SERIALIZE (input) param
+    /// whose `T` was serde-reduced to `serde_json::Value`. Sky-facing type is
+    /// `String` (the JSON text), IDENTICAL to `SerdeValue` on the wrapper param
+    /// and the `from_str` prelude. The divergence is at the CALL SITE: the host
+    /// wants `&Value`, so the Haskell `TRSerdeValueRef` renders the arg as
+    /// `&sv_j` (a reference to the owned deserialised local, which lives for the
+    /// call — sound). Admitted ONLY for a NON-MUT `&T` in an INPUT position on a
+    /// SERIALIZE-only param (census gate); a `&mut T` or a Deserialize param
+    /// STAYS dropped.
+    SerdeValueRef,
 }
 
 impl Serialize for TypeRef {
@@ -347,6 +357,12 @@ impl Serialize for TypeRef {
                 // `{serdeValue:true}` — the typed serde-Value node (WALL 3a).
                 let mut m = s.serialize_map(Some(1))?;
                 m.serialize_entry("serdeValue", &true)?;
+                m.end()
+            }
+            TypeRef::SerdeValueRef => {
+                // `{serdeValueRef:true}` — the &T serde-Value input node (WALL 3a-&I).
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("serdeValueRef", &true)?;
                 m.end()
             }
         }
@@ -5350,6 +5366,67 @@ fn is_serde_trait_bound(bound: &serde_json::Value) -> bool {
     SERDE_TRAIT_PATHS.contains(&raw)
 }
 
+/// [WALL 3a-&I / #65] The CANONICAL serde trait path a bound resolves to, or
+/// `None` if the bound is not a serde trait. Mirrors `is_serde_trait_bound`'s
+/// resolution order (confirmed-id → canonical-path fallback) but returns the
+/// matched `SERDE_TRAIT_PATHS` entry so callers can distinguish `Serialize`
+/// (input-coercible) from `Deserialize`/`DeserializeOwned` (output-only).
+/// Returns the `&'static str` from the table (NOT the rustdoc raw string), so a
+/// substring test against it is over the trusted canonical names only.
+fn serde_bound_path(bound: &serde_json::Value) -> Option<&'static str> {
+    let tr = bound.get("trait_bound").and_then(|tb| tb.get("trait"))?;
+    let find = |p: &str| SERDE_TRAIT_PATHS.iter().copied().find(|&c| c == p);
+    if let Some(id) = tr.get("id") {
+        let key = item_id_to_str(id);
+        if let Some(path) = EXTERNAL_TRAIT_PATH_BY_ID.with(|m| m.borrow().get(&key).cloned()) {
+            return find(&path);
+        }
+        // Confirmed crate-local → NOT serde (parity with is_serde_trait_bound).
+        let is_local = LOCAL_TYPE_IDS.with(|s| s.borrow().contains(&key))
+            || REACHABLE_PATHS.with(|c| c.borrow().contains_key(&key));
+        if is_local {
+            return None;
+        }
+    }
+    let raw = tr.get("path").or_else(|| tr.get("name")).and_then(|p| p.as_str()).unwrap_or("");
+    find(raw)
+}
+
+/// [WALL 3a-&I / #65] True iff `bound` is the serde `Serialize` trait (NOT
+/// Deserialize / DeserializeOwned). Distinguished by the matched canonical path
+/// containing `Serialize` and NOT `Deserialize` — robust over the trusted table.
+fn is_serialize_bound(bound: &serde_json::Value) -> bool {
+    match serde_bound_path(bound) {
+        Some(p) => p.contains("Serialize") && !p.contains("Deserialize"),
+        None => false,
+    }
+}
+
+/// [WALL 3a-&I / #65] True iff EVERY real (non-marker) bound on this param is a
+/// SERIALIZE serde bound (markers skipped). So the param is purely
+/// Serialize-constrained — its value flows INTO the host only, and a `&T`
+/// occurrence in an INPUT position can be supplied as `&owned_value` (the
+/// owned-clone-at-boundary). A param that ALSO carries `Deserialize` /
+/// `DeserializeOwned` is NOT serialize-only — you cannot hand a borrow of a
+/// to-be-deserialised value — so `&T` STAYS inadmissible for it.
+/// Requires at LEAST one serde bound (zero-bound param isn't serde).
+fn bounds_are_serialize_only_or_marker(bounds: &[serde_json::Value]) -> bool {
+    let mut saw_serialize = false;
+    for b in bounds {
+        if is_marker_bound(b) {
+            continue;
+        }
+        if is_serialize_bound(b) {
+            saw_serialize = true;
+        } else {
+            // Any non-marker bound that isn't Serialize (incl. Deserialize /
+            // DeserializeOwned, or a non-serde trait) → not serialize-only.
+            return false;
+        }
+    }
+    saw_serialize
+}
+
 /// True iff every REAL (non-marker, non-lifetime) bound on a set of bounds is a
 /// serde bound (so the param is purely serde-constrained and reducible to Value).
 /// Requires at LEAST one serde bound (a param with zero bounds isn't serde).
@@ -5394,7 +5471,20 @@ enum OccurrenceCtx {
 /// Walk `val`, looking for `{"generic": name}` nodes. Every occurrence must be
 /// in an admissible position (captured via `ctx`). Returns `true` iff ALL
 /// occurrences are admissible (or `name` doesn't appear at all — no issue).
-fn serde_occurrence_admissible_in(val: &serde_json::Value, name: &str, ctx: OccurrenceCtx) -> bool {
+///
+/// [WALL 3a-&I / #65] `allow_serialize_input_ref`: when set (a SERIALIZE-only
+/// param being censused over its INPUT positions), a NON-MUT `&T` is ADMISSIBLE
+/// — the wrapper deserialises the Sky String to an owned `serde_json::Value`
+/// local and passes `&local` (a borrow of an owned value living for the call).
+/// A `&mut T` STAYS inadmissible (the host could mutate a value the Sky side
+/// can't read back). The flag is FALSE for the output census and for any
+/// Deserialize-carrying param, so `&T` stays inadmissible there.
+fn serde_occurrence_admissible_in(
+    val: &serde_json::Value,
+    name: &str,
+    ctx: OccurrenceCtx,
+    allow_serialize_input_ref: bool,
+) -> bool {
     // Generic node: the one we're looking for.
     if let Some(g) = val.get("generic").and_then(|g| g.as_str()) {
         if g == name {
@@ -5403,15 +5493,30 @@ fn serde_occurrence_admissible_in(val: &serde_json::Value, name: &str, ctx: Occu
         return true; // a different generic param — not our concern
     }
 
-    // borrowed_ref: &T or &mut T → INADMISSIBLE for the inner T.
+    // borrowed_ref: &T or &mut T.
     if let Some(inner) = val.get("borrowed_ref") {
         let t = inner.get("type").or_else(|| inner.get("type_")).unwrap_or(inner);
-        return serde_occurrence_admissible_in(t, name, OccurrenceCtx::Inadmissible);
+        // [WALL 3a-&I / #65] A NON-MUT `&T` directly wrapping the SERIALIZE param
+        // T, in an INPUT position (caller passed the flag), is ADMISSIBLE — the
+        // inner T is treated as a top-level owned position (`&sv_j` at codegen).
+        // `&mut T` (is_mutable) is NOT admitted: fall through to the Inadmissible
+        // recursion so the method DROPS. A NESTED `&T` (e.g. `&&T`, or `&` inside
+        // a tuple) still recurses Inadmissible (only the direct, single, non-mut
+        // borrow of the param is sound to pass as `&owned`).
+        if allow_serialize_input_ref && !is_mutable(inner) {
+            // Only the direct `&{generic:name}` shape is admitted as a ref-pass.
+            if t.get("generic").and_then(|g| g.as_str()) == Some(name) {
+                return true;
+            }
+        }
+        return serde_occurrence_admissible_in(t, name, OccurrenceCtx::Inadmissible, false);
     }
 
     // tuple: every element → INADMISSIBLE.
+    // (`allow_serialize_input_ref` does NOT propagate inside a container — only a
+    // DIRECT top-level `&T` param is sound to pass as `&owned`.)
     if let Some(items) = val.get("tuple").and_then(|v| v.as_array()) {
-        return items.iter().all(|item| serde_occurrence_admissible_in(item, name, OccurrenceCtx::Inadmissible));
+        return items.iter().all(|item| serde_occurrence_admissible_in(item, name, OccurrenceCtx::Inadmissible, false));
     }
 
     // resolved_path: gate on the container kind.
@@ -5425,23 +5530,24 @@ fn serde_occurrence_admissible_in(val: &serde_json::Value, name: &str, ctx: Occu
             .map(|arr| arr.iter().filter_map(|a| a.get("type")).collect())
             .unwrap_or_default();
         match leaf {
-            // Admissible transparent wrappers: T is allowed inside.
+            // Admissible transparent wrappers: T is allowed inside (but NOT a
+            // `&T` nested inside the wrapper — flag dropped to false).
             "Result" | "Option" | "Vec" => {
                 // For Result<T, E>: only the FIRST arg is the Ok type; the
                 // error slot must also be admissible but T can't appear there.
-                return type_args.iter().all(|t| serde_occurrence_admissible_in(t, name, ctx));
+                return type_args.iter().all(|t| serde_occurrence_admissible_in(t, name, ctx, false));
             }
             // HashMap / BTreeMap / IndexMap: key (arg[0]) is fine; value
             // (arg[1]) is INADMISSIBLE for T (no Sky coercion for map values).
             "HashMap" | "BTreeMap" | "IndexMap" | "AHashMap" => {
                 if let Some(key_t) = type_args.first() {
-                    if !serde_occurrence_admissible_in(key_t, name, ctx) {
+                    if !serde_occurrence_admissible_in(key_t, name, ctx, false) {
                         return false;
                     }
                 }
                 // value position → inadmissible
                 if let Some(val_t) = type_args.get(1) {
-                    if !serde_occurrence_admissible_in(val_t, name, OccurrenceCtx::Inadmissible) {
+                    if !serde_occurrence_admissible_in(val_t, name, OccurrenceCtx::Inadmissible, false) {
                         return false;
                     }
                 }
@@ -5449,14 +5555,15 @@ fn serde_occurrence_admissible_in(val: &serde_json::Value, name: &str, ctx: Occu
             }
             // Any other resolved_path: recurse over all type args with inherited ctx.
             _ => {
-                return type_args.iter().all(|t| serde_occurrence_admissible_in(t, name, ctx));
+                return type_args.iter().all(|t| serde_occurrence_admissible_in(t, name, ctx, false));
             }
         }
     }
 
-    // Arrays / slices — admissible (same as Vec).
+    // Arrays / slices — admissible (same as Vec); the input-ref flag does NOT
+    // propagate into a slice element (a per-element `&` is not the ref-pass shape).
     if let Some(inner) = val.get("slice").or_else(|| val.get("array").and_then(|a| a.get("type"))) {
-        return serde_occurrence_admissible_in(inner, name, ctx);
+        return serde_occurrence_admissible_in(inner, name, ctx, false);
     }
 
     // impl Trait / dyn Trait / primitive / null / other → no generic occurrence.
@@ -5467,26 +5574,42 @@ fn serde_occurrence_admissible_in(val: &serde_json::Value, name: &str, ctx: Occu
 /// fn's full signature (all inputs + output) sits in an admissible position.
 /// All inputs are treated as ADMISSIBLE at the top level (by-value param); the
 /// return is also ADMISSIBLE at the top level (owned return).
-fn fn_serde_param_all_admissible(fn_data: &serde_json::Value, name: &str) -> bool {
+///
+/// [WALL 3a-&I / #65] `allow_serialize_input_ref`: when set, a NON-MUT `&T` in
+/// an INPUT position is admissible (the codegen `&sv_j` ref-pass). The flag is
+/// applied ONLY to inputs — the OUTPUT census always uses `false` (you cannot
+/// return a borrow of a to-be-deserialised value). Callers pass `true` ONLY for
+/// a SERIALIZE-only param (`bounds_are_serialize_only_or_marker`); a param that
+/// also carries Deserialize/DeserializeOwned passes `false`.
+fn fn_serde_param_all_admissible_ext(
+    fn_data: &serde_json::Value,
+    name: &str,
+    allow_serialize_input_ref: bool,
+) -> bool {
     // rustdoc v24+: inner.function uses "sig"; older formats used "decl".
     let sig = fn_data.get("sig").or_else(|| fn_data.get("decl")).unwrap_or(&serde_json::Value::Null);
-    // Check all input types.
+    // Check all input types — `&T` ref-pass admitted here when the flag is set.
     let inputs_ok = sig["inputs"]
         .as_array()
         .map(|inputs| {
             inputs.iter().all(|inp| {
                 // Each input is either `{"type": T, ...}` (object) or `[name, T]` (2-array).
                 let ty = inp.get("type").or_else(|| inp.get(1)).unwrap_or(inp);
-                serde_occurrence_admissible_in(ty, name, OccurrenceCtx::Admissible)
+                serde_occurrence_admissible_in(ty, name, OccurrenceCtx::Admissible, allow_serialize_input_ref)
             })
         })
         .unwrap_or(true);
     if !inputs_ok {
         return false;
     }
-    // Check return type.
+    // Check return type — NEVER allow a `&T` ref in the output (false).
     let output = sig.get("output").unwrap_or(&serde_json::Value::Null);
-    serde_occurrence_admissible_in(output, name, OccurrenceCtx::Admissible)
+    serde_occurrence_admissible_in(output, name, OccurrenceCtx::Admissible, false)
+}
+
+/// Owned-only census (WALL-3a #59 baseline): no `&T` admitted anywhere.
+fn fn_serde_param_all_admissible(fn_data: &serde_json::Value, name: &str) -> bool {
+    fn_serde_param_all_admissible_ext(fn_data, name, false)
 }
 
 /// Map an INNER TYPE NODE (the X in AsRef<X> / Into<X> / IntoIterator<Item=X>)
@@ -6361,6 +6484,16 @@ fn type_to_typeref(
     if let Some(br) = val.get("borrowed_ref") {
         if !is_mutable(br) {
             let inner = inner_type(br);
+            // [WALL 3a-&I / #65] `&{__sky_serde_value}` (non-mut) — a `&T`
+            // SERIALIZE input whose T the mono pre-pass reduced to Value. The
+            // census already proved this is a serialize-only INPUT (a `&mut T`
+            // never reaches here — it fails `!is_mutable` and falls through to
+            // NotBindable; an output `&T` is rejected by the census before
+            // substitution). Emit `SerdeValueRef`: Sky `String` in, `&sv_j` at
+            // the call site. MUST precede the str/Path arm (distinct sentinel).
+            if inner.get("__sky_serde_value").is_some() {
+                return Ok(TypeRef::SerdeValueRef);
+            }
             let is_str_prim =
                 inner.get("primitive").and_then(|p| p.as_str()) == Some("str");
             let is_str_path = inner
@@ -6426,8 +6559,9 @@ fn typeref_is_clone(tr: &TypeRef) -> bool {
         // derives Clone when its args do.
         TypeRef::Ctor(_, args) => args.iter().all(typeref_is_clone),
         TypeRef::Closure { .. } => false,
-        // serde_json::Value is Clone.
+        // serde_json::Value is Clone (owned or by-ref input).
         TypeRef::SerdeValue => true,
+        TypeRef::SerdeValueRef => true,
     }
 }
 
@@ -6967,10 +7101,25 @@ fn try_parametric_stub(
                 // is Serialize + DeserializeOwned, and DeserializeOwned ⟹
                 // Deserialize<'de> ∀'de, so Value satisfies both bound shapes —
                 // sound by subtyping, no over-gate.
-                if !fn_serde_param_all_admissible(fn_data, tv) {
+                //
+                // ── WALL 3a-&I (#65): admit a `&T` SERIALIZE (input) param ──
+                // The firestore `create_obj<T: Serialize>(&self, obj: &T)` shape.
+                // When this param is SERIALIZE-ONLY (no Deserialize), a NON-MUT
+                // `&T` in an INPUT position is sound: the wrapper deserialises the
+                // Sky String → an owned `serde_json::Value` local and passes
+                // `&local` (a borrow living for the call). The census admits that
+                // ref-pass ONLY for serialize-only params; a `&mut T`, a `&T` in
+                // the OUTPUT, or a Deserialize-carrying param keeps the owned-only
+                // census (false) and STAYS dropped. Fail-closed: the `&T` typeref
+                // (`SerdeValueRef`) is built by `type_to_typeref`'s borrowed_ref
+                // arm only for the exact non-mut `&{__sky_serde_value}` shape; a
+                // `&mut` falls through there too, so the two gates agree.
+                let serialize_only = bounds_are_serialize_only_or_marker(bounds_for);
+                if !fn_serde_param_all_admissible_ext(fn_data, tv, serialize_only) {
                     return Err(GenericDrop::UnmodellableBound(format!(
                         "serde-mono-inadmissible: param `{tv}` occurs in a \
-                         non-owned position (&T / tuple / map-value)"
+                         non-owned position (&mut T / tuple / map-value{})",
+                        if serialize_only { "" } else { " / &T (non-serialize-only)" }
                     )));
                 }
                 mono_map.insert(tv.clone(), serde_json_value_node());
@@ -8107,6 +8256,10 @@ fn sky_of_typeref(tr: &TypeRef, tyvars: &[String], self_sky: &str) -> String {
         // `String` (the JSON text), exactly as the #47 inherent arm does
         // (`rustdoc_type_to_sky`'s `__sky_serde_value` → "String").
         TypeRef::SerdeValue => "String".to_string(),
+        // [WALL 3a-&I / #65] A `&T` serde-Serialize INPUT also surfaces in Sky as
+        // `String` — identical Sky surface to `SerdeValue`. The reference is an
+        // internal codegen detail (`&sv_j` at the call site); Sky never sees it.
+        TypeRef::SerdeValueRef => "String".to_string(),
     }
 }
 
@@ -12450,19 +12603,19 @@ mod tests {
     #[test]
     fn by_value_param_admissible() {
         // `fn f(x: T)` — T appears directly by value → admissible.
-        assert!(serde_occurrence_admissible_in(&generic_node("T"), "T", OccurrenceCtx::Admissible));
+        assert!(serde_occurrence_admissible_in(&generic_node("T"), "T", OccurrenceCtx::Admissible, false));
     }
 
     #[test]
     fn borrowed_ref_inadmissible() {
         // `fn f(x: &T)` — T appears inside a borrowed_ref → inadmissible.
-        assert!(!serde_occurrence_admissible_in(&borrowed_generic("T"), "T", OccurrenceCtx::Admissible));
+        assert!(!serde_occurrence_admissible_in(&borrowed_generic("T"), "T", OccurrenceCtx::Admissible, false));
     }
 
     #[test]
     fn tuple_element_inadmissible() {
         // `fn f(x: (T, T))` → inadmissible.
-        assert!(!serde_occurrence_admissible_in(&tuple_of_generics("T"), "T", OccurrenceCtx::Admissible));
+        assert!(!serde_occurrence_admissible_in(&tuple_of_generics("T"), "T", OccurrenceCtx::Admissible, false));
     }
 
     #[test]
@@ -12484,27 +12637,27 @@ mod tests {
                 }
             }
         });
-        assert!(!serde_occurrence_admissible_in(&map_ty, "T", OccurrenceCtx::Admissible));
+        assert!(!serde_occurrence_admissible_in(&map_ty, "T", OccurrenceCtx::Admissible, false));
     }
 
     #[test]
     fn result_ok_admissible() {
         // `fn f() -> Result<T, E>` — T in Ok slot → admissible.
         let result_ty = path_with_args("Result", vec![generic_node("T"), path("String")]);
-        assert!(serde_occurrence_admissible_in(&result_ty, "T", OccurrenceCtx::Admissible));
+        assert!(serde_occurrence_admissible_in(&result_ty, "T", OccurrenceCtx::Admissible, false));
     }
 
     #[test]
     fn vec_t_admissible() {
         // `fn f(v: Vec<T>)` → admissible.
         let vec_ty = path_with_args("Vec", vec![generic_node("T")]);
-        assert!(serde_occurrence_admissible_in(&vec_ty, "T", OccurrenceCtx::Admissible));
+        assert!(serde_occurrence_admissible_in(&vec_ty, "T", OccurrenceCtx::Admissible, false));
     }
 
     #[test]
     fn other_generic_param_ignored() {
         // `fn f(x: U)` with name="T" — no occurrence of T → admissible vacuously.
-        assert!(serde_occurrence_admissible_in(&generic_node("U"), "T", OccurrenceCtx::Admissible));
+        assert!(serde_occurrence_admissible_in(&generic_node("U"), "T", OccurrenceCtx::Admissible, false));
     }
 
     // ── resolve_generics integration ──────────────────────────────────────────
@@ -12638,6 +12791,128 @@ mod tests {
         );
         assert!(resolve_generics(&fd).is_none(),
             "map_val<T: Serialize>(_m: HashMap<String,T>) must be dropped");
+    }
+
+    // ── WALL 3a-&I (#65): admit a `&T` SERIALIZE (input) param ────────────────
+
+    fn mut_borrowed_generic(name: &str) -> serde_json::Value {
+        serde_json::json!({ "borrowed_ref": { "lifetime": null, "mutable": true, "type_": { "generic": name } } })
+    }
+
+    #[test]
+    fn serialize_bound_is_serialize_only() {
+        // Serialize ⇒ is_serialize_bound; Deserialize / DeserializeOwned ⇒ NOT.
+        assert!(is_serialize_bound(&serde_bound("serde::Serialize")));
+        assert!(is_serialize_bound(&serde_bound("serde::ser::Serialize")));
+        assert!(!is_serialize_bound(&serde_bound("serde::de::DeserializeOwned")));
+        assert!(!is_serialize_bound(&serde_bound("serde::de::Deserialize")));
+        assert!(!is_serialize_bound(&marker_bound("Send")));
+    }
+
+    #[test]
+    fn bounds_serialize_only_classification() {
+        // Serialize (+ markers) ⇒ serialize-only. DeserializeOwned ⇒ NOT (output
+        // shape). Serialize + DeserializeOwned ⇒ NOT (carries Deserialize). A
+        // crate-local Serialize look-alike ⇒ NOT (not a real serde bound).
+        assert!(bounds_are_serialize_only_or_marker(&[
+            serde_bound("serde::Serialize"), marker_bound("Send"), marker_bound("Sync"),
+        ]));
+        assert!(!bounds_are_serialize_only_or_marker(&[
+            serde_bound("serde::de::DeserializeOwned"),
+        ]));
+        assert!(!bounds_are_serialize_only_or_marker(&[
+            serde_bound("serde::Serialize"), serde_bound("serde::de::DeserializeOwned"),
+        ]));
+        assert!(!bounds_are_serialize_only_or_marker(&[]),
+            "no serde bound → not serialize-only");
+    }
+
+    #[test]
+    fn serialize_input_ref_admissible_when_flag_set() {
+        // `fn create_obj(&self, obj: &T)` with T serialize-only: a NON-MUT `&T`
+        // in an INPUT position is ADMISSIBLE under the input-ref flag (the
+        // codegen `&sv_j` ref-pass). The OWNED-only census (flag false) STILL
+        // rejects it — proving the gate is exactly the new flag.
+        let by_ref = borrowed_generic("T");
+        assert!(serde_occurrence_admissible_in(&by_ref, "T", OccurrenceCtx::Admissible, true),
+            "&T serialize INPUT must be admissible with the input-ref flag");
+        assert!(!serde_occurrence_admissible_in(&by_ref, "T", OccurrenceCtx::Admissible, false),
+            "&T must stay inadmissible WITHOUT the flag (WALL-3a #59 baseline)");
+    }
+
+    #[test]
+    fn mut_serialize_input_ref_stays_inadmissible() {
+        // `&mut T` is NEVER admitted, even with the input-ref flag — you cannot
+        // hand a Sky String as a mutable borrow of a to-be-serialised value.
+        let by_mut = mut_borrowed_generic("T");
+        assert!(!serde_occurrence_admissible_in(&by_mut, "T", OccurrenceCtx::Admissible, true),
+            "&mut T must STAY inadmissible even with the input-ref flag");
+        assert!(!serde_occurrence_admissible_in(&by_mut, "T", OccurrenceCtx::Admissible, false));
+    }
+
+    #[test]
+    fn serialize_ref_inside_container_not_admitted() {
+        // The flag admits ONLY a DIRECT top-level `&T`. A `&T` nested inside a
+        // Vec (`Vec<&T>`) is NOT the sound `&owned` ref-pass shape → stays
+        // inadmissible (the flag does not propagate into the container).
+        let vec_of_ref = path_with_args("Vec", vec![borrowed_generic("T")]);
+        assert!(!serde_occurrence_admissible_in(&vec_of_ref, "T", OccurrenceCtx::Admissible, true),
+            "&T nested in Vec must NOT be admitted (only a direct top-level &T)");
+    }
+
+    #[test]
+    fn fn_ext_admits_serialize_input_ref_but_not_output_ref() {
+        // INPUT `&T` admitted with the flag; an OUTPUT `&T` is NEVER admitted
+        // (the output census always uses false). Build a fn whose output is `&T`.
+        let in_ref = fn_data_with_generic_bounds(
+            "T", vec![serde_bound("serde::Serialize")],
+            vec![borrowed_generic("T")], serde_json::Value::Null);
+        assert!(fn_serde_param_all_admissible_ext(&in_ref, "T", true),
+            "&T INPUT must pass the ext census with the flag");
+        assert!(!fn_serde_param_all_admissible(&in_ref, "T"),
+            "&T INPUT must FAIL the owned-only census (baseline)");
+
+        // Output `&T` — the flag is dropped to false for the return census, so
+        // it must FAIL even with allow_serialize_input_ref = true.
+        let out_ref = fn_data_with_generic_bounds(
+            "T", vec![serde_bound("serde::Serialize")],
+            vec![], borrowed_generic("T"));
+        assert!(!fn_serde_param_all_admissible_ext(&out_ref, "T", true),
+            "a borrowed `&T` RETURN must never be admitted (can't return a borrow \
+             of a to-be-(de)serialised value)");
+    }
+
+    #[test]
+    fn fn_ext_mixed_owned_and_ref_input_admissible() {
+        // `fn f(a: T, b: &T)` with T serialize-only: BOTH the owned `a: T` and
+        // the by-ref `b: &T` are admissible under the input-ref flag — the
+        // mixed case the firestore `create_obj` family hits when a method takes
+        // both an owned and a borrowed serde value.
+        let fd = fn_data_with_generic_bounds(
+            "T", vec![serde_bound("serde::Serialize")],
+            vec![generic_node("T"), borrowed_generic("T")], serde_json::Value::Null);
+        assert!(fn_serde_param_all_admissible_ext(&fd, "T", true),
+            "owned + &T serialize inputs must both be admissible with the flag");
+        assert!(!fn_serde_param_all_admissible(&fd, "T"),
+            "the same fn must DROP under the owned-only census (the &T vetoes)");
+    }
+
+    #[test]
+    fn serde_ref_borrowed_node_becomes_serde_value_ref() {
+        // `type_to_typeref(&{__sky_serde_value})` (non-mut) → SerdeValueRef.
+        // `&mut {__sky_serde_value}` → NotBindable (drops). This is the codegen
+        // gate that pairs with the census admission.
+        let pidx: HashMap<String, usize> = HashMap::new();
+        let by_ref = serde_json::json!({
+            "borrowed_ref": { "lifetime": null, "mutable": false,
+                "type_": serde_json_value_node() } });
+        assert_eq!(type_to_typeref(&by_ref, &pidx), Ok(TypeRef::SerdeValueRef));
+
+        let by_mut = serde_json::json!({
+            "borrowed_ref": { "lifetime": null, "mutable": true,
+                "type_": serde_json_value_node() } });
+        assert!(type_to_typeref(&by_mut, &pidx).is_err(),
+            "&mut serde-Value must drop (no sound mutable-borrow ref-pass)");
     }
 
     #[test]

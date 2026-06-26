@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -555,6 +555,56 @@ run_serde() {
   rm -rf "$wd"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 81-ffi-serde-ref — WALL 3a-&I (#65): extend the serde-mono to admit a `&T`
+# SERIALIZE (input) param via owned-clone-at-boundary (the firestore
+# `create_obj<T: Serialize>(&self, obj: &T)` shape).
+# POSITIVE: create_obj (the `&T` serde INPUT) + put_obj (owned control) BIND;
+#           the generated wrapper passes `&sv_1` (ref to the owned Value local).
+# NEGATIVE: bad_mutref (`&mut T` → stays inadmissible) + bad_local (sibling
+#           crate-local unmodellable bound) ABSENT from the bindings.
+# Asserts [ALL OK] on the round-trip program.
+# ─────────────────────────────────────────────────────────────────────────────
+run_serde_ref() {
+  local base=81-ffi-serde-ref
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+
+  local wd; wd="$(stage_workdir "$src")" || { _fail "$base (stage failed)"; return; }
+  local binds; binds="$(bindings_file "$wd")" || { _fail "$base (cannot derive bindings path)"; rm -rf "$wd"; return; }
+  local bin;  bin="$(build_fixture "$wd")"  || { _fail "$base (build failed)"; rm -rf "$wd"; return; }
+
+  # NEGATIVE: &mut T + crate-local-bound fns must be ABSENT from the bindings.
+  for banned in bad_mutref bad_local; do
+    if [ -f "$binds" ] && rg -q "SKY-FFI-WRAPPER BEGIN $banned" "$binds"; then
+      _fail "$base: inadmissible fn '$banned' leaked into bindings (&mut / non-serde-only)"; rm -rf "$wd"; return
+    fi
+  done
+
+  # POSITIVE: create_obj (the `&T` serde INPUT) must BIND in the generic wrappers
+  # AND pass a REFERENCE (`&sv_`) to the owned deserialised Value local — the
+  # make-or-break codegen. The generic wrappers live in sky_ffi_generics.rs.
+  local gen="$wd/sky-out/rust/src/sky_ffi_generics.rs"
+  if ! rg -q 'SKY-FFI-WRAPPER BEGIN create_obj_from_db' "$gen" 2>/dev/null; then
+    _fail "$base: create_obj_from_db did NOT bind (the &T serde INPUT must be admitted)"; rm -rf "$wd"; return
+  fi
+  if ! rg -q 'create_obj::<serde_json::Value>\(&arg0, &sv_' "$gen" 2>/dev/null; then
+    _fail "$base: create_obj call site does NOT pass &sv_ (ref to owned Value) — unsound/absent codegen"; rm -rf "$wd"; return
+  fi
+
+  # [ALL OK] output.
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (create_obj &T-serde-input binds + passes &sv_ · put_obj owned ctrl · bad_mutref/bad_local absent · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
 # ── Drive ────────────────────────────────────────────────────────────────────
 FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -568,6 +618,7 @@ for n in "${FIXTURES[@]}"; do
     52-ffi-dce-deadbinding)   run_deadbinding_dce ;;
     61-ffi-result-string-err) run_handstub_basic "$n" ;;
     73-ffi-serde)             run_serde ;;
+    81-ffi-serde-ref)         run_serde_ref ;;
     *)                        run_basic "$n" ;;
   esac
 done

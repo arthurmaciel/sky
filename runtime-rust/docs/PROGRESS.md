@@ -17,6 +17,37 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — WALL 3a-&I (#65): serde `&I` (Serialize input) param binds via owned-clone-at-boundary
+
+firestore `create_obj<I: Serialize>(&self, obj: &I)` / `update_obj` dropped
+`serde-mono-inadmissible: param in &I non-owned` — WALL 3a (#59) admitted serde
+params only in OWNED positions. Extend: a NON-MUT `&I` where `I`'s bounds are
+Serialize(+markers) ONLY, in an INPUT position, is admissible — the wrapper
+deserializes the Sky JSON String → owned local `sv_j: serde_json::Value` and passes
+`&sv_j` (a borrow of the owned local; for the async path `sv_j` is moved into the
+`async move` block so the borrow is valid for the whole `.await` — guardian-proven
+sound). New `TypeRef::SerdeValueRef` node (`&serde_json::Value`, same turbofish as
+SerdeValue). Double-gated asymmetry: `&mut I`, `&I` where I is DeserializeOwned,
+`&I` in OUTPUT, and `&I` inside a container all STAY dropped (the input-only flag
+is non-propagating + Serialize-only by canonical path, #25-collision-safe).
+
+**KEYSTONE FINDING (stretch):** with the serde-`&I` gate cleared, firestore
+create_obj/update_obj now drop ONE layer further out on `not-bindable: dyn_trait` —
+because firestore uses `#[async_trait]`, which desugars every trait `async fn` to
+`-> Pin<Box<dyn Future<Output=T> + Send>>`, dropped by the #26 dyn-trait gate before
+the #44 async path runs. This is the SAME gate blocking get_obj/get_doc/query/delete
+→ **WALL 4 (#64) is now the single keystone**: recognize the async-trait
+`Pin<Box<dyn Future>>` desugar → route Output=T through #44 async→Task → unblocks
+ALL firestore CRUD at once. Likely general (firebase/stripe are async-trait too).
+
+**Proof:** fixture `81-ffi-serde-ref` — `create_obj_from_db : Db -> String -> Task
+Error ()` binds (passes `&sv_1`), owned `put_obj` control (passes `sv_1`),
+`bad_mutref`/`bad_local` absent. 27 ffi-fixtures ok, 182 inspector unit tests (8
+new), SKY_DCE=0 + clippy clean. Guardian-final APPROVE (borrow-lifetime sound).
+
+**Affected:** `tools/sky-ffi-inspect-rs/src/main.rs` · `src/Sky/Build/Rust/FfiCall.hs`
+· `src/Sky/Build/Rust/FfiInstance.hs` · `runtime-rust/tests/sky/81-ffi-serde-ref/`.
+
 ## 2026-06-26 — MILESTONE: a real FirestoreDb mints from Sky + cargo-builds shim-free; definitive CRUD scoping
 
 Post-WALL-5 measurement (HEAD da939c23, real firestore 0.49). **A Sky program that

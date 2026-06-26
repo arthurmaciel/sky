@@ -547,8 +547,15 @@ synthesiseGenericWrapper gf =
                 -- as a Sky `String` via a `to_string` wrap. Async (`_call_isAsync`)
                 -- + a `Result<_,_>` host return drive the spawn/await + match body
                 -- shape (mirrors emitRustFnSimple; #44 async→Task + #54 Send).
-                isSerdeRef TRSerdeValue = True
-                isSerdeRef _            = False
+                -- [WALL 3a / #59 + 3a-&I / #65] Both the owned serde-Value param
+                -- AND the `&T` serde-Serialize input param take the SAME wrapper
+                -- shape: a Sky `String` arg + a `from_str::<Value>` prelude that
+                -- binds the owned `sv_j` local. They diverge only at the CALL
+                -- SITE (renderCall: `sv_j` vs `&sv_j`). So both drive the prelude
+                -- + the `String` wrapper-param type here.
+                isSerdeRef TRSerdeValue    = True
+                isSerdeRef TRSerdeValueRef = True
+                isSerdeRef _               = False
                 serdeArgIdxs = [ j | (j, tr) <- zip [0 :: Int ..] (_call_argTypes call)
                                    , isSerdeRef tr ]
                 isAsync      = _call_isAsync call

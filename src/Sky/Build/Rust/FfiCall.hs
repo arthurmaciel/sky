@@ -189,6 +189,20 @@ data TypeRef
       --   method-level @::\<serde_json::Value\>@ turbofish. Carries NO param
       --   index (it is fully concrete), so it contributes nothing to
       --   'allTypeRefs' / 'hasClosure'.
+    | TRSerdeValueRef
+      -- ^ [WALL 3a-&I / #65] @{serdeValueRef:true}@ — a @\&T@ serde-Serialize
+      --   INPUT param whose @T@ was reduced to @serde_json::Value@ (the
+      --   firestore @create_obj\<T: Serialize\>(\&self, obj: \&T)@ shape). The
+      --   wrapper param + @from_str@ prelude are IDENTICAL to 'TRSerdeValue'
+      --   (Sky @String@ in, deserialised to the owned @sv_j@ local), but at the
+      --   CALL SITE the host wants @\&Value@, so 'renderCall' passes @\&sv_j@
+      --   (a borrow of the owned local — lives for the call, sound). Admitted by
+      --   the inspector census ONLY for a non-mut @\&T@ on a SERIALIZE-only
+      --   param; a @\&mut T@ / a Deserialize param never produces this node.
+      --   Like 'TRSerdeValue', fully concrete → no 'allTypeRefs' / 'hasClosure'
+      --   contribution. Valid ONLY as a direct @argTypes@ element (an INPUT) —
+      --   never a return / nested ctor arg (a borrowed return is unsound; the
+      --   census forbids it before this node could be produced).
     deriving (Show, Eq)
 
 
@@ -311,6 +325,7 @@ allTypeRefs c =
     paramIdxs (TRCtor _ args)      = concatMap paramIdxs args
     paramIdxs (TRClosure _ _ as r) = concatMap paramIdxs as ++ paramIdxs r
     paramIdxs TRSerdeValue         = []
+    paramIdxs TRSerdeValueRef      = []
 
 
 -- | @True@ if a 'TRClosure' appears anywhere in the PROPER subtree of this
@@ -429,6 +444,12 @@ renderCall c params =
     -- be `String` where the host wants `serde_json::Value` (E0308). Naming the
     -- local closes that — mirrors emitRustFnSimple's `sv_` arg ref.
     renderValueArg j (Just TRSerdeValue) = "sv_" ++ show j
+    -- [WALL 3a-&I / #65, MAKE-OR-BREAK] A `&T` serde-Serialize INPUT: the host
+    -- wants `&serde_json::Value`. The wrapper's `from_str` prelude binds the
+    -- OWNED `sv_j` local (same as the by-value case); pass `&sv_j` — a borrow of
+    -- the owned local that lives for the duration of the call. Sound: the
+    -- reference never escapes the wrapper, and `sv_j` outlives the call.
+    renderValueArg j (Just TRSerdeValueRef) = "&sv_" ++ show j
     -- C6: an `Iterator<Item=T>`-bound arg (in `iterAdapters`) is passed
     -- `argJ.into_iter()` — a `Vec<T>` is not itself an `Iterator`, so the host
     -- `impl Iterator` param needs the adapter. An `IntoIterator`-bound arg (NOT
@@ -442,13 +463,17 @@ renderCall c params =
         | j `elem` _call_borrowAsRefArgs c = argName j ++ ".as_ref()"
         | otherwise                        = argName j
 
-    -- [WALL 3a / #59] A serde-reduced `TypeRef` node at the TOP level.
-    isSerdeRef TRSerdeValue = True
-    isSerdeRef _            = False
-    -- [WALL 3a / #59] A serde-reduced node ANYWHERE in the tree (e.g. the OK arm
-    -- of `Result<Value, E>`). Drives the method-level turbofish, which must fire
-    -- whenever the host's inferred `T` is unconstrained at the call site.
+    -- [WALL 3a / #59 + 3a-&I / #65] A serde-reduced `TypeRef` node at the TOP
+    -- level (owned or by-ref input).
+    isSerdeRef TRSerdeValue    = True
+    isSerdeRef TRSerdeValueRef = True
+    isSerdeRef _               = False
+    -- [WALL 3a / #59 + 3a-&I / #65] A serde-reduced node ANYWHERE in the tree
+    -- (e.g. the OK arm of `Result<Value, E>`, or a `&T` serde input arg). Drives
+    -- the method-level turbofish, which must fire whenever the host's inferred
+    -- `T` is unconstrained at the call site.
     anySerde TRSerdeValue       = True
+    anySerde TRSerdeValueRef    = True
     anySerde (TRCtor _ args)    = any anySerde args
     anySerde (TRClosure _ _ as_ r) = any anySerde as_ || anySerde r
     anySerde _                  = False
@@ -595,6 +620,11 @@ renderTypeRef params tr = case tr of
     -- 'FfiInstance.synthesiseGenericWrapper' 'serdeWrapperArgType'); this render
     -- is the type the turbofish + boundary coercion key off.
     TRSerdeValue -> "serde_json::Value"
+    -- [WALL 3a-&I / #65] A `&T` serde-Serialize INPUT renders, when forced to a
+    -- standalone Rust type, as `&serde_json::Value`. In practice this is never
+    -- emitted as a wrapper-param type (the param surfaces as Sky `String`, like
+    -- TRSerdeValue) — the call site passes `&sv_j` directly. Kept total.
+    TRSerdeValueRef -> "&serde_json::Value"
 
 
 -- ─── JSON decoding (validating) ──────────────────────────────────────
@@ -634,6 +664,9 @@ instance A.FromJSON TypeRef where
         -- other discriminator. Checked AFTER param/prim/ctor so a malformed
         -- two-discriminator object still fails.
         msv <- o .:? "serdeValue" .!= False
+        -- WALL 3a-&I (#65): the `&T` serde-Serialize INPUT node
+        -- `{serdeValueRef:true}` — same handling slot as serdeValue.
+        msvr <- o .:? "serdeValueRef" .!= False
         case (mp, mq, mc) of
             (Just i, Nothing, Nothing) -> pure (TRParam i)
             (Nothing, Just p, Nothing) -> pure (TRPrim p)
@@ -642,6 +675,7 @@ instance A.FromJSON TypeRef where
                 pure (TRCtor nm args)
             (Nothing, Nothing, Nothing)
                 | msv       -> pure TRSerdeValue
+                | msvr      -> pure TRSerdeValueRef
                 | otherwise ->
                 -- Try the closure branch (only when no other discriminator
                 -- is present — keeps the "two discriminators" rejection
@@ -651,7 +685,7 @@ instance A.FromJSON TypeRef where
                               <*> c .:? "byRef" .!= False
                               <*> c .: "argTypes"
                               <*> c .: "ret")
-                <|> fail "TypeRef must have exactly one of `param`, `prim`, `ctor`, `closure`, or `serdeValue`"
+                <|> fail "TypeRef must have exactly one of `param`, `prim`, `ctor`, `closure`, `serdeValue`, or `serdeValueRef`"
             _ -> fail "TypeRef must have exactly one of `param`, `prim`, or `ctor`"
 
 

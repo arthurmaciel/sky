@@ -1,0 +1,12 @@
+[project]
+name = "81-ffi-serde-ref"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local serderefcrate81 crate — async serde Serialize `&T` INPUT on a
+# concrete-Self TRAIT method (firestore FirestoreDb::create_obj/update_obj
+# `&self, obj: &T` shape). Staged via setup.sh; file:// git dep points at the
+# cache path.
+["rust.dependencies"]
+serderefcrate81 = { git = "file:///home/arthur/.cache/sky/81-ffi-serde-ref-crate", branch = "master" }

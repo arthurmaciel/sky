@@ -1,0 +1,67 @@
+module Main exposing (main)
+
+-- 81-ffi-serde-ref: Sky WALL 3a-&I (#65) — extend WALL-3a (#59) serde-mono to
+-- ALSO admit a `&T` SERIALIZE (INPUT) param via owned-clone-at-boundary.
+--
+-- WALL-3a (#59) admits a serde param only in OWNED positions; the census marks
+-- `&T` INADMISSIBLE. The firestore shape is `create_obj<T: Serialize>(&self,
+-- obj: &T)` — a NON-MUT `&T` SERIALIZE INPUT. This wall admits it: the wrapper
+-- deserialises the Sky JSON String → an owned serde_json::Value local (`sv_j`)
+-- and passes `&sv_j` (a reference to the owned local, lives for the call).
+--
+-- POSITIVE (bind + run end-to-end):
+--   Db.new ()                  -- inherent ctor → opaque Db
+--   create_obj_from_db db json -- async trait method, &T serde INPUT (Sky String)
+--   put_obj_from_db db json    -- async trait method, OWNED serde param (CONTROL)
+--
+-- NEGATIVE (must be ABSENT from bindings — coverage-dropped, never referenced):
+--   bad_mutref -- &mut T Serialize → census STAYS inadmissible → DROP
+--   bad_local  -- T: Serialize + Local (crate-local unmodellable) → DROP
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Sky.Core.Json.Encode as Encode
+import Rust.Serderefcrate81 as Repo
+import Std.Log exposing (println)
+
+
+-- Build a JSON object via the typed encoder (no raw string literal): the Sky
+-- JSON String the runtime deserialises to serde_json::Value at the boundary.
+payload : String
+payload =
+    Encode.encode 0
+        (Encode.object
+            [ ( "name", Encode.string "sky" )
+            , ( "version", Encode.int 81 )
+            ]
+        )
+
+
+-- POSITIVE: async serde-ref round-trip.
+--   create_obj_from_db : Db -> String -> Task Error ()   (&T serde INPUT)
+--   put_obj_from_db    : Db -> String -> Task Error ()   (OWNED serde CONTROL)
+checkRoundTrip : Task Error ()
+checkRoundTrip =
+    case Repo.new_from_db () of
+        Err _ ->
+            Task.fail (Error.unexpected "Db.new failed")
+
+        Ok db ->
+            -- 1. create_obj THROUGH the serde Serialize `&T` INPUT param.
+            --    Receiver is arg0 (Db -> String), so the Db comes first.
+            Repo.create_obj_from_db db payload
+                |> Task.andThen
+                    (\_ ->
+                        -- 2. CONTROL: the OWNED by-value serde param still binds.
+                        Repo.put_obj_from_db db payload
+                            |> Task.andThen
+                                (\_ ->
+                                    println "[ALL OK]"
+                                )
+                    )
+
+
+main : Task Error ()
+main =
+    checkRoundTrip
