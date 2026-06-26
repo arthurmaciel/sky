@@ -14,7 +14,7 @@ module Sky.Generate.Rust.Project
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Char as Char
-import Data.List (isInfixOf, stripPrefix)
+import Data.List (isInfixOf, stripPrefix, isSuffixOf, partition)
 import Control.Monad (when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -240,7 +240,46 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         ) moduleFiles
     let sqlxTls = Toml._sqlxTls config
         rustDeps = Toml._rustDeps config
-    writeFileIfChanged cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver sqlxTls rustDeps (Toml._liveStore config))
+        -- WALL-B (#75): the generic/UFCS wrappers actually KEPT after the S4 FFI
+        -- tree-shake (same predicate the emission below uses). Computed HERE,
+        -- before the Cargo.toml write, so we can scan their sources for
+        -- crate-absolute `::<crate>::…` references to TRANSITIVE deps and list
+        -- those crates in `[dependencies]` (else E0433). Only kept wrappers count:
+        -- a tree-shaken-away wrapper's source is never emitted, so its transitive
+        -- crate must not pull a (possibly heavy) dep into the manifest.
+        keepWrapper (kn, ref, _) =
+            dceDisabled || Set.null reached
+                || Set.member (Dce.FfiRef kn ref) reached
+        dceKeptWrappers = filter keepWrapper genericWrappers
+    -- WALL-B (#75) SOUND path (guardian option 1): read the inspector-resolved
+    -- identifier→(canonicalName, exactVersion) map from every cached Rust
+    -- kernel.json (`.skycache/ffi/rust/*.kernel.json` `transitiveDeps`). The
+    -- coveredIdents are the directly-`sky add`ed crates + the Sky-stdlib crates;
+    -- anything else a wrapper references crate-absolutely must resolve THROUGH the
+    -- metadata map. A wrapper whose referenced crate is unresolvable (absent from
+    -- the map — e.g. a private inner item the inspector never modelled) is DROPPED
+    -- (coverage-drop) rather than left to emit an unresolvable / `"*"` dep.
+    transMap <- readTransitiveDepMap
+    let directDepIdents = [ n | (n, _) <- rustDeps, not (null n) ]
+        coveredIdents = directDepIdents ++ RustBuilder.stdlibEmittedCrateNames
+        -- Classify ONE wrapper: resolve its scanned external crates; the wrapper
+        -- SURVIVES only if it has NO unresolvable referenced crate.
+        wrapperResolves (_, _, src) =
+            let scanned = RustBuilder.referencedExternalCrates [src]
+                (_, unresolvable) =
+                    RustBuilder.resolveTransitiveDeps transMap coveredIdents scanned
+            in null unresolvable
+        (keptWrappers, droppedWrappers) = partition wrapperResolves dceKeptWrappers
+        -- The resolved (canonicalName, exactVersion) deps from the SURVIVING
+        -- wrappers only (a dropped wrapper's transitive crate must not be pulled).
+        (resolvedTransitiveCrates, _) =
+            RustBuilder.resolveTransitiveDeps transMap coveredIdents
+                (RustBuilder.referencedExternalCrates [ src | (_, _, src) <- keptWrappers ])
+    mapM_ (\(kn, ref, _) ->
+        putStrLn $ "   [ffi] WALL-B coverage-drop: wrapper " ++ kn ++ "." ++ ref
+            ++ " references a transitive crate cargo metadata could not resolve")
+        droppedWrappers
+    writeFileIfChanged cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver sqlxTls rustDeps (Toml._liveStore config) resolvedTransitiveCrates)
     putStrLn $ "   Wrote " ++ cargoTomlPath
     -- Copy Rust FFI binding files into sky-out/rust/src/, REACHABILITY-FILTERED
     -- (S4 FFI tree-shake). Slugs must match what generateRustBindings writes
@@ -269,11 +308,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
     -- `pub mod sky_ffi_generics;` to ffiSlugs, so this file is wired into the
     -- crate root only when it exists.
     when hasGenerics $ do
-        let keepWrapper (kn, ref, _) =
-                dceDisabled || Set.null reached
-                    || Set.member (Dce.FfiRef kn ref) reached
-            keptWrappers = filter keepWrapper genericWrappers
-            wrapperBlocks =
+        let wrapperBlocks =
                 [ unlines
                     [ RustFfi.wrapperBeginSentinel ref
                     , src
@@ -523,6 +558,52 @@ writeFilteredBindings srcPath jsonPath dstPath reached dceDisabled = do
     fullEmit raw verb = do
         writeFileIfChanged dstPath raw
         pure verb
+
+
+-- | WALL-B (#75): read the union identifier→(canonicalName, exactVersion) map
+-- across every cached Rust kernel.json (`.skycache/ffi/rust/*.kernel.json`). The
+-- inspector emitted a top-level `transitiveDeps` array per crate from that
+-- crate's `cargo metadata` (direct + transitive). The map is keyed by the Rust
+-- lib IDENTIFIER (underscored) — exactly the form a wrapper's `::<ident>::…`
+-- path uses — and carries the canonical crates.io package name + the exact
+-- locked version. Returns `[(ident, name, version)]`. Empty when the cache dir
+-- is absent or no kernel.json carries the field (Go target, legacy caches), in
+-- which case `resolveTransitiveDeps` resolves nothing → no transitive dep is
+-- emitted and any wrapper referencing a non-covered crate is coverage-dropped
+-- (fail-closed). On a later `ident` colliding across crates, last write wins via
+-- the consuming `Map.fromList` — the version is the same node by construction
+-- (one resolved lockfile per probe), so the collision is benign.
+readTransitiveDepMap :: IO [(String, String, String)]
+readTransitiveDepMap = do
+    let ffiDir = ".skycache/ffi/rust"
+    exists <- doesDirectoryExist ffiDir
+    if not exists
+        then pure []
+        else do
+            entries <- listDirectory ffiDir
+            let jsons = filter (".kernel.json" `isSuffixOf`) entries
+            perFile <- mapM (readOne . (ffiDir </>)) jsons
+            pure (concat perFile)
+  where
+    readOne :: FilePath -> IO [(String, String, String)]
+    readOne path = do
+        bytes <- BS.readFile path
+        case Aeson.decodeStrict bytes :: Maybe Aeson.Value of
+            Just (Aeson.Object o) ->
+                case KeyMap.lookup "transitiveDeps" o of
+                    Just (Aeson.Array arr) ->
+                        pure [ t | Just t <- map parseDep (Foldable.toList arr) ]
+                    _ -> pure []
+            _ -> pure []
+    parseDep :: Aeson.Value -> Maybe (String, String, String)
+    parseDep (Aeson.Object o) = do
+        i <- str =<< KeyMap.lookup "ident" o
+        n <- str =<< KeyMap.lookup "name" o
+        v <- str =<< KeyMap.lookup "version" o
+        if null i || null n || null v then Nothing else Just (i, n, v)
+    parseDep _ = Nothing
+    str (Aeson.String t) = Just (T.unpack t)
+    str _                = Nothing
 
 
 -- | Read a UTF-8 text file (locale-independent), returning "" if absent.

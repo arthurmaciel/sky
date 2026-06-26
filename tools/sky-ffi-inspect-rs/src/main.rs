@@ -405,6 +405,25 @@ fn is_modellable_5(name: &str) -> bool {
     MODELLABLE_5.contains(&name)
 }
 
+/// WALL-B (#75): one resolved crate node from the introspection project's
+/// `cargo metadata`. Maps the Rust LIB IDENTIFIER (`ident`, the underscored
+/// name a `::<crate>::…` path segment uses) to the CANONICAL crates.io PACKAGE
+/// name (`name`, almost always hyphenated for multi-word crates) and the EXACT
+/// locked `version`. The Haskell codegen's transitive-dep scanner finds the
+/// `ident` in a generated wrapper; this record tells it the real Cargo
+/// `[dependencies]` KEY (`name`) and a pinned version requirement (`version`)
+/// to emit — so it never has to GUESS `_`→`-` or fall back to `"*"`.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct TransitiveDep {
+    /// Rust lib-target identifier (underscored): the `::<ident>::…` path segment.
+    ident: String,
+    /// Canonical crates.io package name (the Cargo `[dependencies]` KEY).
+    name: String,
+    /// Exact resolved version from the introspection project's Cargo.lock.
+    version: String,
+}
+
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct PkgInfo {
@@ -424,6 +443,14 @@ struct PkgInfo {
     // Not consumed by FfiGen — printed by the `sky add` CLI.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notes: Vec<String>,
+    // WALL-B (#75): every crate resolved in the introspection project's
+    // `cargo metadata` (direct + TRANSITIVE), keyed by its Rust lib identifier.
+    // FfiGen re-emits this into the kernel.json; the Rust codegen consults it to
+    // resolve a wrapper's crate-absolute `::<ident>::…` reference to the canonical
+    // package name + exact version for the generated `[dependencies]`. Empty for
+    // the Go inspector and for any crate whose `cargo metadata` could not run.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    transitive_deps: Vec<TransitiveDep>,
 }
 
 // ── Entry point ────────────────────────────────────────────────────────
@@ -512,6 +539,7 @@ fn main() {
                 modules: vec![],
                 errors: vec![format!("JSON serialization failed: {}", e)],
                 notes: vec![],
+                transitive_deps: vec![],
             };
             let body = serde_json::to_string_pretty(&err).unwrap_or_else(|_| {
                 // Last-resort hand-rolled JSON so a serialization failure on the
@@ -596,8 +624,12 @@ struct GitSource {
 
 fn inspect_crate(crate_name: &str, features: &[String], git: Option<&GitSource>) -> PkgInfo {
     match run_rustdoc(crate_name, features, git) {
-        Ok((json_content, version)) => match serde_json::from_str::<serde_json::Value>(&json_content) {
-            Ok(doc) => parse_rustdoc(&doc, crate_name, &version),
+        Ok((json_content, version, transitive_deps)) => match serde_json::from_str::<serde_json::Value>(&json_content) {
+            Ok(doc) => {
+                let mut pkg = parse_rustdoc(&doc, crate_name, &version);
+                pkg.transitive_deps = transitive_deps;
+                pkg
+            }
             Err(e) => pkg_error(crate_name, &format!("rustdoc JSON parse error: {}", e)),
         },
         Err(e) => pkg_error(crate_name, &e),
@@ -611,7 +643,7 @@ fn inspect_crate(crate_name: &str, features: &[String], git: Option<&GitSource>)
 /// Handles thin re-export facades (e.g. `clap` re-exports `clap_builder`):
 /// if the first rustdoc run produces 0 functions, we scan the JSON for glob
 /// `pub use other_crate::*` re-exports and re-run on the underlying crate.
-fn run_rustdoc(crate_name: &str, features: &[String], git: Option<&GitSource>) -> Result<(String, String), String> {
+fn run_rustdoc(crate_name: &str, features: &[String], git: Option<&GitSource>) -> Result<(String, String, Vec<TransitiveDep>), String> {
     // Reject any crate name outside the crates.io charset BEFORE it is spliced into
     // the generated Cargo.toml (the `[package] name` field and the dependency
     // entry). A name containing `"`, newline, `]`, etc. could otherwise inject a
@@ -657,6 +689,11 @@ edition = "2021"
     // Fetch first (uses cargo cache — fast on repeated calls)
     fetch_dep(&manifest_str)?;
 
+    // WALL-B (#75): resolve the identifier→(canonical name, exact version) map for
+    // every crate in this probe (direct + transitive) from the now-resolved
+    // Cargo.lock. Done once per crate inspect; fail-soft (empty on any error).
+    let transitive_deps = collect_transitive_deps(&manifest_str);
+
     // [#51] Default to all features for visibility; fall back to default
     // features if an all-features doc build fails (mutually-exclusive features).
     let all_features = features.is_empty();
@@ -684,13 +721,13 @@ edition = "2021"
                 run_rustdoc_package(&underlying, &manifest_str, &target_dir, &under_safe, all_features)
             {
                 if json_has_functions(&under_json) {
-                    return Ok((under_json, under_ver));
+                    return Ok((under_json, under_ver, transitive_deps));
                 }
             }
         }
     }
 
-    Ok((json_content, version))
+    Ok((json_content, version, transitive_deps))
 }
 
 /// Run `cargo +nightly rustdoc --package pkg` and return the JSON content.
@@ -848,6 +885,110 @@ fn fetch_dep(manifest_str: &str) -> Result<(), String> {
             String::from_utf8_lossy(&o.stderr)
         ))
     }
+}
+
+/// WALL-B (#75): build the identifier→(canonical package name, exact version)
+/// map for EVERY crate resolved in the introspection probe project (direct +
+/// transitive). Runs `cargo metadata --format-version 1` inside the same temp
+/// project the rustdoc run already resolved (so its Cargo.lock is populated; the
+/// command is offline-fast on the now-warm cargo cache). For each package, the
+/// `lib`/`proc-macro`/`cdylib` target's `name` is the Rust lib IDENTIFIER (the
+/// underscored form a `::<ident>::…` path uses); `package.name` is the canonical
+/// crates.io name and `package.version` the exact locked version. The Haskell
+/// codegen's wrapper scanner produces underscored identifiers, so keying on the
+/// lib-target name lets it resolve each to the real `[dependencies]` key + a
+/// pinned version. FAIL-SOFT: any error (cargo missing, parse failure) returns an
+/// empty map — the codegen then DROPS any wrapper whose transitive crate it can't
+/// resolve (coverage-drop), never emits an unresolvable / `"*"` dep.
+fn collect_transitive_deps(manifest_str: &str) -> Vec<TransitiveDep> {
+    let output = match Command::new("cargo")
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--quiet",
+            "--manifest-path",
+            manifest_str,
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return Vec::new(),
+    };
+
+    let meta: serde_json::Value = match serde_json::from_slice(&output) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    transitive_deps_from_metadata(&meta)
+}
+
+/// WALL-B (#75): the PURE extraction half of `collect_transitive_deps` — given a
+/// parsed `cargo metadata` JSON value, build the ident→(name, version) list.
+/// Split out so it is unit-testable without shelling out to cargo.
+fn transitive_deps_from_metadata(meta: &serde_json::Value) -> Vec<TransitiveDep> {
+    let packages = match meta["packages"].as_array() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    let mut deps: Vec<TransitiveDep> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for pkg in packages {
+        let pkg_name = match pkg["name"].as_str() {
+            Some(n) => n,
+            None => continue,
+        };
+        let pkg_version = pkg["version"].as_str().unwrap_or("");
+        if pkg_version.is_empty() {
+            continue;
+        }
+        // The lib-style target's `name` is the Rust IDENTIFIER (underscored).
+        // `cargo metadata`'s `targets[].name` is already the underscored crate
+        // identifier for a lib/proc-macro/cdylib target; bin/test/example targets
+        // are skipped (they are never `::<crate>::`-referenced from a wrapper).
+        let targets = match pkg["targets"].as_array() {
+            Some(t) => t,
+            None => continue,
+        };
+        for tgt in targets {
+            let kinds = tgt["kind"].as_array();
+            let is_lib_like = kinds
+                .map(|ks| {
+                    ks.iter().any(|k| {
+                        matches!(
+                            k.as_str(),
+                            Some("lib")
+                                | Some("rlib")
+                                | Some("dylib")
+                                | Some("cdylib")
+                                | Some("staticlib")
+                                | Some("proc-macro")
+                        )
+                    })
+                })
+                .unwrap_or(false);
+            if !is_lib_like {
+                continue;
+            }
+            if let Some(ident) = tgt["name"].as_str() {
+                // `cargo metadata` already gives the underscored lib-target name,
+                // but normalise belt-and-braces so a `-` in a target name can't
+                // leak through and never match a wrapper's underscored segment.
+                let ident_norm = ident.replace('-', "_");
+                if seen.insert(ident_norm.clone()) {
+                    deps.push(TransitiveDep {
+                        ident: ident_norm,
+                        name: pkg_name.to_string(),
+                        version: pkg_version.to_string(),
+                    });
+                }
+                break; // one lib-like target per package is enough
+            }
+        }
+    }
+    deps.sort_by(|a, b| a.ident.cmp(&b.ident));
+    deps
 }
 
 /// Escape a value for embedding inside a TOML basic string (`"..."`).
@@ -1630,6 +1771,8 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
         modules: collect_public_modules(doc),
         errors,
         notes,
+        // Filled in by `inspect_crate` from `run_rustdoc`'s cargo-metadata pass.
+        transitive_deps: Vec::new(),
     }
 }
 
@@ -3946,11 +4089,28 @@ fn external_trait_path(id: &serde_json::Value) -> Option<String> {
         if let Some((path, _)) =
             STD_TRAIT_CANONICAL.iter().find(|(_, t)| *t == tag)
         {
-            return Some((*path).to_string());
+            // [WALL-B / #75] `STD_TRAIT_CANONICAL` lists the `alloc::` form FIRST
+            // for the heap traits (`alloc::string::ToString`, `alloc::borrow::
+            // ToOwned`), so `.find` returns it — but `alloc` is not importable in a
+            // normal `std`-linked crate (`::alloc::string::ToString` → E0433
+            // `could not find alloc`). Remap `alloc::`→`std::` (std re-exports the
+            // alloc heap items), matching `collect_external_trait_paths`.
+            let path = remap_alloc_to_std(path);
+            return Some(path);
         }
     }
     // (2) Any external trait recorded in `doc["paths"]` (KNOWN-CORRECT path).
     EXTERNAL_TRAIT_PATH_BY_ID.with(|m| m.borrow().get(&key).cloned())
+}
+
+/// [WALL-B / #75] Remap an `alloc::`-rooted std path to its `std::` re-export.
+/// `alloc` is only importable in a `#![no_std]` crate with `extern crate alloc`;
+/// a normal `std`-linked generated crate must name the same item via `std::`.
+fn remap_alloc_to_std(path: &str) -> String {
+    match path.strip_prefix("alloc::") {
+        Some(rest) => format!("std::{rest}"),
+        None => path.to_string(),
+    }
 }
 
 /// [#46] Render an impl's `trait` node into the UFCS trait-path STRING, including
@@ -5323,6 +5483,7 @@ fn pkg_error(name: &str, msg: &str) -> PkgInfo {
         modules: vec![],
         errors: vec![msg.into()],
         notes: vec![],
+        transitive_deps: vec![],
     }
 }
 
@@ -9033,6 +9194,57 @@ mod tests {
 
     fn prim(s: &str) -> serde_json::Value {
         serde_json::json!({ "primitive": s })
+    }
+
+    // ── WALL-B (#75): transitive-dep cargo-metadata extraction ─────────────
+    #[test]
+    fn transitive_deps_maps_hyphen_pkg_to_underscore_lib_ident_and_exact_version() {
+        // A multi-word crate's PACKAGE name is hyphenated (`tower-service`) while
+        // its lib TARGET name is underscored (`tower_service`) — the form a
+        // `::tower_service::Service` wrapper path uses. The map keys on the lib
+        // ident and carries the canonical package name + exact version.
+        let meta = serde_json::json!({
+            "packages": [
+                { "name": "tower-service", "version": "0.3.3",
+                  "targets": [ { "name": "tower_service", "kind": ["lib"] } ] },
+                { "name": "equivalent", "version": "1.0.2",
+                  "targets": [ { "name": "equivalent", "kind": ["lib"] } ] }
+            ]
+        });
+        let deps = transitive_deps_from_metadata(&meta);
+        assert_eq!(deps.len(), 2);
+        // Sorted by ident.
+        assert_eq!(deps[0].ident, "equivalent");
+        assert_eq!(deps[0].name, "equivalent");
+        assert_eq!(deps[0].version, "1.0.2");
+        assert_eq!(deps[1].ident, "tower_service");
+        assert_eq!(deps[1].name, "tower-service");
+        assert_eq!(deps[1].version, "0.3.3");
+    }
+
+    #[test]
+    fn transitive_deps_skips_bin_and_example_targets_keeps_lib_like() {
+        // A package exposing ONLY a bin/example target is never `::crate::`-
+        // referenced from a wrapper, so it must not appear. proc-macro counts.
+        let meta = serde_json::json!({
+            "packages": [
+                { "name": "some-tool", "version": "1.2.3",
+                  "targets": [ { "name": "some_tool", "kind": ["bin"] },
+                               { "name": "ex", "kind": ["example"] } ] },
+                { "name": "derive-thing", "version": "0.9.0",
+                  "targets": [ { "name": "derive_thing", "kind": ["proc-macro"] } ] }
+            ]
+        });
+        let deps = transitive_deps_from_metadata(&meta);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].ident, "derive_thing");
+        assert_eq!(deps[0].name, "derive-thing");
+    }
+
+    #[test]
+    fn transitive_deps_empty_on_missing_packages_key() {
+        let deps = transitive_deps_from_metadata(&serde_json::json!({}));
+        assert!(deps.is_empty());
     }
 
     fn path(name: &str) -> serde_json::Value {
@@ -13416,6 +13628,35 @@ mod tests {
             "alloc::borrow::ToOwned must be remapped to std::borrow::ToOwned");
         assert!(!stored.starts_with("alloc::"),
             "stored path must NOT start with alloc:: (not importable)");
+    }
+
+    /// WALL-B [#75]: the SECOND `external_trait_path` resolution path — recovery
+    /// via `STD_TRAIT_BY_ID` tag → `STD_TRAIT_CANONICAL` lookup — must ALSO remap
+    /// `alloc::` to `std::`. `STD_TRAIT_CANONICAL` lists the `alloc::` form FIRST
+    /// for the heap traits (`alloc::string::ToString`, `alloc::borrow::ToOwned`),
+    /// so the `.find(|(_, t)| *t == tag)` returns it. Pre-fix the firebase
+    /// `ApiClientError: ToString` wrapper emitted
+    /// `<… as ::alloc::string::ToString>::to_string` → E0433 `could not find
+    /// alloc`. `remap_alloc_to_std` closes it.
+    #[test]
+    fn test_wall_b_remap_alloc_to_std() {
+        assert_eq!(remap_alloc_to_std("alloc::string::ToString"), "std::string::ToString");
+        assert_eq!(remap_alloc_to_std("alloc::borrow::ToOwned"), "std::borrow::ToOwned");
+        // Non-alloc paths are untouched.
+        assert_eq!(remap_alloc_to_std("core::fmt::Display"), "core::fmt::Display");
+        assert_eq!(remap_alloc_to_std("std::string::ToString"), "std::string::ToString");
+        assert_eq!(remap_alloc_to_std("http::HeaderMap"), "http::HeaderMap");
+        // The canonical-table entry for the ToString tag is the `alloc::` form;
+        // confirm the remap turns it into the importable `std::` re-export.
+        let canonical = STD_TRAIT_CANONICAL
+            .iter()
+            .find(|(_, t)| *t == "ToString")
+            .map(|(p, _)| *p)
+            .expect("ToString must be in STD_TRAIT_CANONICAL");
+        assert_eq!(canonical, "alloc::string::ToString",
+            "table still lists the alloc:: form first (the bug's source)");
+        assert_eq!(remap_alloc_to_std(canonical), "std::string::ToString",
+            "external_trait_path must emit the std:: re-export, not ::alloc::");
     }
 
     /// R3 [#48]: A type produced only inside `Result<T, E>` (e.g. `url::Url`

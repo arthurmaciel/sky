@@ -1425,6 +1425,23 @@ emitRustKernelJson moduleName kernelName pkg =
                ++ ", \"arity\": " ++ show arity
                ++ ", \"skyType\": " ++ jsonQuote st
                ++ genericField ++ "}"
+        -- WALL-B (#75): re-emit the inspector's identifier→(canonicalName,
+        -- exactVersion) cargo-metadata map VERBATIM as a top-level
+        -- `transitiveDeps` array. The Rust codegen (`Project.readTransitiveDepMap`)
+        -- reads this to resolve a wrapper's crate-absolute `::<ident>::…` reference
+        -- to the real `[dependencies]` key + version. Empty array omitted (Go
+        -- target / no transitive crates) → byte-identical to pre-WALL-B output.
+        transDeps = _pkgTransitiveDeps pkg
+        transDepEntry (ident, name, version) =
+            "    {\"ident\": " ++ jsonQuote ident
+            ++ ", \"name\": " ++ jsonQuote name
+            ++ ", \"version\": " ++ jsonQuote version ++ "}"
+        transDepsField
+            | null transDeps = ""
+            | otherwise =
+                ",\n  \"transitiveDeps\": [\n"
+                ++ intercalate ",\n" (map transDepEntry transDeps)
+                ++ "\n  ]"
     in unlines
         [ "{"
         , "  \"moduleName\": " ++ jsonQuote moduleName ++ ","
@@ -1432,7 +1449,7 @@ emitRustKernelJson moduleName kernelName pkg =
         , "  \"package\": " ++ jsonQuote (_pkgPath pkg) ++ ","
         , "  \"functions\": ["
         , entries
-        , "  ]"
+        , "  ]" ++ transDepsField
         , "}"
         ]
   where

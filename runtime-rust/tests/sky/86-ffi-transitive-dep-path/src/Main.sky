@@ -1,0 +1,68 @@
+module Main exposing (main)
+
+-- 86-ffi-transitive-dep-path: WALL-B (#75) — synthesised UFCS generic wrappers
+-- reference TRAITS from TRANSITIVE deps. `transdep86::Tag` implements two tiny
+-- real crates.io traits, neither `sky add`ed directly:
+--
+--   * `equivalent::Equivalent<str>` — crate name == lib identifier (NO
+--     separator). Wrapper: `<Tag as ::equivalent::Equivalent<str>>::equivalent`.
+--     Generated Cargo.toml gains `equivalent = "=<ver>"`.
+--
+--   * `is_even::IsEven` — the DECISIVE WALL-B case: lib identifier `is_even`
+--     (UNDERSCORE) but crates.io package name `is-even` (HYPHEN). Wrapper:
+--     `<Tag as ::is_even::IsEven>::is_even`. Generated Cargo.toml MUST gain the
+--     canonical `is-even = "=1.0.0"` (HYPHEN key + EXACT version from the
+--     inspector's `cargo metadata` map) — NOT a `_`→`-` guess, NOT `"*"`.
+--
+-- Pre-#75 the generated Cargo.toml lists only `transdep86` + the Sky stdlib
+-- crates, NOT these transitive crates → E0433 `unresolved crate <crate>`.
+--
+-- The proof is that the project cargo-COMPILES (no E0433, no no-matching-package)
+-- AND prints [ALL OK].
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Transdep86 as T
+import Std.Log exposing (println)
+
+
+-- Bridge the SYNC FFI results into the Task pipeline with `Task.fromResult`.
+-- Probe `equivalent` ("abc"→True, "xyz"→False) AND `is_even` (count 4 → True).
+check : Task Error ()
+check =
+    Task.fromResult (T.new_from_tag "abc" 4)
+        |> Task.andThen
+            (\tag ->
+                Task.fromResult (T.equivalent tag "abc")
+                    |> Task.andThen
+                        (\hit ->
+                            Task.fromResult (T.equivalent tag "xyz")
+                                |> Task.andThen
+                                    (\miss ->
+                                        Task.fromResult (T.is_even tag)
+                                            |> Task.andThen
+                                                (\even ->
+                                                    if hit && not miss && even then
+                                                        println "[ALL OK]"
+
+                                                    else
+                                                        Task.fail
+                                                            (Error.unexpected
+                                                                ("transitive-trait probe UNEXPECTED "
+                                                                    ++ toString hit
+                                                                    ++ " "
+                                                                    ++ toString miss
+                                                                    ++ " "
+                                                                    ++ toString even
+                                                                )
+                                                            )
+                                                )
+                                    )
+                        )
+            )
+
+
+main : Task Error ()
+main =
+    check

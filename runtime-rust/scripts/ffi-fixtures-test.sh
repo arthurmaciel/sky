@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -227,6 +227,53 @@ run_basic() {
     _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
   fi
   ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1   # disk hygiene
+  rm -rf "$wd"
+}
+
+# ── run_transitive_dep  (WALL-B #75 — 86-ffi-transitive-dep-path). Like
+# run_basic (build + run + assert `[ALL OK]`), PLUS the WALL-B regression: the
+# generated Cargo.toml MUST list each TRANSITIVE crate with its CANONICAL
+# crates.io package KEY and an EXACT pinned version sourced from the inspector's
+# `cargo metadata` — specifically the HYPHEN-named `is-even = "=1.0.0"` (NOT a
+# `_`→`-` guess of `is_even`, NOT a `"*"` version) and the no-separator
+# `equivalent = "=1.0.2"`. This is the decisive proof the dep NAME+VERSION come
+# from the resolved metadata, not a path-segment string transform. ──────────────
+run_transitive_dep() {
+  local base="86-ffi-transitive-dep-path"
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+
+  local wd; wd="$(stage_workdir "$src")" || { _fail "$base (stage failed)"; return; }
+  local bin; bin="$(build_fixture "$wd")" || { _fail "$base (build failed)"; rm -rf "$wd"; return; }
+
+  local cargo="$wd/sky-out/rust/Cargo.toml"
+  # HYPHEN key + EXACT version (the WALL-B decisive assertion).
+  if ! rg -qx 'is-even = "=1\.0\.0"' "$cargo"; then
+    _fail "$base (Cargo.toml missing canonical hyphen dep 'is-even = \"=1.0.0\"' — got: $(rg -n '^is.even' "$cargo" | tr '\n' ' '))"
+    rm -rf "$wd"; return
+  fi
+  # The underscore-guess form MUST NOT appear (proves no `_`→`-` string transform
+  # and no `"*"` version slipped through).
+  if rg -q '^is_even ' "$cargo" || rg -q '= "\*"' "$cargo"; then
+    _fail "$base (Cargo.toml has an underscore-key or \"*\"-version transitive dep — WALL-B regression)"
+    rm -rf "$wd"; return
+  fi
+  # No-separator transitive crate, exact version.
+  if ! rg -qx 'equivalent = "=1\.0\.2"' "$cargo"; then
+    _fail "$base (Cargo.toml missing 'equivalent = \"=1.0.2\"' — got: $(rg -n '^equivalent' "$cargo" | tr '\n' ' '))"
+    rm -rf "$wd"; return
+  fi
+
+  local outp="/tmp/ffi-fixture-$base.out"
+  if ! exercise_cli "$bin" "$outp" "$RUN_TMO"; then
+    _fail "$base (run panicked/hung)"; rm -rf "$wd"; return
+  fi
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (hyphen is-even=\"=1.0.0\" + equivalent=\"=1.0.2\" + [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
   rm -rf "$wd"
 }
 
@@ -719,6 +766,7 @@ for n in "${FIXTURES[@]}"; do
     81-ffi-serde-ref)         run_serde_ref ;;
     83-ffi-mixed-generic-turbofish) run_mixed_turbofish ;;
     85-ffi-vec-struct-field)  run_vec_struct_field ;;
+    86-ffi-transitive-dep-path) run_transitive_dep ;;
     *)                        run_basic "$n" ;;
   esac
 done

@@ -1,6 +1,9 @@
 module Sky.Generate.Rust.Builder.Emitter
   ( emitRust
   , emitCargoToml
+  , referencedExternalCrates
+  , resolveTransitiveDeps
+  , stdlibEmittedCrateNames
   , dbPoolType
   , dbRowType
   , dbBackendHelpers
@@ -958,9 +961,141 @@ ffiPlaceholder name =
         , let modPrefix = map (\c -> if c == '.' then '_' else c) mod'
         ]
 
--- | Generate Cargo.toml for the Rust project
-emitCargoToml :: UsedKernels -> String -> String -> [(String, Toml.RustDepSpec)] -> String -> String
-emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
+-- | WALL-B (#75): collect the set of TRANSITIVE-dep crate names referenced
+-- crate-absolutely (`::<crate>::…`) by the synthesised generic/UFCS wrappers in
+-- `sky_ffi_generics.rs`. Each such crate must be added to the generated
+-- `[dependencies]` (else E0433 `unresolved crate <crate>`).
+--
+-- A crate-absolute path START is a `::` that is NOT preceded by an identifier
+-- character — e.g. after `<`, `(`, `&`, `,`, whitespace, `=`, the start of the
+-- string. The identifier immediately following such a `::` is a CRATE NAME (its
+-- first path segment); a `::` preceded by an identifier (e.g. `Tag::method`,
+-- `Signer>::sign`) is a MEMBER access, never a crate, so it is skipped.
+--
+-- Std-family pseudo-crates are dropped: `core`/`std` are always linked (no
+-- `[dependencies]` entry possible or needed); `alloc` is remapped to `std` by the
+-- inspector before emission, but is dropped here too as belt-and-braces. `crate`
+-- (the generated crate itself) and `self`/`Self`/`super` are dropped. The result
+-- is sorted + deduped so the emitted Cargo.toml is deterministic. The CALLER
+-- (`emitCargoToml`) does the final dedup against crates already in the manifest
+-- (direct `sky add`ed + Sky stdlib crates), so a wrapper that references one of
+-- those does not produce a duplicate `[dependencies]` key.
+referencedExternalCrates :: [String] -> [String]
+referencedExternalCrates wrapperSources =
+    Set.toList
+        . Set.fromList
+        . map remapStdFamily
+        . filter keepCrate
+        $ concatMap scanCrateRefs wrapperSources
+  where
+    isIdentChar c = isAlphaNum c || c == '_'
+    -- Scan one source string for crate-absolute path starts. Walk char by char;
+    -- at every `::`, decide via the PRECEDING char (`prev`) whether it begins a
+    -- path (crate) or continues one (member). `prev` is the char immediately
+    -- before the current position (`Nothing` at string start ⇒ a crate start).
+    -- Only an identifier following a `::` in PATH POSITION (see `isPathOpener`)
+    -- is a crate name; a `::` after an identifier (`Tag::method`) or after a
+    -- close token (`Signer>::sign`) is a member access, so its ident is skipped.
+    scanCrateRefs :: String -> [String]
+    scanCrateRefs = go Nothing
+      where
+        go prev (':':':':rest) =
+            let ident = takeWhile isIdentChar rest
+                rest' = dropWhile isIdentChar rest
+                prev' = if null ident then Just ':' else Just (last ident)
+            in if isPathOpener prev && not (null ident)
+                   then ident : go prev' rest'
+                   else go prev' rest'
+        go _ (c:rest) = go (Just c) rest
+        go _ []       = []
+        -- A crate-absolute `::ident` begins a NEW path only when the `::` sits in
+        -- "path position": at string start (`Nothing`) or right after a
+        -- path-opening delimiter. A `::` after an identifier (`Tag::method`) or
+        -- after `>` / `)` / `]` (a UFCS `…>::method` / a call `…)::` / an index
+        -- `…]::`) is a MEMBER/assoc access on a prior path — never a crate.
+        isPathOpener Nothing  = True
+        isPathOpener (Just c) = c `elem` (" \t\n\r<(&,=[{|;" :: String)
+    keepCrate name =
+        name `notElem` ["core", "std", "alloc", "crate", "self", "Self", "super", "r"]
+    remapStdFamily "alloc" = "std"
+    remapStdFamily n        = n
+
+-- | WALL-B (#75) SOUND resolution (guardian option 1). A wrapper's scanned
+-- crate-absolute identifiers (`referencedExternalCrates`, underscore form) are
+-- resolved AGAINST the introspected crate's `cargo metadata` map — emitted by
+-- the inspector into each kernel.json's @transitiveDeps@ and threaded here as
+-- @transMap@ (a list of @(ident, canonicalName, exactVersion)@). For each scanned
+-- ident this yields exactly one of three outcomes:
+--
+--   * ALREADY-COVERED — the ident (after `-`≡`_` normalisation) is one of the
+--     crates already in the generated manifest (`coveredIdents`: the direct
+--     `sky add`ed crates + the Sky-stdlib crates). No dep line, wrapper kept.
+--   * RESOLVED — the ident is in @transMap@ AND not already covered. Emit
+--     @canonicalName = "=exactVersion"@ (pinned: an `=`-requirement forbids a
+--     cross-major drift that a bare version or `"*"` would risk). Wrapper kept.
+--   * UNRESOLVABLE — a genuine third-party ident absent from @transMap@. The
+--     wrapper that references it CANNOT compile (no sound dep to emit), so it is
+--     reported for a coverage-DROP. NEVER emitted as `"*"` / underscore-guessed.
+--
+-- @coveredIdents@ are compared in the underscore-normalised space (the manifest
+-- keys are hyphenated package names; the scan idents are underscored), so a
+-- transitive ref to a directly-added hyphen crate is recognised as covered.
+--
+-- The result is @(depsToEmit, unresolvableIdents)@: @depsToEmit@ is the sorted,
+-- deduped @(canonicalName, exactVersion)@ set for `[dependencies]`; a non-empty
+-- @unresolvableIdents@ means the caller must drop the offending wrapper(s).
+resolveTransitiveDeps
+    :: [(String, String, String)]   -- ^ transMap: (ident, canonicalName, exactVersion)
+    -> [String]                     -- ^ coveredIdents: crates already in the manifest (any separator)
+    -> [String]                     -- ^ scanned idents from a wrapper's crate-absolute paths
+    -> ([(String, String)], [String])
+resolveTransitiveDeps transMap coveredIdents scanned =
+    let covered = Set.fromList (map normIdent coveredIdents)
+        lookupMap = Map.fromList [ (normIdent i, (n, v)) | (i, n, v) <- transMap ]
+        classify ident
+            | normIdent ident `Set.member` covered = Left ()             -- already covered
+            | Just (n, v) <- Map.lookup (normIdent ident) lookupMap = Right (Left (n, v))
+            | otherwise = Right (Right ident)                            -- unresolvable
+        results = map classify (Set.toList (Set.fromList scanned))
+        deps = Set.toList (Set.fromList [ nv | Right (Left nv) <- results ])
+        unresolvable = Set.toList (Set.fromList [ i | Right (Right i) <- results ])
+    in (deps, unresolvable)
+  where
+    -- Cargo package names use `-`; Rust path segments use `_`. Normalise to the
+    -- `_` form so the two spellings of one crate compare equal.
+    normIdent = map (\c -> if c == '-' then '_' else c)
+
+-- | WALL-B (#75): the crate names `emitCargoToml` emits for the Sky stdlib
+-- (unconditionally or under a usage gate). Exported so `Project.hs` can treat a
+-- wrapper's `::serde_json::`-style reference to one of these as ALREADY-COVERED
+-- when classifying its external crates — otherwise the stdlib crate (absent from
+-- a per-FFI-crate cargo-metadata map) would be mis-flagged as an unresolvable
+-- coverage-drop. Keep in sync when a new always/conditional stdlib dep is added.
+stdlibEmittedCrateNames :: [String]
+stdlibEmittedCrateNames =
+    [ "tokio", "mimalloc", "sqlx", "redis", "async-trait", "serde_json"
+    , "sha2", "serde"
+    , "regex", "base64", "hex", "percent-encoding", "chrono", "chrono-tz"
+    , "rust_decimal", "hmac", "sha1", "md-5", "subtle", "rsa", "aes-gcm"
+    , "chacha20poly1305", "pbkdf2", "flate2", "zstd", "csv", "jsonwebtoken"
+    , "bcrypt", "toml", "serde_yaml"
+    , "uuid", "axum", "tower-http", "serde_urlencoded", "reqwest", "lettre"
+    , "futures-util", "tokio-tungstenite", "url", "crossterm", "unicode-width"
+    , "wry", "tao", "libc"
+    ]
+
+-- | Generate Cargo.toml for the Rust project.
+--
+-- @resolvedTransitiveCrates@ is WALL-B (#75): the @(canonicalPackageName,
+-- exactVersion)@ pairs the CALLER already resolved from the introspected crate's
+-- `cargo metadata` (via `resolveTransitiveDeps`) for every transitive crate a
+-- kept wrapper references crate-absolutely. The names are canonical crates.io
+-- package keys and the versions are exact locked versions — so this function
+-- emits them VERBATIM (no `_`→`-` guessing, no `"*"`). An empty list (the common
+-- case, and every non-FFI / no-transitive-ref project) yields a byte-identical
+-- Cargo.toml to the pre-WALL-B output.
+emitCargoToml :: UsedKernels -> String -> String -> [(String, Toml.RustDepSpec)] -> String -> [(String, String)] -> String
+emitCargoToml uk dbDriver sqlxTls rustDeps liveStore resolvedTransitiveCrates = unlines $
     -- The sky_runtime files copied into sky-out/rust/src/ carry cfg(feature = "X")
     -- gates inherited from runtime-rust/Cargo.toml. The generated Cargo.toml
     -- below declares a [features] section enabling everything by default so the
@@ -1120,6 +1255,43 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     | (name, spec) <- rustDeps
     , not (null name)
     ] ++
+    -- WALL-B (#75): TRANSITIVE-dep crates referenced crate-absolutely by a
+    -- synthesised generic/UFCS wrapper in `sky_ffi_generics.rs`. A wrapper for a
+    -- trait method whose owning trait — or whose return/param type — comes from a
+    -- crate that is only a TRANSITIVE dep of the directly-`sky add`ed crate emits
+    -- `::<crate>::…` (crate-absolute). The generated crate glob-imports nothing
+    -- for these, and a transitive crate is NOT in the project's `[dependencies]`,
+    -- so the path fails with E0433 `unresolved crate <crate>`. (Concrete: a
+    -- firebase wrapper renders `<Tag as ::http::HeaderMap-trait>::…`; `http` is a
+    -- transitive dep of rs-firebase-admin-sdk, not a direct one.)
+    --
+    -- SOUND fix (guardian option 1): the CALLER (`Project.hs`) resolved each
+    -- referenced transitive crate to its CANONICAL crates.io package name + EXACT
+    -- locked version via the introspected crate's `cargo metadata`, surfaced in
+    -- each kernel.json's @transitiveDeps@ by the inspector. So @resolvedTransitiveCrates@
+    -- already carries the real `[dependencies]` KEY (hyphen form where canonical:
+    -- `google-cloud-auth`, `tower-service`) and a PINNED `=version` requirement —
+    -- no `_`→`-` guessing (ambiguous), no `"*"` (cross-major drift risk). A crate
+    -- the metadata could not resolve never reaches here: the caller DROPS the
+    -- wrapper that referenced it (coverage-drop), so we never emit an unresolvable
+    -- dep. An empty list (the common case + every no-transitive-ref project) leaves
+    -- the Cargo.toml byte-identical to the pre-WALL-B output.
+    --
+    -- The `=version` requirement pins to the exact node the directly-added crate's
+    -- lockfile already pulls (the inspector resolved both in the SAME probe
+    -- project), so cargo unifies on that one version with no new graph node.
+    -- `name` is the CANONICAL crates.io package name from cargo metadata — emit
+    -- it VERBATIM (a canonical name may itself contain `_`, e.g. `rust_decimal`,
+    -- so do NOT `_`→`-` transform it; that's the very ambiguity WALL-B closes).
+    [ name ++ " = \"=" ++ version ++ "\""
+    | (name, version) <- resolvedTransitiveCrates
+    , validCrateName name
+    , not (null version)
+    , let normName = hyphenNormalise name
+    , normName `notElem` map hyphenNormalise userDepNames
+    , normName `notElem` map (hyphenNormalise . fst) rustDeps
+    , normName `notElem` map hyphenNormalise stdlibEmittedCrateNames
+    ] ++
     -- Dev-profile tuning for fast iteration (per user 2026-06-10): drop debuginfo
     -- (debug=0) — the heaviest part of dev linking — and keep incremental on so
     -- only changed codegen units recompile. sccache + a shared CARGO_TARGET_DIR
@@ -1160,6 +1332,22 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     ]
   where
     userDepNames = [ n | (n, _) <- rustDeps, not (null n) ]
+    -- WALL-B (#75): Cargo dep/package names use `-`; Rust path segments use `_`.
+    -- Normalise to the `_` form so the two denote the same crate for the dedup
+    -- of a resolved transitive dep against the manifest's existing deps.
+    hyphenNormalise = map (\c -> if c == '-' then '_' else c)
+    -- WALL-B (#75) dedup guard: every crate NAME the block above can emit
+    -- unconditionally or under a usage gate. A transitive crate referenced by a
+    -- wrapper that ALSO happens to be one of these (e.g. a wrapper naming
+    -- `::serde_json::Value`) must NOT be re-emitted as a pinned line — Cargo errors
+    -- on a duplicate `[dependencies]` key. This list mirrors the crate names
+    -- threaded through `cargoDependencyFor` / the inlined `tokio`/`sqlx`/`serde`
+    -- entries above; keep it in sync when a new always-or-conditional dep is added
+    -- (a missed name only risks a duplicate-key cargo error on the rare wrapper
+    -- that references that exact stdlib crate — fail-loud, never silent-wrong).
+    -- Lifted to the top-level `stdlibEmittedCrateNames` so Project.hs can also
+    -- treat these as ALREADY-COVERED when classifying a wrapper's external crates
+    -- (a `::serde_json::` ref must NOT count as an unresolvable coverage-drop).
     -- Sky.Webview reuses Sky.Live's renderer + event dispatch (webview.rs imports
     -- live::dispatch::{build_index, HandlerIndex}), so a Webview app needs the
     -- whole `live` stack (module + feature + deps) even though it runs no HTTP

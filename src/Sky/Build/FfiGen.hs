@@ -163,6 +163,13 @@ data PkgInfo = PkgInfo
     , _pkgModules :: [String]  -- Rust target: public module paths to glob-import
     , _pkgErrors :: [String]
     , _pkgNotes  :: [String]  -- diagnostic notes for `sky add` (e.g. facade guidance)
+    , _pkgTransitiveDeps :: [(String, String, String)]
+        -- ^ WALL-B (#75): Rust target only. Every crate resolved in the
+        -- introspection probe's `cargo metadata` (direct + transitive), as
+        -- (lib IDENTIFIER underscored, canonical crates.io PACKAGE name, exact
+        -- locked version). The Rust kernel.json emitter re-emits this; the Rust
+        -- codegen consults it to resolve a wrapper's `::<ident>::…` crate-absolute
+        -- reference to the real `[dependencies]` key + version. Empty for Go.
     }
     deriving (Show)
 
@@ -216,6 +223,11 @@ instance A.FromJSON PkgInfo where
         <*> o A..:? "modules" A..!= []
         <*> o A..:? "errors" A..!= []
         <*> o A..:? "notes" A..!= []
+        -- WALL-B (#75): camelCase key the Rust inspector emits; absent for Go.
+        <*> (o A..:? "transitiveDeps" A..!= [] >>= mapM parseTransDep)
+      where
+        parseTransDep = A.withObject "TransitiveDep" $ \d ->
+            (,,) <$> d A..: "ident" <*> d A..: "name" <*> d A..: "version"
 
 
 -- | Inspect a single Go package via the Go FFI inspector (run inside sky-out).

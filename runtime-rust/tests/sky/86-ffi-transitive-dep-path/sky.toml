@@ -1,0 +1,17 @@
+[project]
+name = "86-ffi-transitive-dep-path"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# WALL-B (#75): `transdep86` is the ONLY directly-added crate. Its `Tag` impls
+# traits from TWO TRANSITIVE crates — `equivalent` (crate name == lib ident, NO
+# separator) and `is-even` (crates.io package `is-even` HYPHEN, lib identifier
+# `is_even` UNDERSCORE). The synthesised UFCS wrappers reference
+# `::equivalent::Equivalent` and `::is_even::IsEven`, so the generated Cargo.toml
+# must list BOTH transitive crates with their CANONICAL package names + EXACT
+# locked versions (`equivalent = "=<ver>"`, `is-even = "=1.0.0"`) — the #75 fix
+# sources both from the inspector's `cargo metadata` map, NOT a `_`→`-` guess and
+# NOT `"*"`. setup.sh git-inits transdep-crate into the cache path below.
+["rust.dependencies"]
+transdep86 = { git = "file:///home/arthur/.cache/sky/86-ffi-transitive-dep-path-crate", branch = "master" }

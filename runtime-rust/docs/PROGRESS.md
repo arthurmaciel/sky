@@ -17,6 +17,39 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — WALL-B (#75): transitive-dep crates added to generated Cargo.toml with CANONICAL names + locked versions
+
+Generic/UFCS wrappers emit `::<crate>::` paths for transitive deps (firebase
+`::http::`, `::google_cloud_auth::`) not in the generated `Cargo.toml` → E0433 ×19.
+Fix: collect the referenced external crates per project (a total char-walk scanner
+over kept-wrapper source distinguishing path-position from member `::`, dropping
+std/core/alloc + the crate itself), add them to `[dependencies]`.
+
+**First cut guardian-BLOCKED + reworked:** it emitted the underscore Rust
+path-segment (`google_cloud_auth`) as the dep key, but the crates.io package is
+`google-cloud-auth` (HYPHEN) → unresolvable. `_`→`-` is ambiguous from the segment,
+so the rework sources the CANONICAL package name + EXACT locked version from
+`cargo metadata`/Cargo.lock (the inspector runs in that build context): keys on
+`packages[].targets[].name` (real lib id — handles `[lib] name=` renames),
+emits `name = "=version"`. Fail-closed: crate absent from metadata → wrapper
+coverage-DROP (never an underscore guess / `"*"`). Bonus: `remap_alloc_to_std`
+closes a 2nd `alloc::`→`std::` E0433 path.
+
+**Proof:** firebase Cargo.toml gains `google-cloud-auth = "=1.13.0"` +
+`http = "=1.4.2"` (hyphen, exact, match the lockfile → cargo unifies) → **0 E0433,
+0 no-matching-package** (firebase 27→5 errors, all remaining crate-RESOLVED = walls
+C/D/E). Fixture `86-ffi-transitive-dep-path` proves `is-even = "=1.0.0"` (hyphen) +
+`equivalent = "=1.0.2"`. No spurious deps (01-rand byte-identical). 32 ffi-fixtures
+ok, 197 inspector tests, 127 Rust specs (incl 18-case WALL-B `TransitiveDepCrateSpec`),
+clippy clean. Guardian-final APPROVE-WITH-CONSTRAINTS (the `="=exact"` pin could
+over-constrain a future 2nd-transitive-FFI project — fails LOUD, never miscompiles →
+follow-up #79).
+
+**Affected:** `tools/sky-ffi-inspect-rs/src/main.rs` (+253) ·
+`src/Sky/Generate/Rust/Builder/Emitter.hs` (+194) · `…/Project.hs` (+95) ·
+`src/Sky/Build/{FfiGen,Rust/Ffi}.hs` · `runtime-rust/tests/sky/86-ffi-transitive-dep-path/`
+· `test/Sky/Generate/Rust/TransitiveDepCrateSpec.hs`.
+
 ## 2026-06-26 — Phase 2 firebase measurement: token-verify works; 5 NEW general codegen walls block CRUD
 
 firebase (rs-firebase-admin-sdk 4.x), all firestore walls in (HEAD 77b6dccd):

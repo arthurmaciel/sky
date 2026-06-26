@@ -1,0 +1,31 @@
+[package]
+name = "transdep86"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+# TWO TRANSITIVE crates, both TINY real crates.io crates with a clean ROOT-level
+# public trait (no private inner module → no E0603, isolating the E0433/dep-name
+# the #75 fix targets). The project `sky add`s ONLY `transdep86`; NEITHER of these
+# is added directly — they are reached only via this crate's trait impls.
+#
+#   * `equivalent` — package name == lib identifier (NO separator). Proves the
+#     simple-name resolution path. `Tag` impls `equivalent::Equivalent<str>`, so
+#     the UFCS wrapper renders `<Tag as ::equivalent::Equivalent<str>>::equivalent`.
+#
+#   * `is-even` — package name `is-even` (HYPHEN) but lib identifier `is_even`
+#     (UNDERSCORE). This is the WALL-B DECISIVE case: the wrapper path uses the
+#     underscore identifier `::is_even::IsEven`, but the generated Cargo.toml
+#     `[dependencies]` KEY must be the canonical HYPHEN package name `is-even`
+#     with the EXACT locked version (`is-even = "=1.0.0"`) — NOT a `_`→`-` guess,
+#     NOT `"*"`. The #75 fix sources both from the inspector's `cargo metadata`.
+#     `Tag` impls `is_even::IsEven` (`fn is_even(&self) -> bool` — clean primitive
+#     return, no widening/future/private-path wall).
+#
+# Pre-#75 the generated Cargo.toml lists only the directly-added `transdep86` +
+# the Sky stdlib crates, NOT these transitive crates → E0433 `unresolved crate`.
+[dependencies]
+equivalent = "1"
+is-even = "1"
