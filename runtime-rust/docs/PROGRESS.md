@@ -17,6 +17,50 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 — stripe (#70): version-threading SHIPPED + SOLID re-measure + WALL-G design (guardian-approved)
+
+**Version-threading shipped (b6bf0c07).** `regenMissingRustBindings` (app/Main.hs)
+threads a sky.toml `[rust.dependencies]` concrete version to the inspector as
+`name@version`; the inspector strips it back for a clean PkgInfo/slug. A real
+`sky build` with a prerelease dep now works (proven: `async-stripe-types = "1.0.0-rc.6"`
+→ 180 bindings, cargo-clean). Closes the prerelease gap end-to-end. 36/36 FFI gate green.
+
+**SOLID re-measurement — corrects the earlier "multi-impl ambiguous" framing (the 3×-drift
+trap).** `--audit --features default-tls,blocking async-stripe@1.0.0-rc.6` + raw rustdoc:
+- `send`/`send_blocking`/`stream`/`get_all` are `fn …<C: StripeClient>(self, client: &C)`
+  on `impl<T> CustomizableStripeRequest<T>` in **`async-stripe-client-core`** (lib
+  `stripe_client_core`).
+- `StripeClient`/`StripeBlockingClient` have **0 impls in client-core** (NOT >1-ambiguous —
+  ZERO-in-crate). The unique concrete impls live in the FACADE `async-stripe`
+  (`default-tls`,`blocking`): `impl StripeClient for stripe::hyper::client::Client` +
+  `impl StripeBlockingClient for stripe::hyper::blocking::Client` — each trait UNIQUELY
+  impl'd by one crate-local `Client`. So "both clients configurable" is AUTOMATIC; the real
+  work is CROSS-CRATE resolution.
+- Facade rustdoc lacks `send`/`CustomizableStripeRequest` (re-exports only
+  `CustomizedStripeRequest`/`StripeRequest`/`RequestStrategy`) → can't bind from facade alone.
+- Cross-crate trait identity is STABLE via rustdoc canonical `paths`: facade impl-trait-ref
+  id 159 and client-core trait id 128 BOTH canonicalize to
+  `["stripe_client_core","stripe_request","StripeClient"]`. Verified live.
+
+**WALL-G design (guardian APPROVE-WITH-CONSTRAINTS B1–B7).** Generalize #52/WALL-F unique-
+impl mono (crate_id==0 only) to CROSS-CRATE: a process-global concrete-impl index keyed by
+canonical-path string, each entry a FROZEN, owning-crate-resolved
+`ConcreteImpl { trait_canonical_path, reachable_public_path, send_ok, owning_crate,
+owning_crate_version, trait_crate_version }` (parse-don't-validate — illegal states
+unrepresentable at emission). Make-or-break: render the stored `reachable_public_path`
+string, NEVER re-resolve the foreign rustdoc id in the binding crate's pass (the renderer's
+`reachable_local_path` misses cross-crate → bare last-segment → E0412/E0433). Haskell feeds
+the full rust-crate set to ONE inspector invocation; per-crate rustdoc failure + feature sets
+stay isolated. Spec:
+`runtime-rust/docs/superpowers/specs/2026-06-26-wall-g-cross-crate-unique-impl-mono.md`.
+WALL-G is the GATING piece for WALL-H (generic-Self serde-T `send`) + WALL-I (resource
+builders). Tracked #84. Next: TDD fixture `91-ffi-cross-crate-impl` (red first).
+
+**Affected.** `app/Main.hs` + `tools/sky-ffi-inspect-rs/src/main.rs` (`inspect_crate`
+clean-name) [b6bf0c07]; spec + this entry.
+
+---
+
 ## 2026-06-26 — stripe (#70) GATING wall: inspector accepts `name@version` (prerelease pin) + live measurement
 
 **The first stripe blocker: every async-stripe 1.0.0-rc.6 crate is PRERELEASE-ONLY,
