@@ -5,6 +5,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 SKY_BIN="${SKY_BIN:-./sky-out/sky}"
+# Absolutize: later steps `cd` into per-example dirs (subshells), where a relative
+# `./sky-out/sky` no longer resolves. We are at the repo root here.
+case "$SKY_BIN" in
+    /*) ;;
+    *)  SKY_BIN="$PWD/${SKY_BIN#./}" ;;
+esac
 
 if [ ! -x "$SKY_BIN" ]; then
     echo "ERROR: Sky binary not found at $SKY_BIN. Build it first with: cabal build exe:sky"

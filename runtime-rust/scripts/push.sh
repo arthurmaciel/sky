@@ -48,11 +48,19 @@ if ! REMOTE_URL="$(git remote get-url "$REMOTE" 2>/dev/null)"; then
     exit 4
 fi
 
-# --- GUARD 3: the remote URL must not point at the upstream repo (anzellai/sky).
+# --- GUARD 3: NO configured URL may point at upstream (anzellai/sky).
 # --- Covers github.com:anzellai/sky, github.com/anzellai/sky, and a .git suffix.
-if printf '%s\n' "$REMOTE_URL" | grep -qi "$UPSTREAM_PATTERN"; then
-    echo "REFUSING: remote '$REMOTE' URL ($REMOTE_URL) matches the upstream repo '$UPSTREAM_PATTERN'." >&2
-    echo "          This script never pushes to upstream. The only acceptable target is your fork (arthurmaciel/sky)." >&2
+# --- CRITICAL: check the PUSH url(s) too, not just the fetch url. A remote can
+# --- carry a separate `pushurl` (git remote set-url --push), even several — and
+# --- the PUSH destination is exactly what this guard exists to stop. `get-url
+# --- --push --all` lists every push url (falling back to the fetch url when none
+# --- is set). Checking only the fetch url was a bypass.
+ALL_REMOTE_URLS="$REMOTE_URL
+$(git remote get-url --push --all "$REMOTE" 2>/dev/null)"
+if printf '%s\n' "$ALL_REMOTE_URLS" | grep -qi "$UPSTREAM_PATTERN"; then
+    echo "REFUSING: remote '$REMOTE' has a URL matching the upstream repo '$UPSTREAM_PATTERN'." >&2
+    echo "          (both fetch and push urls are checked.) This script never pushes to upstream." >&2
+    echo "          The only acceptable target is your fork (arthurmaciel/sky)." >&2
     exit 5
 fi
 
