@@ -25,10 +25,10 @@ specialization would need a Sky-level `Decoder source a` — out of boundary.
 
 | Layer | Decision |
 |---|---|
-| Type | ONE shared `Decoder<E,T> = Box<dyn Fn(&JsonVal) -> SkyResult<E,T> + Send>` (json.rs:7). Matches Sky's single `Decoder a`. |
-| Combinators | `DbDec.{map,andThen,andMap,map2..5,succeed,fail}` route to the SAME `json_dec_*` runtime fns — they only transform the decoded value, never touch the source. Pure DRY, zero correctness risk. |
+| Type | ONE shared `Decoder<E,T>` matching Sky's single `Decoder a`. **(Superseded — shipped as a struct, see STATUS redesign note.)** Originally specced as a `Box<dyn Fn(&JsonVal) -> SkyResult<E,T> + Send>` type alias; the shipped type (json.rs:21) is a struct `Decoder<E,T> { run: Box<dyn Fn(&JsonVal) -> SkyResult<E,T> + Send>, fields: Vec<String> }` — `fields` carries the read columns (Go's `DbDecoder.cols`) so `db_decode_nullable` works. |
+| Combinators | `DbDec.{map,andThen,andMap,map2..5,succeed,fail}` route to the SAME `decode_*` runtime fns (`decode_map`/`decode_and_then`/`decode_and_map`/`decode_map2..5`/`decode_succeed`/`decode_fail`) — they only transform the decoded value, never touch the source. Pure DRY, zero correctness risk. |
 | Source | Unify on `JsonVal`. A DB row is a `JsonVal::Object` of string-valued (or `Null`) fields. |
-| Primitives | DB-specific + TOTAL: `db_dec_int(col)` reads the named field as a string and PARSES it (DB columns arrive as strings — distinct from `json_dec_int` which expects a JSON number). Never panic; missing/ill-typed field → `Err`. |
+| Primitives | DB-specific + TOTAL: `db_decode_int(col)` reads the named field as a string and PARSES it (DB columns arrive as strings — distinct from `decode_int` which expects a JSON number). Never panic; missing/ill-typed field → `Err`. |
 
 Cross-application (DbDec decoder on JSON or vice-versa) can't happen by
 construction — the runner functions fix the source. Sky's types can't prevent it
@@ -61,22 +61,22 @@ row_to_json(row: &DbRow) -> JsonVal:
 ## Work plan (de-risk spine first, then fill)
 
 ### Phase A — spine (prove the approach, SQLite-backed)
-1. `json.rs`: add `json_dec_map5` + `json_dec_and_map` (mirror map2-4). Needed
+1. `json.rs`: add `decode_map5` + `decode_and_map` (mirror map2-4). Needed
    for DbDec.map5/andMap routing.
 2. `row_to_json(&DbRow) -> JsonVal` in db.rs (NULL-preserving, above).
 3. `db.rs` new section (or `db_decoder.rs`): DB primitives reusing
-   `json_dec_field` + json_dec_ok/err:
-   - `db_dec_string(col)` = field → expect JsonVal::String.
-   - `db_dec_int(col)`    = field → parse string → i64 (accept JSON number too).
-   - `db_dec_float/bool/money(col)` = parse string.
-   - `db_dec_nullable(inner)` = field absent or JsonVal::Null → Nothing; else Just(inner).
-   - `db_dec_required(col, inner, accum)` / `db_dec_optional` = pipeline (mirror json_dec_p_*).
+   `decode_field` + decode_ok/decode_err_str:
+   - `db_decode_string(col)` = field → expect JsonVal::String.
+   - `db_decode_int(col)`    = field → parse string → i64 (accept JSON number too).
+   - `db_decode_float/bool/money(col)` = parse string.
+   - `db_decode_nullable(inner)` = field absent or JsonVal::Null → Nothing; else Just(inner).
+   - `db_decode_required(col, inner, accum)` / `db_decode_optional` = pipeline (mirror decode_pipeline_*).
 4. Change `db_query_decode` to take `decoder: Decoder<E,A>` (was `impl Fn(HashMap)`);
    run `decoder(&row_to_json(&raw_row))` per row. Update its internal test.
 5. `db_get_by_id_decode(conn, table, id, decoder: Decoder<E,A>) -> SkyTask<E, SkyMaybe<A>>`.
 6. Kernel.hs routing: DbDec.{string,int,float,bool,money,nullable,succeed,fail,
    map,andThen,andMap,map2..5,required,optional} (succeed/fail/map/andThen/andMap/
-   map2..5 → json_dec_*; string/int/.../required/optional → db_dec_*); Db.getByIdDecode.
+   map2..5 → decode_*; string/int/.../required/optional → db_decode_*); Db.getByIdDecode.
 7. Probe `runtime-rust/tests/sky/kernel-parity-probe-dbdec`: SQLite create+insert+queryDecode
    a 2-field record with int+string+nullable; verify decoded values + NULL→Nothing.
 
@@ -104,18 +104,21 @@ row_to_json(row: &DbRow) -> JsonVal:
 
 ## STATUS (2026-06-16) — core shipped + verified, 7 hard kernels remain
 
-> **Update.** Since this 2026-06-16 snapshot, 6 of the 7 "REMAINING" kernels have
-> since been routed in `Kernel.hs` (`DbDec.nullable`/`required`/`optional` via the
-> `{run, fields}` Decoder redesign; `Db.insertFields`/`updateFields`/
-> `insertFieldsReturning` via the SqlField SQL-gen path). Only `DbDec.money`
-> stays UNROUTED (still needs the Money-ADT codegen wrapper). The per-row notes
-> below are the original blocker analysis, kept for context.
+> **Update.** Since this 2026-06-16 snapshot, all 7 "REMAINING" kernels have
+> since been routed (`DbDec.nullable`/`required`/`optional` via the
+> `{run, fields}` Decoder redesign in `Kernel.hs`; `Db.insertFields`/`updateFields`/
+> `insertFieldsReturning` via the SqlField SQL-gen path). `DbDec.money` is now
+> routed too — the Money-ADT codegen wrapper exists in `ExprEmitter.hs`
+> (`Can.Call (VarKernel/VarTopLevel _ "money")` arms ~lines 1953-1955; helper
+> at lines 4163-4170) emitting
+> `decode_map(|__m| StdMoneyMoney::Money(__m.0, StdMoneyCurrency::CurrencyRaw(__m.1)), db_decode_money(col))`.
+> The per-row notes below are the original blocker analysis, kept for context.
 
 **CLOSED + probe-verified** (`runtime-rust/tests/sky/kernel-parity-probe-dbdec`, real SQLite —
 `rows=…|…  byId1=…  DBDEC PROBE OK`): the shared-Decoder design proven end-to-end.
-- Primitives: `db_dec_string/int/float/bool` (read+parse a column; TOTAL).
+- Primitives: `db_decode_string/int/float/bool` (read+parse a column; TOTAL).
 - Combinators routed to existing json runtime: `succeed/fail/map/andThen/andMap/
-  map2/map3/map4/map5` → `json_dec_*` (added `json_dec_map5` + `json_dec_and_map`).
+  map2/map3/map4/map5` → `decode_*` (added `decode_map5` + `decode_and_map`).
 - `db_query_decode` reworked to take `Decoder<E,A>` + run on `row_to_json` (NULL-
   preserving `sqlx::Row → JsonVal`); new `db_get_by_id_decode` (id BOUND param).
 
@@ -123,7 +126,7 @@ row_to_json(row: &DbRow) -> JsonVal:
 | Kernel | Blocker | Correct fix |
 |---|---|---|
 | `DbDec.nullable` | Sky sig `Decoder a -> Decoder (Maybe a)` passes ONLY the inner decoder, but the opaque `Box<dyn Fn(&JsonVal)>` can't expose WHICH column it reads (Go tracks `d.cols`). A 1-arg runtime that catches inner-`Err`→`Nothing` would conflate NULL with a malformed value → silently wrong. | Make `Decoder` carry column metadata (a struct `{ run: Box<dyn Fn>, cols: Vec<String> }`) so nullable checks those cols for NULL. Touches json + db decoders — a Decoder-type redesign. |
-| `DbDec.money` | runtime `db_dec_money` returns `(Decimal, String)`; Sky `Money` is a per-project GENERATED ADT (`StdMoneyMoney::Money(Decimal, Currency)`) the runtime can't name. | Codegen wrapper: at a `DbDec.money` call site emit a `json_dec_map` that builds the Money ctor from the pair. (`db_dec_money` runtime is correct + total; UNROUTED until the wrapper exists.) |
+| `DbDec.money` | runtime `db_decode_money` returns `(Decimal, String)`; Sky `Money` is a per-project GENERATED ADT (`StdMoneyMoney::Money(Decimal, Currency)`) the runtime can't name. | Codegen wrapper: at a `DbDec.money` call site emit a `decode_map` that builds the Money ctor from the pair. (`db_decode_money` runtime is correct + total. NOW ROUTED — the wrapper ships in `ExprEmitter.hs`; see the STATUS Update note above.) |
 | `DbDec.required` / `optional` | pipeline accumulator is `Box<dyn FnOnce(A)->B>`; `FnOnce` can't satisfy the `Fn` that `Decoder` requires (CLAUDE.md Phase-3 limitation #2 — same wall JsonDecP hit). | Resolve the FnOnce/Clone wall (Arc the accumulator, or the Decoder-struct redesign) shared with JsonDecP. |
 | `Db.insertFields` / `updateFields` | Phase B SQL-gen — NO decoder dependency. Mirror Go `db_auth.go`: dynamic INSERT/UPDATE from `List SqlField` (`SetField`/`OmitField`), identifier-validated `[A-Za-z0-9_.]` (injection gate), all-Omit → 0 rows. | **Most tractable of the 7** — pure runtime + routing, reuse the existing `SqlValue` path. |
 | `Db.insertFieldsReturning` | INSERT … RETURNING + decode → has the same Decoder dependency as queryDecode. | After insertFields: append RETURNING, decode via `row_to_json` + `Decoder`. |
@@ -144,14 +147,18 @@ careful codegen design; do in a focused session, not rushed):**
    opaque generated enum. Fix: CODEGEN destructures the ADT at the call site
    into a runtime-friendly form (e.g. lower `List (String, SqlField)` to a
    `Vec<(String, Option<SqlScalar>)>` before the kernel call; lower `DbDec.money`
-   to a `json_dec_map` building the Money ctor from `db_dec_money`'s pair).
-   `db_dec_money` runtime is already correct + total — only the codegen wrapper
-   is missing. NOTE: Rust's `Db.exec` currently uses `Vec<String>` params, so the
-   broader SqlValue param path is also unimplemented on Rust — the ADT-marshaling
-   work closes that class too.
+   to a `decode_map` building the Money ctor from `db_decode_money`'s pair).
+   `db_decode_money` runtime is already correct + total. **This is now done** —
+   the codegen wrappers ship in `ExprEmitter.hs` (`sqlValueMatchArms` etc.) and
+   the runtime (`SqlParam` enum at db.rs:1390). NOTE: the legacy `db_exec` entry
+   point still takes `Vec<String>` params, but the typed SqlParam path now exists
+   — `db_exec_params` / `db_query_params` (db.rs:621/634) bind `Vec<SqlParam>`,
+   fed by the `StdDbSqlValue → SqlParam` match-arm codegen.
 
-**skydex caveat:** `parity --gaps` shows only `required/optional` + the 3 `Db.*` +
-`Sub.subscribeWebSocket` (false-positive, implemented via ExprEmitter peephole).
-It OVER-credits `nullable`/`money` because their runtime fns exist by name even
-though unrouted/incorrect — skydex is a presence index, not a type checker. The
-**probe is the truth**; nullable/money are NOT usable yet.
+**skydex caveat (as of the 2026-06-16 snapshot):** `parity --gaps` showed only
+`required/optional` + the 3 `Db.*` + `Sub.subscribeWebSocket` (false-positive,
+implemented via ExprEmitter peephole), and OVER-credited `nullable`/`money`
+because their runtime fns existed by name before they were routed/correct —
+skydex is a presence index, not a type checker, so the **probe is the truth**.
+Per the STATUS Update note above, `nullable` and `money` are now routed and
+usable; this caveat is retained as the original snapshot rationale.

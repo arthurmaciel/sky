@@ -46,23 +46,35 @@ Cutting history is half the job; the other half is making what remains
 
 ## Whole-file scope when pruning `runtime-rust/README.md`
 
-When the target is `runtime-rust/README.md`, the sweep is **the entire file,
-every pass** — not a passed-in snippet and not only the sections touched by
-recent work. Archaeology accumulates *precisely* in the sections nobody edited
-this cycle, so "recent work didn't touch it" is the reason to scrub a section,
-not a reason to skip it.
+When the target is `runtime-rust/README.md`, the sweep is **the entire
+regenerated region, every pass** — the `## Getting started` heading DOWNWARD —
+not a passed-in snippet and not only the sections touched by recent work.
+Archaeology accumulates *precisely* in the sections nobody edited this cycle, so
+"recent work didn't touch it" is the reason to scrub a section, not a reason to
+skip it.
 
-- **Enumerate every section first:** `grep -nE '^## ' runtime-rust/README.md`.
-  Walk the list top to bottom and apply the one-test + structure-over-prose +
-  no-stale-dates/SHAs/metrics discipline to EACH `##` section. No section is
-  exempt.
+- **Out of scope — NEVER touch (per `runtime-rust/CLAUDE.md`):**
+  - **Everything ABOVE `## Getting started`** (title, intro, `## Contents`,
+    `## Introduction`, `## Contract`, …) is the maintainer's hand-written
+    content. Do not reword, reformat, or reflow any line above
+    `## Getting started`.
+  - **`<!-- AUTOGEN:<id> BEGIN -->` … `<!-- AUTOGEN:<id> END -->` fenced
+    regions** are machine-owned (written only by
+    `runtime-rust/scripts/readme-tables.py` from CI sweep results). Skip them
+    entirely — read-only. In `README.md` these are `AUTOGEN:examples-table`,
+    `AUTOGEN:perf-verdict`, and `AUTOGEN:static-table`.
+- **Enumerate the in-scope sections first:** `rg -nE '^## ' runtime-rust/README.md`,
+  then start at `## Getting started` and ignore everything above it. Walk the
+  remaining list top to bottom and apply the one-test + structure-over-prose +
+  no-stale-dates/SHAs/metrics discipline to EACH in-scope `##` section, leaving
+  any AUTOGEN fenced block untouched.
 - **Recurring high-drift sections — scrub these by name every pass:** in
   `runtime-rust/README.md`, `## Project status` and `## Known limitations`; in
   `docs/TECHNICAL-DETAILS.md` (where the deep internals now live),
   `## Architecture`, `## Verification state`, and
   `## Soundness, correctness and security`. These have repeatedly gone stale and
   been skipped; treat them as mandatory stops, not optional ones.
-- A pass that left any `##` section unreviewed is incomplete.
+- A pass that left any in-scope `##` section unreviewed is incomplete.
 
 ## CUT — pure archaeology
 
@@ -106,10 +118,12 @@ not a reason to skip it.
 
 1. **Scope the sweep.** List the target files (one doc, or a code tree). For
    code, prefer one language/dir at a time so judgment stays consistent. When
-   the target is `runtime-rust/README.md`, the scope is the WHOLE file — run
-   `grep -nE '^## ' runtime-rust/README.md` and review every `##` section top to
-   bottom (see "Whole-file scope" above), with the named high-drift sections as
-   mandatory stops. Never narrow to "the parts recent work touched".
+   the target is `runtime-rust/README.md`, the scope is the regenerated region
+   (`## Getting started` downward) — run `rg -nE '^## ' runtime-rust/README.md`
+   and review every in-scope `##` section top to bottom (see "Whole-file scope"
+   above for the maintainer-owned + AUTOGEN exclusions), with the named
+   high-drift sections as mandatory stops. Never narrow to "the parts recent
+   work touched".
 2. **Read before cutting.** Never blanket-delete by regex — a `2026-` date can
    sit inside a load-bearing sentence. Edit line-by-line / comment-by-comment.
 3. **Rewrite, don't just delete.** Often the fix is to *compress*: a 6-line

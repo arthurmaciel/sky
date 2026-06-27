@@ -55,7 +55,7 @@ Compile.hs ──(reached : Set Dce.Ref  +  FFI-generic CallInstances)──► 
             (E4400, region from _ci_region, hint)             rustc monomorphises call sites
                                                                           │
             PARAMETRIC-FOREIGN TYPE RENDERING                             ▼
-            Box1 [Int] → ::box1::Box1<i64>                    <crate>_generics.rs
+            Box1 [Int] → ::box1::Box1<i64>                    sky_ffi_generics.rs
             (TypeRenderer; recursive; Wall #1 crateHome)      (sentinel-wrapped, run through
                           (used by both the wrapper sig        the SAME S4 tree-shake filter,
                            and every call-site value type)     kept iff base name reached)
@@ -86,9 +86,9 @@ Compile.hs ──(reached : Set Dce.Ref  +  FFI-generic CallInstances)──► 
    `Ord → ::std::cmp::Ord`, `Clone → ::core::clone::Clone`, `Default → ::core::default::
    Default`), body substituting `{T}`/`{argJ}`. The bounds are load-bearing (the body
    needs them to compile) and satisfied-by-construction (the check already gated). **The
-   synthesis primitive ALREADY BUILT** (`FfiInstance.hs synthesiseWrapper`) — to be
+   synthesis primitive ALREADY BUILT** (`FfiInstance.hs synthesiseGenericWrapper`) — to be
    adapted from per-instance to one-generic-wrapper.
-5. **Output** (`Project.hs`). Write a separate **`<crate>_generics.rs`** (build-synthesized),
+5. **Output** (`Project.hs`). Write a separate **`sky_ffi_generics.rs`** (build-synthesized),
    each wrapper sentinel-wrapped, run through the SAME S4 `writeFilteredBindings`
    tree-shake (kept iff its base `FfiRef` is reached). `_bindings.rs` (pre-generated
    non-generic surface) is untouched.
@@ -134,7 +134,7 @@ blocks:
   asserts the `E4400` **Sky diagnostic** (region + hint), NOT a cargo-fail.
 - **Closed-set negative:** an out-of-closed-set type-arg asserts a Sky error.
 - **Tree-shake check:** with two generic fns where the program calls one, assert only that
-  one's wrapper appears in `_generics.rs`.
+  one's wrapper appears in `sky_ffi_generics.rs`.
 - Unit specs (targeted `--match`) for the bindability check + the type renderer. Wire into
   `runtime-rust/scripts/ffi-fixtures-test.sh`.
 - **Light local verify only** (this box is disk-constrained): `cabal build exe:sky` +
@@ -144,14 +144,14 @@ blocks:
 ## Go-byte-identical (shared-code gate)
 Every new path gates on an FFI binding carrying a `"generic"` block. Go's inspector drops
 generics at the producer, so no Go kernel.json carries one → `_ffn_generic = Nothing` for
-all Go → the threading, the check, the synthesis, and `_generics.rs` are all dead for Go.
+all Go → the threading, the check, the synthesis, and `sky_ffi_generics.rs` are all dead for Go.
 The `FfiRegistry` decode is additive (`.:?`). Go `.skyi`/kernel.json/codegen byte-identical.
 
 ## Boundary
 - **Shared / epic (authorized):** `Compile.hs` (instance threading), the bindability check
   + its `Diagnostic` (`Sky.Reporting`). Additive; Go unaffected.
 - **Rust boundary:** the Rust `TypeRenderer` (parametric-foreign rendering),
-  `Ffi.hs`/`FfiInstance.hs`/`Project.hs` (synthesis + `_generics.rs`), the fixture, the
+  `Ffi.hs`/`FfiInstance.hs`/`Project.hs` (synthesis + `sky_ffi_generics.rs`), the fixture, the
   sweep wiring. Do NOT touch the Go inspector, `src/Sky/Generate/Go/`, `runtime-go/`,
   `sky-stdlib/`, author `examples/`. `FfiTypeResolve` (Wall #1) stays as-is.
 
@@ -162,7 +162,7 @@ The `FfiRegistry` decode is additive (`.:?`). Go `.skyi`/kernel.json/codegen byt
   threading feeds ONLY the bindability check.
 - **Q2** boundary value → concrete by-value via parametric-foreign type rendering, no
   boxing (upholds the no-`dyn Any` thesis).
-- **Q3** location/bounds → separate build-synthesized `_generics.rs`, sentinel-filtered by
+- **Q3** location/bounds → separate build-synthesized `sky_ffi_generics.rs`, sentinel-filtered by
   base name; bounds rendered onto `<T: …>` from metadata (load-bearing for the body,
   satisfied-by-construction).
 - **Bindability check** lands in Wall #2 (closed-set AND trait-bound), not deferred.

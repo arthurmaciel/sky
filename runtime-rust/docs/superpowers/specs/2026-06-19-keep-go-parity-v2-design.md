@@ -1,6 +1,6 @@
 # keep-go-parity v2 — design
 
-**Date:** 2026-06-19 · **Branch:** `feat/runtime-rust` (fork-only) · **Status:** draft for review
+**Date:** 2026-06-19 · **Branch:** `feat/runtime-rust` (fork-only) · **Status:** implemented (skill `runtime-rust/plugins/sky-rust-backend/skills/implement-parity-gap`; `changed_examples <base>` in `runtime-rust/scripts/lib/examples.sh`; state-file resume in `runtime-rust/scripts/keep-go-parity.sh`)
 
 ## Goal
 
@@ -99,7 +99,7 @@ sweep (phase 5) and the incremental audit (phase 6). Scope = **union** of:
 |---|---|---|
 | `examples/NN-*` | those example dirs (+ any **new** dir, always) | an example depends only on its own source — precise |
 | `runtime-rust/src/**` (a kernel) | `skydex covers <kernel>` → consumer examples | a runtime change can regress any consumer |
-| `src/Sky/Generate/Rust/**` (codegen) | broad — emission changes for everyone | no clean per-example map |
+| `src/Sky/Generate/Rust/**` or `src/Sky/Build/Rust/**` (codegen) | broad — emission changes for everyone | no clean per-example map |
 | — (always) | **representative-per-shape floor** (1× cli/server/live/tui/webview) | baseline coverage when the map is imprecise |
 
 - The new `changed_examples <base>` helper lives in **`lib/examples.sh`** (the

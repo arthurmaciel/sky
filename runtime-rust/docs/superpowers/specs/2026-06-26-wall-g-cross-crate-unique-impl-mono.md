@@ -161,12 +161,14 @@ itself bind `send` end-to-end — `send`'s Self is the generic `CustomizableStri
 further sub-crates (**WALL-I**). WALL-G is the *gating* piece both depend on.
 
 ## 5. Verification plan
-- **Fixture `91-ffi-cross-crate-impl`:** two local path-crates — `trait-crate`
-  (defines `trait Wire: Send + Sync` + a `fn op<C: Wire>(&self, c: &C)` on a concrete
+- **Fixture `91-ffi-cross-crate-impl`:** two local `file://` git path-crates — `wire-crate`
+  (defines `trait Wire: Send + Sync + 'static` + a `fn op<C: Wire>(&self, c: &C)` on a concrete
   `Req`) and `client-crate` (the unique `impl Wire for RealClient` + `RealClient`).
   A Sky `Main.sky` that adds both, calls `Req.op` with a `RealClient`, asserts
-  `[ALL OK]`. NEGATIVE: a second `impl Wire for Other` in a third crate makes `op`
-  drop again (ambiguous) — asserted absent.
+  `[ALL OK]`. NEGATIVE: a second `impl Wire for Other` makes `op` drop again
+  (ambiguous) — covered by the inspector unit test
+  `wallg_xc_unique_only_when_exactly_one_impl` (registers 2 distinct impls → `None`),
+  not a third fixture crate.
 - **Guardian-final:** `SKY_DCE=0` build of the fixture + a real cargo build.
 - **Real-crate proof (later, with WALL-H/I):** `send` against async-stripe rc.6.
 

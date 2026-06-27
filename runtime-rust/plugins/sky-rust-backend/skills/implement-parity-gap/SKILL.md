@@ -95,8 +95,9 @@ the single integration build, the unit tests, AND the equivalence run. Batch
 related kernels (one subsystem) per swarm so a break is bisectable.
 
 **Boundary (every gap):** runtime (`runtime-rust/`) + Rust codegen
-(`src/Sky/Generate/Rust/`, `src/Sky/Build/Rust/`) + `runtime-rust/tests/sky/` /
-`examples/rust/` fixtures only. NEVER the shared stdlib (`sky-stdlib/`), the Go
+(`src/Sky/Generate/Rust/`, `src/Sky/Build/Rust/`) + `runtime-rust/tests/sky/`
+fixtures only (parity-gap fixtures go here; `examples/rust/` is for real,
+complete Sky projects only). NEVER the shared stdlib (`sky-stdlib/`), the Go
 backend, or the author's `examples/`.
 
 ## Common mistakes

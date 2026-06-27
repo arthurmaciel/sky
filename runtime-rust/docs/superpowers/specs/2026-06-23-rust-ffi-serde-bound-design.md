@@ -22,8 +22,9 @@ owned return, or directly inside `Result<T,_>` / `Vec<T>` / `Option<T>`); ANY oc
 - **C-G3 [make-or-break]** positive occurrence-census walk over the fn signature; reduce only if EVERY
   `T` occurrence is admissible (by-value param / owned return / `Result/Vec/Option<T>`); else drop. Add
   NEGATIVE fixtures: `&T`, `(T,T)`, `HashMap<K,T>`, `T` behind another bound → all DROP.
-- **C-G2** the wrapper's `serde_json::Value` must use the RUNTIME's `serde_json` (share the dep); gate
-  `usesSerdeJson` so it lands in the generated Cargo.toml. serde version-skew (a crate pinning a
+- **C-G2** the wrapper's `serde_json::Value` must use the RUNTIME's `serde_json` (share the dep); reuse
+  the existing `usesJson` gate (Types.hs:28 — no separate `usesSerdeJson` gate exists) so a serde-reduced
+  binding pulls `serde_json` into the generated Cargo.toml. serde version-skew (a crate pinning a
   non-1.x / future-serde) → a LOUD cargo-fail (E0277), acceptable for v1, never a runtime fault; no
   inspect-time version check is possible — document it.
 - **C-G1** recognize serde traits by RESOLVED canonical path (`serde::Serialize`/`serde::de::DeserializeOwned`

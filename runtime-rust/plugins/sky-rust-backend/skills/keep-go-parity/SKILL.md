@@ -1,6 +1,6 @@
 ---
 name: keep-go-parity
-description: One command to ingest the latest upstream and re-prove the Rust backend stays at Go parity. Runs sky-rust-backend:sync-with-upstream (resolving merge conflicts autonomously, asking only on a real design decision), then sky-rust-backend:examples-sweep always (ONE sweep that builds, runs, AND asserts Go≡Rust equivalence per example — BUILD·RUN·EQUIV table), plus sky-rust-backend:examples-perf-sweep when any new example or a Go-backend perf change lands. RED examples are root-caused + fixed in-boundary via the autonomous swarm after the full sweep. Use when the user asks to keep Go parity, sync upstream and re-verify, or after an upstream release. Trigger: /sky-rust-backend:keep-go-parity.
+description: One command to ingest the latest upstream and re-prove the Rust backend stays at Go parity. Runs the resumable v2 chain (state-file driven): sky-rust-backend:sync-with-upstream (resolving merge conflicts autonomously, asking only on a real design decision) → skydex re-index → sky-rust-backend:implement-parity-gap for new Go functionality → re-index → a scoped BUILD·RUN·EQUIV sweep over the diff blast-radius → sky-rust-backend:quality-audit + sky-rust-backend:principles-audit of the diff → sky-rust-backend:update-docs → sky-rust-backend:push, where CI runs the full 3-OS examples-sweep + examples-perf-sweep. RED examples surfaced by the full sweep are root-caused + fixed in-boundary via the autonomous swarm afterward. The non-agent shortcut keep-go-parity.sh run instead force-runs the full examples-sweep and surfaces perf as a recommendation. Use when the user asks to keep Go parity, sync upstream and re-verify, or after an upstream release. Trigger: /sky-rust-backend:keep-go-parity.
 ---
 
 # keep-go-parity
@@ -20,8 +20,8 @@ adheres to them.
 
 ## Workflow — the v2 chain (resumable via .skycache/keep-go-parity.state)
 
-Resume is driven by the **run-state file**, NOT the last commit (phases 2/4/5/6
-produce zero commits). On entry: if a state file exists, resume at
+Resume is driven by the **run-state file**, NOT the last commit (phases 2/4/5
+produce zero commits, and phase 6 produces none when the audit is clean). On entry: if a state file exists, resume at
 `last_completed_phase + 1`; else `state-init` (records BASE = HEAD) and start at
 phase 1. `keep-go-parity.sh --restart` forces a fresh run. After each phase
 completes, `keep-go-parity.sh state-done <N>`.
@@ -45,6 +45,13 @@ completes, `keep-go-parity.sh state-done <N>`.
   runtime/codegen changes the scope widens broadly and **CI's full 3-OS sweep on
   push (phase 8) is the real gate** — keep-go-parity does NOT gate on the scoped
   local run for runtime/codegen changes.
+- **Swarm-fix RED rows** (the swarm-fix step the frontmatter + Principles section
+  reference). Any RED example surfaced by the full sweep — CI's 3-OS sweep at
+  phase 8, or the scoped phase-5 run for example-source changes — is root-caused +
+  fixed in-boundary via **sky-rust-backend:autonomous-swarm**, adhering to the
+  Principles above, AFTER the full sweep (a complete RED list lets the swarm batch
+  related fixes). NOT amber `go-ref-broken` (an upstream Go bug, not a Rust-side
+  regression).
 - `skydex update` is **early** (2 + 4), never last — phases 3/5/6 consume the index.
 - Work commits stay separate from the state file (bisectability); the state file
   is bookkeeping, never bundled into a work commit.
@@ -75,8 +82,11 @@ their reminders, and the swarm-fix step); `run` is for a user without an agent.
   overrides. The `run` subcommand forces past it automatically.
 - The planner classifies a new example as web/live by grepping its `src/` for
   `Std.Live`/`Live.app`/`Server.listen`/`Sky.Http.Server`.
-- `PLAN_PERF` on `GO_BACKEND_CHANGED` is a *candidate* — the Go backend changing
-  doesn't always mean a perf delta; the agent confirms before running perf.
+- `PLAN_PERF` on `GO_BACKEND_CHANGED` (the planner's `plan`/`run` path) is a
+  *candidate* — the Go backend changing doesn't always mean a perf delta. In the
+  v2 agent chain perf is delegated to CI (phase 8), so this gating is
+  informational only there; on the non-agent `run` path perf is surfaced as a
+  recommendation, never auto-run (it needs apps closed).
 - The full chain can run >1 h (examples-sweep ~30–40 min + optional perf ~1 h).
   Run each sweep in the background and wait.
 

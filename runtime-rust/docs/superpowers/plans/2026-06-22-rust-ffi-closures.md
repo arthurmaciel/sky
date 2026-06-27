@@ -26,7 +26,7 @@
 | `src/Sky/Build/Rust/Ffi.hs` / `src/Sky/Generate/Rust/Project.hs` | Emit the closure wrapper into `<crate>_generics.rs`; S4 tree-shake unchanged | Modify |
 | `src/Sky/Build/Compile.hs` | Thread the closure-arg slot trait-kind from the FFI signature to the call-site lambda lowering | Modify |
 | `src/Sky/Generate/Rust/Builder/ExprEmitter.hs` | At a `Can.Call` FFI site with a direct-`Can.Lambda` closure arg: run the capture-allowlist gate, emit `E4400` or the move-closure | Modify |
-| `tools/sky-ffi-inspect-rs/src/main.rs` | Emit per-closure-arg metadata `{argIndex, traitKind, byRef, argTypes, ret}`; coverage tags `closure-by-ref-noclone` / `closure-mut-slot` / `closure-ho-return` / `closure-indirect-noanalysis` | Modify |
+| `tools/sky-ffi-inspect-rs/src/main.rs` | Emit per-closure-arg metadata `{argIndex, traitKind, byRef, argTypes, ret}`; coverage tags `closure-by-ref-noclone` / `closure-mut-slot` / `closure-ho-return` / `closure-nonrust-abi` / `closure-indirect-noanalysis` | Modify |
 | `test/Sky/Build/Rust/FfiCallSpec.hs`, `FfiInstanceSpec.hs` | Unit specs for the new ADT/parse/render + the allowlist + capture-gate | Modify |
 
 ---
@@ -231,10 +231,10 @@ main =
     let
         m = Result.withDefault [] mapped
         k = Result.withDefault [] kept
-        _ = println ("mapped sum -> " ++ String.fromInt (List.foldl (+) 0 m))
+        _ = println ("mapped sum -> " ++ String.fromInt (List.foldl (\a b -> a + b) 0 m))
         _ = println ("kept len   -> " ++ String.fromInt (List.length k))
     in
-    if List.foldl (+) 0 m == 60 && List.length k == 2 then
+    if List.foldl (\a b -> a + b) 0 m == 60 && List.length k == 2 then
         println "[ALL OK]"
     else
         println "[FAIL]"
@@ -324,9 +324,9 @@ it "#28: renders a multi-call Fn closure param as <Fj: Fn(..)+Clone>" $ do
                  , TRClosure FnKind False [TRParam 0] (TRParam 1) ]
                  (TRCtor "Vec" [TRParam 1])
     -- the closure param's Rust type is the fresh F-param, its bound carries +Clone
-    closureBounds call `shouldBe` ["F1: Fn(A) -> B + ::core::clone::Clone"]
+    closureBounds call ["A", "B"] `shouldBe` ["F1: Fn(A) -> B + ::core::clone::Clone"]
 ```
-(Add a small exposed helper `closureBounds :: Call -> [String]` collecting each closure arg's `<Fj: …>` clause so the wrapper synthesis can splice them into the `<…>` list.)
+(Add a small exposed helper `closureBounds :: Call -> [String] -> [String]` — the `[String]` is the generic-param name list threaded to `renderTypeRef` — collecting each closure arg's `<Fj: …>` clause so the wrapper synthesis can splice them into the `<…>` list.)
 
 - [ ] **Step 2: Run — verify FAIL.**
 Run: `cabal test --test-options='--match "#28: renders a multi-call Fn"'`  Expected: FAIL.
@@ -341,17 +341,18 @@ closureNeedsClone :: ClosureKind -> Bool
 closureNeedsClone FnOnceKind = False; closureNeedsClone _ = True
 
 -- one `Fj: Kind(args) -> ret [+ Clone]` per closure arg, index j = wrapper-arg index.
-closureBounds :: Call -> [String]
-closureBounds c =
+-- `params` is the generic-param name list threaded to renderTypeRef.
+closureBounds :: Call -> [String] -> [String]
+closureBounds c params =
     [ "F" ++ show j ++ ": " ++ closureKindStr k
-        ++ "(" ++ intercalate ", " (map renderTypeRef as_) ++ ") -> " ++ renderTypeRef r
+        ++ "(" ++ intercalate ", " (map (renderTypeRef params) as_) ++ ") -> " ++ renderTypeRef params r
         ++ (if closureNeedsClone k then " + ::core::clone::Clone" else "")
     | (j, TRClosure k _ as_ r) <- zip [0..] (_call_argTypes c) ]
 
 -- renderArgType: a TRClosure arg renders to its fresh F-param name.
-renderArgTypeAt :: Int -> TypeRef -> String
-renderArgTypeAt j (TRClosure{}) = "F" ++ show j
-renderArgTypeAt _ t = renderTypeRef t
+renderArgTypeAt :: [String] -> Int -> TypeRef -> String
+renderArgTypeAt _      j (TRClosure{}) = "F" ++ show j
+renderArgTypeAt params _ t             = renderTypeRef params t
 ```
 Thread `renderArgTypeAt` through `renderCall`'s param-list emission; for a `byRef` closure arg, wrap the call-site argument expression in the owned-clone bridge.
 
@@ -373,12 +374,13 @@ git commit -m "feat(ffi): render closure args as generic <Fj: Fn(..)+Clone> wrap
 - Modify: `src/Sky/Build/Rust/FfiInstance.hs`
 - Test: `test/Sky/Build/Rust/FfiInstanceSpec.hs`
 
-- [ ] **Step 1: Failing test** — the allowlist accepts closed-`Clone` types and rejects f64-only-Clone vs nothing, and rejects non-closed:
+- [ ] **Step 1: Failing test** — the allowlist accepts closed-`Clone` types (incl. `f64`, which IS Clone — only Hash/Eq/Ord fail) and rejects a type outside the closed set:
 ```haskell
 it "#28: rustTypeIsClone is a positive allowlist over closed Clone types" $ do
     map rustTypeIsClone ["i64","String","bool","char","()","Vec<i64>","SkyMaybe<i64>"]
         `shouldBe` replicate 7 True
     rustTypeIsClone "f64" `shouldBe` True          -- f64 IS Clone (only Hash/Eq/Ord fail)
+    rustTypeIsClone "SomeRecord" `shouldBe` False  -- not in the closed set ⇒ not provably Clone
 ```
 
 - [ ] **Step 2: Run — verify FAIL.** Run: `cabal test --test-options='--match "#28: rustTypeIsClone"'`  Expected: FAIL.
@@ -493,7 +495,7 @@ it "#28: Fn(&mut T) / -> &U / non-Clone &A drop with a coverage reason" $ do
         `shouldBe` Just "closure-mut-slot"
 ```
 
-- [ ] **Step 2: Run — verify FAIL.** **Step 3: Implement** `closureDropReason :: TypeRef -> Maybe String` returning `closure-mut-slot` / `closure-ho-return` / `closure-by-ref-noclone`; the bindability check drops the method + records the reason. **Step 4: PASS. Step 5: Commit** `feat(ffi): drop+report unsound closure shapes (B6, #28)`.
+- [ ] **Step 2: Run — verify FAIL.** **Step 3: Implement** `closureDropReason :: TypeRef -> Maybe String` returning `closure-mut-slot` / `closure-ho-return` / `closure-by-ref-noclone`; the bindability check drops the method + records the reason. **Step 4: PASS. Step 5: Commit** `feat(ffi): drop+report unsound closure shapes (borrow-escape/B4, #28)`.
 
 ---
 
@@ -607,6 +609,6 @@ fn closure_param_emits_closure_argtype() {
 ---
 
 ## Self-review notes
-- **Spec coverage:** scope (Phase 0 fixture + 1–4) · 6 constraints B1 (Task 3.1 AssertUnwindSafe-by-value) B2 (Task 3.1 panic=unwind guard) B3 (Tasks 3.1/5.1 Rust-ABI-only) B4 (Task 3.2 bridge) B5 (Tasks 2.1/4.1 positive allowlist) B6/borrow-escape (Task 3.3) · owned-clone bridge (3.2) · drop granularity (2.2 E4400 user-side, 3.3/5.2 method-side coverage) · direct-lambda-only (4.2) · inspector metadata (5) · proof bar fixture+real-crate (0, 6.2). All mapped.
+- **Spec coverage:** scope (Phase 0 fixture + 1–4) · 5 constraints B1 (Task 3.1 AssertUnwindSafe-by-value) B2 (Task 3.1 panic=unwind guard) B3 (Tasks 3.1/5.1 Rust-ABI-only) B4 (Task 3.2 bridge + Task 3.3 borrow-escape drop) B5 (Tasks 2.1/4.1 positive allowlist) · owned-clone bridge (3.2) · drop granularity (2.2 E4400 user-side, 3.3/5.2 method-side coverage) · direct-lambda-only (4.2) · inspector metadata (5) · proof bar fixture+real-crate (0, 6.2). All mapped.
 - **No placeholders:** the one deliberate deferral is the real-crate CHOICE (Task 6.2 Step 1 names the selection procedure + candidates), not a code gap.
 - **Type consistency:** `TRClosure ClosureKind Bool [TypeRef] TypeRef`, `ClosureKind {FnKind,FnMutKind,FnOnceKind}`, `skyCaptureIsClone`, `gateClosureArg`, `mkCaptureNotCloneError`, `closureDropReason`, `closureBounds` used consistently across Phases 1–4.

@@ -29,7 +29,7 @@ After Course 2 ("GitHub CI — Sky → Rust backend as an example") the reader c
 - explain what CI is and why it exists, from zero;
 - read and write GitHub Actions workflows from simple to complex;
 - fully understand this repo's `examples-sweep.yml` (the cornerstone gate, the
-  dispatch-only perf/static jobs, the CI→README automation), and **modify/improve
+  dispatch/schedule (non-gating) perf/static jobs, the CI→README automation), and **modify/improve
   it** safely.
 
 ## Grounding rule

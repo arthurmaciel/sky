@@ -15,14 +15,18 @@ developer decides; you record.
 
 ## Workflow (every invocation)
 
-1. **Run the harvester** (~5–10 min — clippy ×2 + tests; background + wait):
+1. **Run the harvester** (~5–10 min — clippy gate + per-feature-subset matrix +
+   advisory lints + tests; background + wait):
    ```bash
    bash runtime-rust/scripts/quality-audit.sh            # default: runtime-rust/
    bash runtime-rust/scripts/quality-audit.sh examples/07-todo-cli/sky-out/rust   # generated code
    ```
-   Hard gate (`clippy -D warnings` + `cargo test`) + advisory (curated
-   restriction/pedantic lints, panic-vector sweep, `unsafe`/SAFETY, `dyn Any`,
-   undocumented `#[allow]`). Logs under `~/.cache/sky/quality-audit/`.
+   Hard gate (`clippy -D warnings` over `--all-features` + a per-feature-subset
+   `--lib` clippy matrix + `cargo test`) + advisory (curated restriction/pedantic
+   lints, panic-vector sweep, `unsafe`/SAFETY, `dyn Any`, undocumented `#[allow]`,
+   a security grep for timing-oracle / SQL-injection / SSRF sinks, and a
+   `cargo-audit` + `cargo-deny` supply-chain leg). Logs under
+   `~/.cache/sky/quality-audit/`.
 
 2. **Hard gate must be PASS** (`clippy -D warnings` already *denies*
    `unwrap_used`/`expect_used`; + tests). Fix any gate/material defect at root
@@ -32,8 +36,11 @@ developer decides; you record.
    non-test panic vectors · undocumented `unsafe` · unsound/payload-dependent
    `dyn Any` · undocumented `#[allow]` · security/correctness defects · material
    efficiency (hot-path clones/allocs) · logic/footguns found by review ·
-   **naming/clarity inconsistencies** (see below) — lean on Gortex `search_ast` /
-   `find_clones` / `analyze hotspots`. The **1000s of cosmetic lints are NOT
+   **naming/clarity inconsistencies** (see below) — lean on the repo's
+   `skydex` (`covers` / `deps` / `locate`) + `rg` free-text search for
+   AST-shaped idioms (`runtime-rust/CLAUDE.md` "Code navigation"; a machine-wide
+   MCP indexer mandated by the global `~/.claude/CLAUDE.md` does NOT apply here).
+   The **1000s of cosmetic lints are NOT
    material** — fix the cheap ones, document the rest inline at the call site;
    never drag the developer through them.
 

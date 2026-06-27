@@ -70,8 +70,33 @@ all_examples() {
 # NOT no-filename). `-N`/`--no-line-number` + `-o`/`--only-matching` + `-r`/
 # `--replace` capture just the module name. rg recurses by default; we drive the
 # file list via `find … -exec rg … +` so the walk covers every `.sky` under src/.
+# ── _build_stdlib_index: ONE-TIME in-memory index of sky-stdlib module paths ──
+# is_out_of_scope is called once per example and, pre-index, ran a FULL
+# `find sky-stdlib` tree walk PER import just to suffix-match a bare/partial
+# stdlib name. sky-stdlib does not change during a sweep, so the walk is done
+# ONCE here: every `/`-delimited suffix of each module path (minus `.sky`) is
+# recorded as a key, reproducing the old `-path "*/<rel>.sky"` glob as an O(1)
+# associative-array lookup. `declare -gA` (no `=()`) leaves an already-built
+# index intact across a re-source; the BUILT flag is the real idempotency guard.
+declare -gA _SKY_STDLIB_INDEX
+_build_stdlib_index() {
+  [ -n "${_SKY_STDLIB_INDEX_BUILT:-}" ] && return 0
+  local f rest
+  while IFS= read -r f; do
+    rest="${f%.sky}"
+    while :; do
+      _SKY_STDLIB_INDEX["$rest"]=1
+      case "$rest" in
+        */*) rest="${rest#*/}" ;;
+        *)   break ;;
+      esac
+    done
+  done < <(find sky-stdlib -type f -name '*.sky' 2>/dev/null)
+  _SKY_STDLIB_INDEX_BUILT=1
+}
+
 is_out_of_scope() {
-  local dir="$1" m rel
+  local dir="$1" m rel localpaths localdone=""
   # Explicit out-of-scope: skyshop-rs is the heavyweight real-world FFI proof
   # (firestore + async-stripe via fork-local wrapper crates). Its generated Rust
   # FFI bindings are NOT committed (`.skycache/ffi/rust` is gitignored), so a CI
@@ -79,14 +104,23 @@ is_out_of_scope() {
   # long, flaky introspection unsuited to the per-commit gate. It is verified
   # locally via `examples/rust/skyshop-rs/verify.sh` instead.
   case "$dir" in */skyshop-rs) return 0 ;; esac
+  _build_stdlib_index
   while read -r m; do
     [ -z "$m" ] && continue
     case "$m" in Sky.*|Std.*|Rust.*) continue ;; esac # Sky stdlib / Rust-FFI wrapper → in scope
     rel="${m//.//}"
-    # Sky stdlib imported by a bare/partial name (suffix-match in sky-stdlib).
-    if find sky-stdlib -type f -path "*/${rel}.sky" 2>/dev/null | grep -q .; then continue; fi
-    # Local module → a `.sky` for it exists somewhere under the project.
-    if find "$dir" -type f -path "*/${rel}.sky" 2>/dev/null | grep -q .; then continue; fi
+    # Sky stdlib imported by a bare/partial name (in-memory suffix index).
+    [ -n "${_SKY_STDLIB_INDEX[$rel]:-}" ] && continue
+    # Local module → a `.sky` for it exists somewhere under the project. The dir
+    # walk is done at most ONCE per example, lazily on the first unresolved
+    # import (all-stdlib examples never pay for it). `rel` is `[A-Za-z0-9_/]`
+    # only (dots → slashes, no glob metachars), so the case-glob is a safe
+    # equivalent of the old `-path "*/<rel>.sky"`.
+    if [ -z "$localdone" ]; then
+      localpaths=$'\n'"$(find "$dir" -type f -name '*.sky' 2>/dev/null)"$'\n'
+      localdone=1
+    fi
+    case "$localpaths" in *"/${rel}.sky"$'\n'*) continue ;; esac
     return 0                                          # unresolvable → Go-package → OUT
   done < <(find "$dir/src" -type f -name '*.sky' -exec \
              rg --no-filename -No '^[[:space:]]*import[[:space:]]+([A-Za-z0-9_.]+)' -r '$1' {} + 2>/dev/null)
@@ -141,11 +175,18 @@ example_shape() {
 
 # ── build_set: all_examples minus Go-FFI (unresolvable-import examples) ──────
 build_set() {
-  local d
+  # Memoized: build_set is deterministic from disk within a process, and a single
+  # changed_examples call fans out into it up to three times (broad branch +
+  # representative_floor + _intersect_build_set); run_set/perf_set add more.
+  # Compute once, replay the cached lines on every later call in the same process.
+  if [ -n "${_SKY_BUILD_SET+x}" ]; then printf '%s' "$_SKY_BUILD_SET"; return 0; fi
+  local d out=""
   while IFS= read -r d; do
     is_out_of_scope "$d" && continue
-    printf '%s\n' "$d"
+    out+="$d"$'\n'
   done < <(all_examples)
+  _SKY_BUILD_SET="$out"
+  printf '%s' "$out"
 }
 
 # ── run_set / perf_set: identical to build_set ───────────────────────────────

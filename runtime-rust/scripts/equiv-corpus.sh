@@ -33,6 +33,13 @@ SKY="${SKY_BIN:-$REPO/sky-out/sky}"
 
 FIXROOT="runtime-rust/tests/sky"
 
+# Per-run PRIVATE scratch dir (mode 700, unpredictable name) for every transient
+# artifact — build logs, copied Go binaries, run outputs, diffs. Replaces the old
+# attacker-predictable /tmp/equiv-corpus-* names (CWE-377: shared world-writable
+# dir + guessable path = insecure-temp-file + symlink-follow surface). NOT removed
+# on exit so a failing run's diff/logs stay inspectable (the FAIL rows point here).
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/equiv-corpus.XXXXXX")" || { echo "ERROR: mktemp -d failed." >&2; exit 2; }
+
 # ── The curated corpus — pure-stdlib, deterministic-after-normalisation, cli ──
 # Add a fixture here ONLY when its stdout is identical on both backends modulo the
 # normalised tokens below. A Rust-codegen-regression fixture qualifies iff it is
@@ -69,7 +76,7 @@ norm() {
 # Build one backend for a fixture; echo the resulting binary path, or "" on fail.
 # $1=fixture-dir $2=go|rust
 build_one() {
-  local d="$1" t="$2" logp="/tmp/equiv-corpus-$(basename "$d")-$2.build.log"
+  local d="$1" t="$2" logp="$WORK/$(basename "$d")-$2.build.log"
   ( cd "$d" && rm -rf sky-out .skycache .skydeps ) >/dev/null 2>&1
   if [ "$t" = go ]; then
     # Force --backend go: the corpus fixtures pin `backend = "rust"` in sky.toml
@@ -78,8 +85,8 @@ build_one() {
     ( cd "$d" && timeout 300 "$SKY" build --backend go src/Main.sky ) >"$logp" 2>&1 || return 1
     [ -x "$d/sky-out/app" ] || return 1
     # Copy the Go binary OUT before the rust build's `rm -rf sky-out` wipes it
-    # (both backends share $d/sky-out). Stable per-fixture path under TMPDIR.
-    local dst="${TMPDIR:-/tmp}/equiv-corpus-$(basename "$d").gobin"
+    # (both backends share $d/sky-out). Stable per-fixture path in the scratch dir.
+    local dst="$WORK/$(basename "$d").gobin"
     cp -f "$d/sky-out/app" "$dst" || return 1
     printf '%s\n' "$dst"
   else
@@ -99,14 +106,14 @@ for n in "${FIXTURES[@]}"; do
   gobin="$(build_one "$d" go)"   || { rows+=("SKIP  $n  (go build failed — not a pure-stdlib corpus member)"); skip=$((skip+1)); continue; }
   rustbin="$(build_one "$d" rust)" || { rows+=("FAIL  $n  (rust build failed)"); fail=$((fail+1)); continue; }
 
-  gol="/tmp/equiv-corpus-$n.go.out"; rsl="/tmp/equiv-corpus-$n.rust.out"
+  gol="$WORK/$n.go.out"; rsl="$WORK/$n.rust.out"
   exercise_cli "$gobin"   "$gol" 25 || { rows+=("FAIL  $n  (go run panicked/hung)"); fail=$((fail+1)); continue; }
   exercise_cli "$rustbin" "$rsl" 25 || { rows+=("FAIL  $n  (rust run panicked/hung)"); fail=$((fail+1)); continue; }
 
-  if diff <(norm "$gol") <(norm "$rsl") >"/tmp/equiv-corpus-$n.diff" 2>&1; then
+  if diff <(norm "$gol") <(norm "$rsl") >"$WORK/$n.diff" 2>&1; then
     rows+=("ok    $n"); pass=$((pass+1))
   else
-    rows+=("FAIL  $n  (stdout DIFFER — /tmp/equiv-corpus-$n.diff)"); fail=$((fail+1))
+    rows+=("FAIL  $n  (stdout DIFFER — $WORK/$n.diff)"); fail=$((fail+1))
   fi
   ( cd "$d" && rm -rf sky-out/rust/target ) >/dev/null 2>&1   # disk hygiene
 done
@@ -114,4 +121,5 @@ done
 echo "── Go≡Rust equivalence corpus ──"
 printf '%s\n' "${rows[@]}"
 echo "── ${pass} ok · ${fail} fail · ${skip} skip ──"
+echo "── artifacts (logs/outputs/diffs): $WORK ──"
 [ "$fail" -eq 0 ]

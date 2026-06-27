@@ -6,6 +6,26 @@
 codegen change required; the existing #44 async wrapper and #54/#61/#65 Send +
 serde machinery are reused verbatim once the de-async'd signature reaches them).
 
+> **Implementation note (added post-ship).** WALL-4 is now **implemented** in
+> `tools/sky-ffi-inspect-rs/src/main.rs`: `async_trait_future_output`,
+> `peel_resolved_path`, and `constraint_equality_type` are present, the
+> de-async clone is applied at both the `parse_fn_item` top and the routing
+> block via `de_async_clone`, and a regression fixture
+> (`wall4_de_async_clone_forces_is_async_and_rewrites_output_without_mutation`)
+> guards it. This document reads as the design record, not a pending task.
+> Two consequences for the body below:
+> 1. **Absolute `(line N)` / `lines N-M` cross-refs are a pre-implementation
+>    snapshot and are NOT maintained.** main.rs has since grown (incl. the
+>    WALL-4 impl itself), so every numeric line ref now lands on unrelated
+>    code. Navigate by the function/symbol names instead — every helper is
+>    named in the text.
+> 2. **The C9 "fix it and reuse" alternative was chosen.**
+>    `extract_binding_type` now tries `constraint_equality_type` first and its
+>    legacy `bindings[]` fallback reads `.binding.equality.type` (the unwrapped
+>    T), not the `equality` wrapper. It is therefore **no longer stale**, and
+>    the §1-fact-4 / C4 / §8 "MUST NOT be used / should be retired" prohibition
+>    is superseded by C9.
+
 The firestore CRUD trait methods (`create_obj` / `update_obj` / `get_obj` /
 `get_doc` / `query_obj` / `delete_by_id`) drop with `not-bindable: dyn_trait`.
 Root cause is **proven below against a real rustdoc JSON**: firestore uses the

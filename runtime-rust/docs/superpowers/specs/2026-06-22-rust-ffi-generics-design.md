@@ -36,8 +36,15 @@ substitution → naming → DCE) on the smallest sound surface.
 
 ## 1. Current drop behaviour (cited)
 
-`tools/sky-ffi-inspect-rs/src/main.rs` (3943 LoC). What is dropped vs
+`tools/sky-ffi-inspect-rs/src/main.rs`. What is dropped vs
 already-monomorphised:
+
+> **Note on line references.** Every `main.rs` / `Ffi.hs` line number
+> below is as-of this doc's authoring (2026-06-22, when `main.rs` was
+> ~3943 LoC). `main.rs` has since grown several-fold, so the numeric
+> citations are now indicative only — resolve by the named symbol
+> (`resolve_generics`, `subst_generic_json`, `enum_walk`,
+> `field_type_eligible`, `fn_types_nameable`, …), which is stable.
 
 ### 1.1 Already monomorphised (the existing machinery)
 
@@ -88,7 +95,7 @@ already-monomorphised:
   no binding for `V` (the type's param, not the fn's) → either the
   param isn't in the fn's `generics.params` so it stays a raw
   `{"generic":"V"}` leaf, then `rustdoc_type_to_sky` can't name it and
-  the Haskell `fn_types_nameable` retain (**Ffi.hs L929**) drops it;
+  the Rust `fn_types_nameable` retain (**tools/sky-ffi-inspect-rs/src/main.rs L2066**) drops it;
   OR the fn carries its own `Q`/`F` param that won't resolve → `None`
   drop. Net: **generic-struct methods produce nothing usable.**
 
@@ -185,7 +192,7 @@ change for those. This is what the first slice implements.
 
 **Goal:** monomorphise a single user-declared concrete instantiation of
 one generic struct end-to-end — fields + inherent methods at that
-instantiation — proven by a fork-local `examples/rust/` fixture.
+instantiation — proven by a fork-local `runtime-rust/tests/sky/` fixture.
 
 ### 3.1 Inputs
 
@@ -241,13 +248,16 @@ For `IndexMap<String, i64>`:
 
 ### 3.3 The fixture
 
-`examples/rust/NN-ffi-generics/`:
+`runtime-rust/tests/sky/NN-ffi-generics/` (per the settled rule:
+test-only Rust-backend fixtures live under `runtime-rust/tests/sky/`,
+NOT `examples/rust/`, which holds only complete real projects):
 - `sky.toml` with the `[rust.monomorphize]` block above.
 - `src/Main.sky` that imports `Rust.Indexmap`, calls
   `IndexMap.new ()`, `insert`, `len`, `getIndex`, prints a result —
   proving build + run + a non-trivial value round-trips.
 - Wired into the gated example set + an assertion in the sweep
-  (mirroring the `43-ffi-dce` D4 runner pattern, task #17).
+  (mirroring the `runtime-rust/tests/sky/43-ffi-dce` D4 runner
+  pattern, task #17).
 
 **Out of the first slice (deferred to follow-on slices):**
 - Generic ENUMs (`generic_enum` drop stays) — second slice, same seed
@@ -317,7 +327,8 @@ The risk surface is SELECTION + NAMING, enumerated:
 3. **A method's sig still contains an unsubstituted `{"generic":"X"}`**
    after seeding (X not in the declared args and not a resolvable fn
    param). The post-substitution `rustdoc_type_to_sky` can't name it →
-   `fn_types_nameable` retain (Ffi.hs L929) drops it. Floor holds.
+   the Rust `fn_types_nameable` retain (tools/sky-ffi-inspect-rs/src/main.rs L2066)
+   drops it. Floor holds.
 4. **Trait-bound methods / trait impls** — OUT of this slice (that's
    task #21). Only *inherent* methods (`imp.trait == null`) are walked.
 5. **The hasher param `S`.** `IndexMap<K,V,S=RandomState>` has a default

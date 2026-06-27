@@ -64,6 +64,12 @@ if printf '%s\n' "$ALL_REMOTE_URLS" | grep -qi "$UPSTREAM_PATTERN"; then
     exit 5
 fi
 
+# --- A git remote url can embed credentials (CI checkouts commonly use
+# --- https://x-access-token:<TOKEN>@github.com/...). Redact the userinfo before
+# --- echoing so a token never lands in stdout / CI logs. The un-redacted
+# --- REMOTE_URL is used only for the grep guard above, never for display. ---
+SAFE_URL="$(printf '%s' "$REMOTE_URL" | sed -E 's#(://)[^@/]+@#\1***@#')"
+
 # --- branch + ahead-count summary ---
 BRANCH="$(git branch --show-current)"
 if [ -z "$BRANCH" ]; then
@@ -80,7 +86,7 @@ fi
 
 echo "push.sh — pushing current branch"
 echo "  remote : $REMOTE"
-echo "  url    : $REMOTE_URL"
+echo "  url    : $SAFE_URL"
 echo "  branch : $BRANCH"
 echo "  ahead  : $AHEAD_NOTE"
 
@@ -103,5 +109,5 @@ if [ "$DRY_RUN" = "1" ]; then
     echo "push.sh: dry-run OK (nothing was actually pushed)"
 else
     git push "$REMOTE" "$BRANCH"
-    echo "push.sh: pushed $BRANCH → $REMOTE ($REMOTE_URL)"
+    echo "push.sh: pushed $BRANCH → $REMOTE ($SAFE_URL)"
 fi

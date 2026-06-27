@@ -42,12 +42,16 @@ not papered over.
 - **AMBER** = `go-ref-broken` — the Go reference itself fails to build/run (an
   **upstream Go bug**, NOT a Rust-backend failure; discriminated from `DIFFER`
   explicitly). Does NOT make the row red.
-- **VERDICT PASS** iff no RED row.
+- **VERDICT PASS** iff no RED row **AND** no cargo warning leaks past the
+  generated `#![allow]`. The per-example warning tally is a codegen-defect signal
+  that also fails the verdict — gated by `SKY_SWEEP_WARN_GATE` (default on;
+  `=0` downgrades it to report-only: warnings still printed, verdict not failed).
 
-The summary line reports `N green · M red · K skipped · amber go-ref-broken=A` +
-an equiv-mode breakdown (`stdout=… body=… scenario=… serve=… pty=… n/a=…
-go-ref-broken=…`). A HIST scoreboard (`~/.cache/sky/examples-sweep/`) keeps one
-line per run.
+The summary line reports `N green · M red · K skipped · amber go-ref-broken=A`, an
+equiv-mode breakdown (`stdout=… body=… scenario=… serve=… pty=… n/a=…
+go-ref-broken=…`), and a `cargo warnings (past #![allow]): N total` line (always
+printed). A HIST scoreboard (`~/.cache/sky/examples-sweep/`) keeps one line per
+run.
 
 ## EQUIV modes — DERIVED from shape, overrides on top
 
@@ -89,13 +93,17 @@ the sibling `examples-perf-sweep`. (`night_guard` lives in `lib/checks.sh`.)
 | `SKY_SWEEP_BUILD_ONLY=1` | BUILD column only (fast go-free compile check; RUN + EQUIV = `—`). No `go` needed. |
 | `SKY_SWEEP_NO_EQUIV=1` | BUILD + RUN; EQUIV skipped (`—`). |
 | `SKY_SWEEP_FORCE=1` | override the night gate. |
+| `SKY_SWEEP_WARN_GATE=0` | downgrade the cargo-warning-past-`#![allow]` gate to report-only (warnings printed, verdict not failed). |
 | `RUST_EXAMPLES="01-… 19-…"` | subset override (paths or basenames). |
 
 ## Preflight
 
-Aborts (exit 2) if free disk < 5G or `mem-guard.sh` is not running — both have
-corrupted builds on this box. Fix the cause (free space / start mem-guard), don't
-bypass.
+The free-disk < 5G gate is a HARD abort (exit 2) — never bypassed, since an
+ENOSPC mid-build leaves corrupt half-written artifacts. The `mem-guard.sh`-not-
+running gate aborts (exit 2) only when `SKY_SWEEP_FORCE` is unset; with
+`SKY_SWEEP_FORCE=1` it downgrades to a WARN and proceeds (mem-guard is macOS-only,
+so it can't run off macOS). Fix the cause (free space / start mem-guard) rather
+than leaning on the override.
 
 ## Workflow (every invocation)
 
@@ -109,7 +117,8 @@ bypass.
    path.
 
 2. **Relay the table + verdict** — quote the rendered BUILD·RUN·EQUIV table, the
-   `N green · M red · K skipped · amber=A` summary, and the equiv-mode breakdown.
+   `N green · M red · K skipped · amber=A` summary, the equiv-mode breakdown, and
+   the `cargo warnings (past #![allow]): N total` line.
 
 3. **Triage RED rows.**
    - A real `DIFFER` is a REAL Go≡Rust divergence to **root-cause + fix
@@ -132,8 +141,10 @@ definition of "did the binary work?", no drift.
 ## Baked-in gotchas
 
 - PATH `$HOME/.cargo/bin:/usr/local/go/bin:…`;
-  `CARGO_TARGET_DIR=$HOME/.cache/sky-rust-target`; `sccache`;
-  `CARGO_INCREMENTAL=0`; `SKY_BIN=<repo>/sky-out/sky`.
+  `CARGO_TARGET_DIR=$HOME/.cache/sky-rust-target`; `SKY_BIN=<repo>/sky-out/sky`.
+  `sccache` + `CARGO_INCREMENTAL=0` are applied together only when `sccache` is on
+  PATH and `SKY_NO_SCCACHE` is unset; CI disables sccache (`SKY_NO_SCCACHE=1`,
+  GitHub retired sccache's GHA v1 backend) and so keeps cargo incremental on.
 - `go` is required by default (the EQUIV comparison side); `SKY_SWEEP_BUILD_ONLY=1`
   or `SKY_SWEEP_NO_EQUIV=1` drop it.
 - Go-FFI examples are ABSENT from `build_set` (don't build on `--backend rust`).

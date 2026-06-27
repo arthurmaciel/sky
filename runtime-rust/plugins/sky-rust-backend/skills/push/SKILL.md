@@ -44,7 +44,12 @@ The script **REFUSES** (non-zero exit, `REFUSING: …` to stderr) if ANY of:
   (case-insensitive — covers `github.com:anzellai/sky`,
   `github.com/anzellai/sky`, `.git` suffix).
 
-The user's fork `arthurmaciel/sky` is the **only** acceptable target.
+These guards are a **denylist**: they refuse upstream by name and by URL, but
+they do **not** positively assert the target is `arthurmaciel/sky`. A remote
+repointed at some third party still passes as long as its URL does not match
+`anzellai/sky`. The intended target is the fork (`arthurmaciel/sky`); the
+guards stop the one repo that must never receive a push, not everything that
+isn't the fork.
 
 ## What it does
 
@@ -61,6 +66,8 @@ The user's fork `arthurmaciel/sky` is the **only** acceptable target.
 - **Never pushes to upstream** (`anzellai/sky`) — guarded three ways.
 - **Never force-pushes.**
 - Pushes the **current branch only** — no branch argument.
+- Also **REFUSES** on an unknown flag (anything starting with `-` other than
+  `--dry-run`) and on a detached HEAD / not-on-a-branch state.
 - Non-interactive; exits 0 on success, non-zero on any guard failure or push error.
 
 ## Capture learnings (self-improving loop)

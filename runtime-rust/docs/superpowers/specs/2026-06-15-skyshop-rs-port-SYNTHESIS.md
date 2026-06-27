@@ -35,7 +35,7 @@ example materialises `$WRAPREPO` via `verify.sh` (the planned standalone
 | Crate | Over | Sky-needed ops (from `Lib/Db.sky`,`Lib/Stripe.sky`,`Lib/Auth.sky`) |
 |-------|------|--------------------------------------------------------------------|
 | `sky-firestore-shim` | `firestore` 0.49 | `fs_get_doc(coll,id)`, `fs_set_doc(coll,id,fields)`, `fs_delete_doc(coll,id)`, `fs_query(coll)`, `fs_query_where(coll,field,op,value)`, `fs_query_where_order(coll,field,op,value,orderField,dir)` — all `-> Result<…, String>`, rows as `HashMap<String,String>` / `Vec<HashMap<..>>` |
-| `sky-stripe-shim` | `async-stripe` 1.0-rc.6 | `stripe_create_checkout_session(…) -> Result<String,String>` (returns URL/id), `stripe_create_customer(email) -> Result<String,String>`, `stripe_retrieve_session(id) -> Result<HashMap<String,String>,String>` |
+| `sky-stripe-shim` | `async-stripe` 1.0-rc.6 | `stripe_create_checkout_session(…) -> Result<String,String>` (returns URL/id), `stripe_create_customer(email, name) -> Result<String,String>`, `stripe_retrieve_session(id) -> Result<HashMap<String,String>,String>` |
 | `sky-firebase-auth-shim` | `rs-firebase-admin-sdk` | `fb_verify_id_token(token) -> Result<HashMap<String,String>,String>` (uid/email/claims), emulator-aware (`FIREBASE_AUTH_EMULATOR_HOST`) |
 
 Each wrapper: every public fn is the D2 bridge + D3 flat shape + total error mapping

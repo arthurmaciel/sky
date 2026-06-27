@@ -17,26 +17,41 @@ if [ ! -x "$SKY_BIN" ]; then
     exit 1
 fi
 
+# Bound long cargo runs per the project timeout-gate rule (non-negotiable #3) so a
+# wedged child (hung linker, stalled crate fetch, deadlocked test) can't hang the
+# verify forever. Degrade gracefully where `timeout` is unavailable (e.g. macOS
+# without coreutils) — empty expands to nothing, leaving the bare cargo call.
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT="timeout 1800"
+else
+    TIMEOUT=""
+fi
+
 echo "=== 1. Cargo check ==="
-(cd runtime-rust && cargo check --all-features 2>&1 | tail -3)
+(cd runtime-rust && $TIMEOUT cargo check --all-features 2>&1 | tail -3)
 
 echo ""
 echo "=== 2. Cargo clippy (-D warnings) ==="
 # Real exit must propagate — do NOT pipe to tail (that masks the failure).
-(cd runtime-rust && cargo clippy --all-targets --all-features -- -D warnings) \
+(cd runtime-rust && $TIMEOUT cargo clippy --all-targets --all-features -- -D warnings) \
     || { echo "  ❌ clippy failed"; exit 1; }
 
 echo ""
 echo "=== 3. Cargo test ==="
-(cd runtime-rust && cargo test --all-features 2>&1 | grep -E "^test result" )
+# Capture full output so compiler/test diagnostics survive a failure; only grep a
+# copy for the summary line. A test-COMPILE failure emits no "test result:" line,
+# so grepping the live pipe would discard every diagnostic and false-fail blank.
+test_out=$( (cd runtime-rust && $TIMEOUT cargo test --all-features 2>&1) ) \
+    || { echo "$test_out"; echo "  ❌ cargo test failed"; exit 1; }
+echo "$test_out" | grep -E "^test result" || true
 
 echo ""
 echo "=== 4. Six green examples ==="
 FAIL=0
 for ex in 01-hello-world 04-local-pkg 14-task-demo simple 07-todo-cli test_pkg; do
     if (cd "examples/$ex" && rm -rf sky-out .skycache .skydeps \
-        && "$SKY_BIN" build src/Main.sky --backend rust \
-        && cargo build --manifest-path sky-out/rust/Cargo.toml -q 2>&1); then
+        && $TIMEOUT "$SKY_BIN" build src/Main.sky --backend rust \
+        && $TIMEOUT cargo build --manifest-path sky-out/rust/Cargo.toml -q 2>&1); then
         echo "  ✅ $ex"
     else
         echo "  ❌ $ex"

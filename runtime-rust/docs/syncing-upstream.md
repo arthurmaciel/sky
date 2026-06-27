@@ -16,8 +16,8 @@ After the thin-seam refactor, expect at most these trivial conflicts:
 
 - `sky-compiler.cabal` — both sides add `build-depends`. Resolve by **keeping
   both** dependency lists (union).
-- `src/Sky/Build/Compile.hs` — a small target-dispatch hunk where our
-  `case Toml._target of { TargetRust -> Rust.Project.generateRustProject … }`
+- `src/Sky/Build/Compile.hs` — a small backend-dispatch hunk where our
+  `case Toml._backend config of { Toml.BackendRust -> … RustProject.generateRustProject … ; Toml.BackendGo -> … }`
   meets upstream's edits to the Go-codegen block. Re-apply our dispatch arm
   around upstream's updated Go block. (This one cannot be fully eliminated;
   it is shrunk to the dispatch wrapper, not the full body.)
@@ -25,7 +25,10 @@ After the thin-seam refactor, expect at most these trivial conflicts:
 Then rebuild + verify:
 
 ```bash
-cabal install --overwrite-policy=always --installdir=./sky-out --install-method=copy exe:sky
+# Dev loop: sky-out/sky is a symlink to the dist-newstyle binary — never copy-install.
+# One-time: ln -sf "$(cabal list-bin exe:sky)" sky-out/sky
+cabal build exe:sky
+# (release/CI only: cabal install --overwrite-policy=always --installdir=./sky-out --install-method=copy exe:sky)
 # run the Rust example sweep (Verification protocol block b of
-# docs/superpowers/plans/2026-05-26-upstream-sync-thin-seam.md)
+# runtime-rust/superpowers/plans/2026-05-26-upstream-sync-thin-seam.md)
 ```

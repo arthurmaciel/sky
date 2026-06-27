@@ -31,11 +31,11 @@ no panic, no `.unwrap()`.
 ## What the inspector does (the change)
 
 Today: a CONCRETE-position `impl IntoIterator<Item=X>` is already resolved to `Vec<X>` by
-`bound_to_concrete` (`main.rs:3500–3556`, tested `test_into_iterator_u8`/`test_bound_to_concrete_v2`).
+`bound_to_concrete` (`main.rs:6711–6826`, tested `test_into_iterator_u8`/`test_bound_to_concrete_v2`).
 A GENERIC-param bound `<I: IntoIterator<Item=T>>` DROPS at `classify_param_bound`
-(`main.rs:3710–3733`) as `UnmodellableBound("IntoIterator")`. The closure epic added a
+(`main.rs:7111–7148`) as `UnmodellableBound("IntoIterator")`. The closure epic added a
 sibling seam (`closure_bound_of` + `classify_closure_param` + `closure_companion_satisfiable`,
-`main.rs:4045–4399`) that recognizes a specific trait bound on a USED generic param and
+`main.rs:7676–7831`) that recognizes a specific trait bound on a USED generic param and
 classifies it specially.
 
 The change, modelled exactly on the closure seam:

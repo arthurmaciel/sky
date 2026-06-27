@@ -2,7 +2,7 @@
 
 Target: a NEW fork-local example at `examples/rust/skyshop-rs/`, a faithful 1:1
 port of `examples/13-skyshop` (8,200-line Sky.Live e-commerce app) onto the
-Sky→Rust backend (`sky build --target rust`), replacing the Go-FFI deps
+Sky→Rust backend (`sky build --backend rust`), replacing the Go-FFI deps
 (`cloud.google.com/go/firestore` + Firebase, `github.com/stripe/stripe-go/v84`)
 with Rust crates (`firestore` 0.49, `async-stripe` 1.0.0-rc.6).
 
@@ -17,7 +17,8 @@ because several downstream groups are blocked on them.
 
 0.1 **`[rust.shims]` does not exist.** The task brief twice references a
    `[rust.shims]` mechanism, but `runtime-rust/README.md` ("sky.toml Rust
-   fields") states verbatim: *"There is no `[rust.shims]` section."* and
+   fields") documents only `["rust.dependencies"]` and `[rust]` — no
+   `[rust.shims]` section exists — and
    `src/Sky/Sky/Toml/Rust.hs` (`RustDepSpec`, `parseRustDepSpec`) parses only
    `["rust.dependencies"]`. Is the brief stale, or is `[rust.shims]` a
    to-be-built mechanism that this port must add? If the latter, it is net-new
@@ -46,7 +47,7 @@ because several downstream groups are blocked on them.
    the `<slug>` for a non-crates.io dep?
 
 0.4 **`13-skyshop` is explicitly classified `out` and Go-package FFI on
-   `--target rust` is DOCUMENT_BLOCKED** (see
+   `--backend rust` is DOCUMENT_BLOCKED** (see
    `runtime-rust/scripts/equiv-classification.tsv`; the former
    `2026-06-15-go-package-rust-ffi-design.md` was pruned in the 2026-06-18
    docs overhaul — answers are in `2026-06-15-skyshop-rs-port-SYNTHESIS.md`).
@@ -55,8 +56,11 @@ because several downstream groups are blocked on them.
    "NEVER edit `examples/13-skyshop`" is understood and that nothing in the port
    re-introduces a `[go.dependencies]` table. Where does `skyshop-rs` get
    classified in `equiv-classification.tsv` (it has no Go counterpart to diff
-   against → `out`?), and does the classification-coverage gate in
-   `equiv-sweep.sh` require an entry?
+   against → `out`?). Note: the former `equiv-sweep.sh` was folded into
+   `runtime-rust/scripts/examples-sweep.sh`, and `equiv-classification.tsv` is
+   now OVERRIDES-ONLY (the equiv mode is auto-derived from `example_shape` by
+   `equiv_mode` in `lib/examples.sh` — there is no forced classification-
+   coverage gate), so an entry is needed only as an explicit exception.
 
 0.5 **Is "faithful 1:1" even the right bar given build-only verification?**
    Running needs live GCP/Firestore + Stripe creds. Should the port aim for
@@ -84,9 +88,9 @@ because several downstream groups are blocked on them.
    (`import Tailwind`, `import Tailwind.Responsive`) from
    `github.com/anzellai/sky-tailwind` declared under `[dependencies]`
    (a *Sky* package, not Go-FFI). Is `sky-tailwind` pure Sky (portable to
-   `--target rust` as-is), or does it carry any Go-FFI / kernel that the Rust
+   `--backend rust` as-is), or does it carry any Go-FFI / kernel that the Rust
    backend lacks? Where is it fetched and how does a `[dependencies]` Sky package
-   resolve under `--target rust`? Why it matters: the entire 1,217-line
+   resolve under `--backend rust`? Why it matters: the entire 1,217-line
    `Ui/Layout.sky` + every `Page/*` view depends on it. (Note: `.skydeps` was
    wiped locally, so the package source wasn't inspectable in this pass.)
 
@@ -103,7 +107,7 @@ because several downstream groups are blocked on them.
    those Go imports actually called anywhere (dead imports), or load-bearing? If
    dead, the port drops them; if live, what replaces them (Sky's `Http.*`
    kernel? `Std.Email`? `Sky.Core.Uuid`)? Why it matters: a dead `[go.dependencies]`
-   import still triggers the E1001 refusal on `--target rust`.
+   import still triggers the E1001 refusal on `--backend rust`.
 
 1.6 What is the acceptance artifact for "done"? Build-green (`sky build --target
    rust` + `cargo build` exit 0) only, or also a boot-and-curl smoke (the
@@ -243,7 +247,7 @@ because several downstream groups are blocked on them.
 
 3.3 **`.skyi` / `_bindings.rs` path.** Confirm the wrapper's generated artifacts
    land at `.skycache/ffi/rust/<slug>.{kernel.json,skyi,_bindings.rs}` and that
-   `sky install` / `sky build --target rust` regenerate them (vs the Go path at
+   `sky install` / `sky build --backend rust` regenerate them (vs the Go path at
    `.skycache/ffi/` root). What triggers re-inspection when the wrapper's source
    changes (fingerprint? mtime?)?
 
@@ -466,7 +470,7 @@ because several downstream groups are blocked on them.
 
 9.2 `Tailwind` + `Tailwind.Responsive` packages: do they emit Sky `Std.Html`
    attribute values (pure, portable) or do they carry runtime/Go-FFI? If pure,
-   they ride along under `--target rust` unchanged. If not, this is a blocker.
+   they ride along under `--backend rust` unchanged. If not, this is a blocker.
    (Couldn't inspect — `.skydeps` was wiped.)
 
 9.3 Wire-event arg shapes: the app uses `onClick`, `onSubmit` (forms with typed
@@ -488,7 +492,7 @@ because several downstream groups are blocked on them.
 10.1 The original `[live]` uses `store = "sqlite"`, `storePath =
    "skyshop_sessions.db"`, plus a `static` dir. README confirms Rust supports
    memory/sqlite/postgres/redis session stores. Confirm `sqlite` store +
-   `storePath` + `static` all work on `--target rust`. The Cargo feature wiring
+   `storePath` + `static` all work on `--backend rust`. The Cargo feature wiring
    (`sqlite` → `db` feature) — does a Sky.Live sqlite *session store* pull the
    same sqlx as the (now-absent) `Std.Db`? Note: the port replaces `Std.Db`-Firestore
    with the Firestore wrapper, so the ONLY sqlite use is the session store — does
@@ -538,7 +542,7 @@ because several downstream groups are blocked on them.
    the async crates are wired? This de-risks the §2.2 block_on problem from the
    Sky-compile problem.
 
-12.3 **What proves "done"?** `sky build src/Main.sky --target rust` exit 0 +
+12.3 **What proves "done"?** `sky build src/Main.sky --backend rust` exit 0 +
    `cd sky-out/rust && cargo build` exit 0. Plus optionally: boot the binary,
    `curl localhost:<port>/` → 200 with no panic in stderr (creds-less). Is the
    creds-less boot even reachable (does a lazy wrapper avoid constructing the
@@ -593,7 +597,7 @@ because several downstream groups are blocked on them.
    the auth path may have to be hand-rolled (JWKS + RS256) or stubbed; either way
    it's the least-precedented piece.
 
-13.7 **`Tailwind` package portability under `--target rust`** (§1.3, §9.2) — if
+13.7 **`Tailwind` package portability under `--backend rust`** (§1.3, §9.2) — if
    it carries any Go-FFI/kernel, the whole view layer is blocked. Unverified
    (deps wiped locally).
 

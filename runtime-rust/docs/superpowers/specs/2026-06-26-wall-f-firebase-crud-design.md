@@ -41,8 +41,8 @@ impl App<AccessTokenCredentials> { pub fn auth(&self) -> FirebaseAuth<ReqwestApi
 ## Why each CRUD method currently DROPS
 
 1. The impl `for FirebaseAuth<ApiHttpClientT>` has a free impl-generic Self var.
-   `trait_self_concrete` (main.rs:1224 — `self_is_concrete_named || self_is_closed_monomorphic`)
-   is FALSE → the drop at main.rs:1332 fires `trait-method-generic-self:
+   `trait_self_concrete` (main.rs:1554 — `self_is_concrete_named || self_is_closed_monomorphic`)
+   is FALSE → the drop at main.rs:1711 fires `trait-method-generic-self:
    non-concrete Self FirebaseAuth<ApiHttpClientT>` for every method walked under it.
 2. SEPARATELY, `create_user`/`get_user`/… are **default trait methods** with bodies
    on the trait DEF. rustdoc lists them under the TRAIT item's `items`, NOT under
@@ -97,8 +97,10 @@ applied to the method signature.
 - Substitute the trait's generic params (`C`) with the impl's trait-args
   (`ApiHttpClientT` → already mono'd to `ReqwestApiClient`) AND `Self` with the
   concrete Self, throughout the projected method sig.
-- The async `-> impl Future<Output=T> + Send` (RPITIT) reuses the existing async
-  bridge (#44/#64). `Report<ApiClientError>` in the Result error slot maps to
+- The async `-> impl Future<Output=T> + Send` (RPITIT) — **SUPERSEDED, see KEYSTONE
+  correction below: RPITIT does NOT reuse the existing async bridge; it needs a
+  dedicated `impl_future_output` detector, NOT the `async_trait_future_output`
+  path.** `Report<ApiClientError>` in the Result error slot maps to
   SkyError via the existing Result-error normalization (#32/#34) — verify Report
   has a Display path; if it renders as an opaque type, treat the whole Result error
   as SkyError (its `.to_string()`).

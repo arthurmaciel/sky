@@ -52,7 +52,7 @@ n() { count "$1" | wc -l | tr -d ' '; }
 # ── 1. Hard gate — clippy -D warnings (includes the denied unwrap/expect) ─────
 say ""; say ">>> [GATE] cargo clippy --all-targets $FEATURES -- -D warnings"
 GATE=0
-( cd "$CRATE" && cargo clippy --all-targets $FEATURES -- -D warnings ) >"$HIST/clippy-gate.log" 2>&1 || GATE=1
+( cd "$CRATE" && timeout 1800 cargo clippy --all-targets $FEATURES -- -D warnings ) >"$HIST/clippy-gate.log" 2>&1 || GATE=1
 if [ "$GATE" = 0 ]; then say "  ✓ clippy gate clean"; else say "  ✗ clippy gate FAILED — see $HIST/clippy-gate.log"; tail -20 "$HIST/clippy-gate.log" | sed 's/^/    /' | tee -a "$HIST/audit-$STAMP.log"; fi
 
 # ── 1b. Feature-matrix leg — per-subset LIB clippy (runtime-rust only) ────────
@@ -80,7 +80,7 @@ if [ "$CRATE" = "runtime-rust" ]; then
   for f in "" "${FEATS[@]}"; do
     if [ -z "$f" ]; then sel=(--no-default-features); lbl="<bare>"; slug="bare"
     else sel=(--no-default-features --features "$f"); lbl="$f"; slug="$f"; fi
-    if ( cd "$CRATE" && cargo clippy --lib "${sel[@]}" -- -D warnings ) >"$HIST/clippy-matrix-$slug.log" 2>&1; then
+    if ( cd "$CRATE" && timeout 1800 cargo clippy --lib "${sel[@]}" -- -D warnings ) >"$HIST/clippy-matrix-$slug.log" 2>&1; then
       say "  ✓ $lbl"
     else
       GATE=1
@@ -101,7 +101,7 @@ STRICT=( -W clippy::pedantic
   -W clippy::float_cmp -W clippy::lossy_float_literal
   -W clippy::undocumented_unsafe_blocks -W clippy::missing_safety_doc
   -W clippy::string_slice -W clippy::integer_division )
-( cd "$CRATE" && cargo clippy --all-targets $FEATURES -- "${STRICT[@]}" ) >"$HIST/clippy-strict.log" 2>&1 || true
+( cd "$CRATE" && timeout 1800 cargo clippy --all-targets $FEATURES -- "${STRICT[@]}" ) >"$HIST/clippy-strict.log" 2>&1 || true
 # `grep -c` prints 0 AND exits 1 on no-match; the old `|| echo 0` then appended a
 # SECOND "0", yielding a two-line value that broke the numeric `say` below. Take
 # the count unconditionally (grep always prints a count) and default empty→0.
@@ -190,16 +190,27 @@ fi
 # they never flip the hard gate (CVEs are triaged, not auto-blocking).
 say ""; say ">>> [SUPPLY] cargo-audit + cargo-deny (advisory)"
 if command -v cargo-audit >/dev/null 2>&1; then
-  ( cd "$CRATE" && cargo audit ) >"$HIST/cargo-audit.log" 2>&1 || true
-  VULN_N="$(grep -cE '^Crate:' "$HIST/cargo-audit.log" 2>/dev/null || echo 0)"
-  say "  cargo-audit: $(grep -E 'vulnerabilit|warning:.*allowed' "$HIST/cargo-audit.log" | tail -2 | tr '\n' ' ')"
+  AUDIT_RC=0
+  # cargo audit fetches/updates the RustSec advisory-db over the network; bound it
+  # so a stalled fetch can't hang the audit (timeout's 124 surfaces as the note below).
+  ( cd "$CRATE" && timeout 600 cargo audit ) >"$HIST/cargo-audit.log" 2>&1 || AUDIT_RC=$?
+  [ "$AUDIT_RC" = 124 ] && say "  cargo-audit: TIMED OUT after 600s (network/db fetch stalled) — see $HIST/cargo-audit.log"
+  # `grep -c` always prints a count AND exits 1 on no-match; the old `|| echo 0`
+  # then appended a SECOND "0", yielding a two-line value. Take the count
+  # unconditionally and default empty→0.
+  VULN_N="$(grep -cE '^Crate:' "$HIST/cargo-audit.log" 2>/dev/null)"; VULN_N="${VULN_N:-0}"
+  say "  cargo-audit: $VULN_N advisory crate(s) · $(grep -E 'vulnerabilit|warning:.*allowed' "$HIST/cargo-audit.log" | tail -2 | tr '\n' ' ')"
   grep -E '^(Crate|Title|ID):' "$HIST/cargo-audit.log" 2>/dev/null | head -24 | sed 's/^/    /' | tee -a "$HIST/audit-$STAMP.log"
 else
   say "  cargo-audit absent — skipped (cargo install cargo-audit)"
 fi
 if command -v cargo-deny >/dev/null 2>&1; then
-  ( cd "$CRATE" && cargo deny check advisories bans sources ) >"$HIST/cargo-deny.log" 2>&1 || true
-  say "  cargo-deny: $(grep -cE '^error' "$HIST/cargo-deny.log" 2>/dev/null || echo 0) errors · $(grep -cE '^warning' "$HIST/cargo-deny.log" 2>/dev/null || echo 0) warnings (see $HIST/cargo-deny.log)"
+  DENY_RC=0
+  ( cd "$CRATE" && timeout 600 cargo deny check advisories bans sources ) >"$HIST/cargo-deny.log" 2>&1 || DENY_RC=$?
+  [ "$DENY_RC" = 124 ] && say "  cargo-deny: TIMED OUT after 600s (network/db fetch stalled) — see $HIST/cargo-deny.log"
+  DENY_E="$(grep -cE '^error' "$HIST/cargo-deny.log" 2>/dev/null)"; DENY_E="${DENY_E:-0}"
+  DENY_W="$(grep -cE '^warning' "$HIST/cargo-deny.log" 2>/dev/null)"; DENY_W="${DENY_W:-0}"
+  say "  cargo-deny: $DENY_E errors · $DENY_W warnings (see $HIST/cargo-deny.log)"
 else
   say "  cargo-deny absent — skipped (cargo install cargo-deny)"
 fi
@@ -207,7 +218,7 @@ fi
 # ── 7. Tests (behaviour gate) ────────────────────────────────────────────────
 say ""; say ">>> [TEST] cargo test --all-targets $FEATURES"
 TEST=0
-( cd "$CRATE" && cargo test $FEATURES ) >"$HIST/test.log" 2>&1 || TEST=1
+( cd "$CRATE" && timeout 1800 cargo test $FEATURES ) >"$HIST/test.log" 2>&1 || TEST=1
 grep -E '^test result|error\[' "$HIST/test.log" | head -20 | sed 's/^/    /' | tee -a "$HIST/audit-$STAMP.log"
 [ "$TEST" = 0 ] && say "  ✓ tests green" || say "  ✗ tests FAILED — see $HIST/test.log"
 

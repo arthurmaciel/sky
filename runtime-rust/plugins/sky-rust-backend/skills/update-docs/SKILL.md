@@ -38,6 +38,8 @@ Run `git status --short` to see what's dirty.
      ungated code). Clean → continue. A principle hurt → rethink + reimplement;
      re-review. No adequate in-boundary fix → REVERT, LOG it in
      `runtime-rust/docs/PROGRESS.md`, and SIGNAL the user — never commit a violation.
+     (The README-is-pristine rule supersedes the CLAUDE.md gate's older "LOG in
+     `README.md`" wording — history/attempts go to `docs/PROGRESS.md`, not the README.)
   4. Write a commit message that accurately describes what changed (follow the
      project's `<type>(<scope>): <summary>` convention, e.g.
      `fix(rust): …` / `feat(rust): …` / `refactor(rust): …`).
@@ -48,8 +50,9 @@ Run `git status --short` to see what's dirty.
 ### Step 2 — Consolidate root docs, then refresh `runtime-rust/README.md`
 
 **HARD BOUNDARY — only edit `README.md` from `## Getting started` DOWNWARD.** Everything
-ABOVE the `## Getting started` heading (the title, intro, `## Contract`, etc.) is the
-maintainer's hand-written content — NEVER touch it (do not reword, reformat, or
+ABOVE the `## Getting started` heading (the title, the CAUTION block, `## Contents`,
+`## Introduction` incl. `### Development support`) is the maintainer's hand-written
+content — NEVER touch it (do not reword, reformat, or
 reflow a single line above `## Getting started`). This skill regenerates ONLY the
 sections from `## Getting started` to the end. Before writing, find the `## Getting started`
 line and treat every line before it as read-only.
@@ -135,29 +138,30 @@ these rules over EVERY section:
 
 Then update it to reflect **today's actual state**. README is now a SLIM
 user-facing document; the deep internals live in `docs/TECHNICAL-DETAILS.md` (see
-"Second maintained file" below). The README must contain ONLY these `##` sections,
+"Second maintained file" below). The maintainer-owned region ABOVE `## Getting started`
+(`## Contents`, `## Introduction` incl. `### Development support`) is read-only.
+From `## Getting started` DOWNWARD the README must contain ONLY these `##` sections,
 in this order (rewrite each from current truth):
 
-1. **`## Contract`** — maintainer-owned, ABOVE `## Getting started`. NEVER touch it.
-2. **`## Getting started`** — the 3-OS install (Linux/macOS/Windows) + Clone +
-   Fast-build env + Build the compiler + Running the examples + CLI reference. Keep
-   GHC de-pinned (`GHC >= 9.6.7`), the cross-OS "continue with" anchor links, the
-   macOS musl command inside a code block, the `Why:` bullet block.
-3. **`## Project status`** — the live sweep **badge** + the `N green · M red`
-   headline + the **Round-trip / Perf-columns / Equiv-modes legend tables** + the
-   `### Sweep summary (by equivalence mode)` table + the `### Examples` table. The
-   examples table, the perf verdict, and the cross-OS static table are
+1. **`## Getting started`** — the 3-OS install (Linux/macOS/Windows) + Clone +
+   Fast-build env + Build the Sky compiler + Running the examples + `### FFI usage`
+   (auto-FFI lead + `#### sky.toml Rust fields` + the "Reaching async / framework
+   crates" wrapper-crate note) + `### CLI reference` + `### Rust-backend environment
+   variables`. Keep GHC de-pinned (`GHC >= 9.6.7`), the cross-OS "continue with"
+   anchor links, the macOS musl command inside a code block, the `Why:` bullet block.
+2. **`## Project status`** — the live sweep **badge** + the `N green · M red`
+   headline + the `### Sweep summary (by equivalence mode)` table + the `### Examples`
+   table. The examples table, the perf verdict, and the cross-OS static table are
    **`AUTOGEN`-fenced** (see the Second Boundary) — do NOT hand-write them; their
    editorial columns come from `runtime-rust/scripts/readme-examples.tsv`.
    Build/Run are a hardcoded ✅ snapshot (the CI writer only runs on a green sweep);
    the live per-example pass/fail is the badge's run summary.
-4. **`## Static & cross compilation`** — static usage + the static-build matrix +
+3. **`## Static and cross compilation`** — static usage + the static-build matrix +
    the `AUTOGEN:static-table` + the local size-benchmark table + the 1-line
-   allocator summary that links to the 2×2 in TECHNICAL-DETAILS.
-5. **`## FFI usage`** — the auto-FFI lead + `### sky.toml Rust fields` + the
-   "Reaching async / framework crates" wrapper-crate note.
-6. **`## Known limitations`** — table with Description and Workaround columns.
-7. **`## Glossary`** — term table.
+   allocator summary that links to the 2×2 in TECHNICAL-DETAILS, then `### Static
+   compilation` + `### Cross compilation`.
+4. **`## Known limitations`** — table with Description and Workaround columns.
+5. **`## Learning materials`** — learning resources + the `### Glossary` term table.
 
 **Second maintained file — `docs/TECHNICAL-DETAILS.md`.** The deep sections
 (`## Architecture` incl. modification boundaries + cross-backend rules + FFI

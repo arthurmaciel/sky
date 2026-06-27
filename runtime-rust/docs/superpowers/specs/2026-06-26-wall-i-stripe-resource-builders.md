@@ -228,7 +228,7 @@ unresolved `<C: StripeClient>`. Every partial failure is fail-closed.
   wrongly kill `send` on its OWN legit error-slot `<C as StripeClient>::Err` (normalized to
   SkyError at codegen, `7461-7481`). Rely on `type_to_typeref`'s per-position `?` (Ok payload
   `7475`; surviving qualified_path → Err `7550`) + error-slot swallow (`7477`).
-- **B2 (soundness hole)** — `subst_assoc_json` (`7298`) keys ONLY on projection NAME (`7303`),
+- **B2 (soundness hole)** — `subst_assoc_json` keys ONLY on projection NAME,
   trait-BLIND. Safe in the trait-impl caller, UNSOUND inherent (a same-named `<Self as
   OtherTrait>::Output` in a payload would mis-resolve). Match the sibling impl by **(trait
   resolved-id, for-type resolved-id)**; require the single foreign-trait payload projection ==
@@ -237,14 +237,14 @@ unresolved `<C: StripeClient>`. Every partial failure is fail-closed.
   `8712`); whole-sig subst on a generic `impl<T> Foo<T>` reinjects unbound `T`. The `8047`
   undeclared-tyvar gate is the backstop.
 - **B4** — sibling candidate must be CONCRETE (exclude free-tyvar `for` = blanket impl) AND
-  UNIQUE (count==1). Cross-crate sibling → `impl_assoc_bindings` (`8656`) reads THIS crate's
+  UNIQUE (count==1). Cross-crate sibling → `impl_assoc_bindings` reads THIS crate's
   index → empty → drop. Orphan rule guarantees the real sibling is crate-local.
 - **B5** — keep the inherent empty-bound exemption as-is (Q2-A backstop `8200` is
   `trait_ctx.is_some()`-gated). Don't let an inherent foreign-trait-bound tyvar emit bare.
   Negative test: facade absent → `send` dropped.
 - **B6 (arch)** — `parse_generic_method_fn`/`try_parametric_stub` lack `for_val`+`index` on the
   inherent path (recv is a rendered STRING). Compute the sibling match + `impl_assoc_bindings` at
-  the `route_concrete_method` call site (`1731`, for_val/index/impl_data in scope), mirror
+  the `route_concrete_method` call site (for_val/index/impl_data in scope), mirror
   `TraitCtx.assoc_bindings` (`8588`), pass via a new optional `InherentSelfCtx`. `None` ctx MUST
   be byte-identical to today.
 - **B7** — receiver-Send is the `collect_provably_send_recv_names` SYNTHETIC/ALL_FIELDS source
@@ -253,9 +253,9 @@ unresolved `<C: StripeClient>`. Every partial failure is fail-closed.
   `impl Send` empirically + add an Rc-recv negative fixture.
 - **B8 (BLOCKING SECURITY)** — the design assumed "Err → fixed msg + correlation id, server-log
   only" already holds. **It does NOT.** `sky_error_from_foreign` (`runtime-rust/src/sky_runtime/
-  core.rs:44`) = `format!("{e:?}").into()` → the RAW foreign Debug becomes the Sky-visible Error
+  core.rs`) = `format!("{e:?}").into()` → the RAW foreign Debug becomes the Sky-visible Error
   message. WALL-J is the FIRST wall routing a real network/auth client error (reqwest/hyper
-  transport — can echo URL/headers/bearer) through it. The correlation-id machinery (`core.rs:387`)
+  transport — can echo URL/headers/bearer) through it. The correlation-id machinery (`core.rs`)
   is wired ONLY to the panic hook. MUST implement: server-log the Debug under a fresh corr-id,
   return a fixed generic msg + id to Sky. **Subsumes task #83.** (Ok-JSON path does NOT leak the
   API key — `Customer` is the response, the key lives in `&C` — but surfaces PII as plain JSON.)
@@ -319,10 +319,10 @@ Both rustdoc'd cleanly (core 126/779, facade 9/53). But `send` STILL drops
 
 **Root cause (confirmed by code read) — WALL-K, a distinct new wall.** WALL-G's cross-crate
 resolution is keyed via `LOCAL_TRAIT_ID_CANON_PATH` (crate-LOCAL traits only):
-- `single_concrete_impl_trait_key` (main.rs:9613-9618) HARD-GATES the bound trait to crate-local
+- `single_concrete_impl_trait_key` (main.rs) HARD-GATES the bound trait to crate-local
   (`LOCAL_TYPE_IDS` / `REACHABLE_PATHS`) — an external trait bound returns None (not even a
   mono candidate).
-- `xc_unique_for_trait_key` (2588) resolves the canon ONLY via `LOCAL_TRAIT_ID_CANON_PATH`.
+- `xc_unique_for_trait_key` (main.rs) resolves the canon ONLY via `LOCAL_TRAIT_ID_CANON_PATH`.
 
 Fixture 91 (shipped WALL-G) had the bound trait `Wire` **crate-local to the method's crate**
 (2-crate case). The real stripe is a **3-crate triangle**: `send<C: StripeClient>` is in

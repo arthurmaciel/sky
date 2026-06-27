@@ -166,8 +166,11 @@ the banner inside `AUTOGEN:examples-table`, `AUTOGEN:perf-verdict`, and
   `README.md`, `docs/`, the plugin skills, and the memory dir.
 - `rg 'PROGRESS\.md'` shows every reference points at `docs/PROGRESS.md` (none at
   the old root path) — except historical mentions inside `docs/PROGRESS.md` itself.
-- README ≤ ~600 lines; `TECHNICAL-DETAILS.md` contains every moved section (diff the
-  moved headers: present in TECHNICAL-DETAILS, absent in README).
+- README line count materially reduced from the 1228-line start (aspirational
+  ≤~600; achieved 735 at the time of the move — see the Goal note; the file has
+  since grown again as current-state content accreted); `TECHNICAL-DETAILS.md`
+  contains every moved section (diff the moved headers: present in
+  TECHNICAL-DETAILS, absent in README).
 - All three new legend tables render as GitHub Markdown tables; the 3 anchor links
   resolve to existing header slugs.
 - Markdown lint: no broken relative links (`README.md` → `docs/TECHNICAL-DETAILS.md`

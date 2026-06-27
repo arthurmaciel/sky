@@ -16,8 +16,15 @@ is public+reachable** — exactly what #21's `build_trait_ctx` / `reachable_loca
 (a private/unreachable trait or Self already drops `trait-method-trait-unreachable` /
 `trait-method-generic-self`). So:
 
+> **[SUPERSEDED — see Status C-1.]** The parenthetical above is FALSE: the guardian found
+> `trait-method-trait-unreachable` did NOT exist pre-fix; `build_trait_ctx == None` was forwarded as
+> `trait_qualifier=None` → inherent-call form → E0599/E0603. The relaxation MUST ADD that drop (C-1
+> BLOCKING), not rely on it being already enforced. Only the Self-reachable + `fn_types_nameable` gates
+> pre-existed.
+
 - **Trait impl:** SKIP the method-level `is_public` check; rely on the trait-reachable + Self-reachable
-  gates (already enforced) + the existing per-signature `fn_types_nameable` reachability (a method
+  gates (Self-reachable already enforced; trait-reachable is the NEW C-1 drop this relaxation adds — see
+  Status C-1, NOT pre-existing) + the existing per-signature `fn_types_nameable` reachability (a method
   whose arg/return references a private type still drops → no E0603). The method's own `"default"`
   visibility is ignored — it carries no callability information for a trait method.
 - **Inherent impl:** UNCHANGED. An inherent-impl method without `pub` is genuinely private; its

@@ -86,20 +86,24 @@ for n in "${EX[@]}"; do
   MAN="$d/sky-out/rust/Cargo.toml"
 
   # Dynamic release.
-  dyn_b=""; if ( cd "$d" && timeout 900 cargo build --release --manifest-path sky-out/rust/Cargo.toml ) >>"$LOG" 2>&1; then
-    dyn_b="$(fsize "$TBASE/release/sky-app")"; fi
-  cold_d="$(coldstart_ms "$TBASE/release/sky-app")"
-  [ "$shape" = cli ] || cold_d=""   # only cli/simple have a meaningful cold-start-to-exit
+  dyn_b=""; status="ok"
+  if ( cd "$d" && timeout 900 cargo build --release --manifest-path sky-out/rust/Cargo.toml ) >>"$LOG" 2>&1; then
+    dyn_b="$(fsize "$TBASE/release/sky-app")"
+  else
+    status="dyn-build-fail"
+  fi
+  # only cli/simple have a meaningful cold-start-to-exit; skip the call entirely
+  # for server/live/tui shapes (their binary never exits → 5× timeout 10 waste).
+  cold_d=""; [ "$shape" = cli ] && cold_d="$(coldstart_ms "$TBASE/release/sky-app")"
 
   # Static (musl) release.
-  st_b=""; status="ok"
+  st_b=""
   if ( cd "$d" && timeout 1200 cargo build --release --target "$MUSL_TRIPLE" --features static_alloc --manifest-path sky-out/rust/Cargo.toml ) >>"$LOG" 2>&1; then
     st_b="$(fsize "$TBASE/$MUSL_TRIPLE/release/sky-app")"
   else
-    status="static-build-fail"
+    { [ "$status" = ok ] && status="static-build-fail"; } || status="$status,static-build-fail"
   fi
-  cold_s="$(coldstart_ms "$TBASE/$MUSL_TRIPLE/release/sky-app")"
-  [ "$shape" = cli ] || cold_s=""
+  cold_s=""; [ "$shape" = cli ] && cold_s="$(coldstart_ms "$TBASE/$MUSL_TRIPLE/release/sky-app")"
 
   # Go release (fully-static baseline). Best-effort; Go-FFI/absent-go → blank.
   go_b=""; if ( cd "$d" && timeout 600 "$SKY_BIN" build src/Main.sky ) >>"$LOG" 2>&1; then

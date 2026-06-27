@@ -278,7 +278,7 @@ In `/home/arthur/.claude/projects/-home-arthur-Documentos-comp-sky/memory/rust-e
 Run:
 ```bash
 rg -rln 'rust-example-conquest-registry|escalated-decisions|upstream-pr-proposals|0001-sky-value-types|adr/0001' \
-  runtime-rust/CLAUDE.md runtime-rust/README.md runtime-rust/plugins \
+  runtime-rust/CLAUDE.md runtime-rust/README.md runtime-rust/plugins runtime-rust/docs/superpowers \
   /home/arthur/.claude/projects/-home-arthur-Documentos-comp-sky/memory \
   | rg -v 'docs/superpowers/(plans|specs)/2026-06-18' || echo "CLEAN"
 ```
@@ -407,7 +407,7 @@ In README, locate the orphaned `### sky.toml Rust fields` subsection (now sittin
 Rust FFI is fully automatic — point `sky.toml` at a crate and the compiler
 generates the bindings (`rustdoc --output-format json`); no hand-written FFI.
 ```
-Keep the existing `### sky.toml Rust fields` content as a `###` child of `## FFI usage`, and keep the "Reaching async / framework crates" wrapper note. In that note, change the phrase "see the FFI Reach section" → "see [FFI Reach in TECHNICAL-DETAILS](docs/TECHNICAL-DETAILS.md#reach-what-auto-ffi-can-cant-cover)".
+Keep the existing `### sky.toml Rust fields` content as a `###` child of `## FFI usage`, and keep the "Reaching async / framework crates" wrapper note. In that note, change the phrase "see the FFI Reach section" → "see [FFI Reach in TECHNICAL-DETAILS](docs/TECHNICAL-DETAILS.md#reach-what-auto-ffi-cancant-cover)".
 
 - [ ] **Step 2: Move the allocator 2×2 measurement to TECHNICAL-DETAILS, leave a summary**
 
@@ -608,7 +608,7 @@ Expected: examples `exit=0`; static reports in-sync OR "no static-perf TSV" (loc
 
 ```bash
 rg -rln 'rust-example-conquest-registry|escalated-decisions|upstream-pr-proposals|0001-sky-value-types' \
-  runtime-rust/CLAUDE.md runtime-rust/README.md runtime-rust/docs/TECHNICAL-DETAILS.md runtime-rust/plugins \
+  runtime-rust/CLAUDE.md runtime-rust/README.md runtime-rust/docs/TECHNICAL-DETAILS.md runtime-rust/plugins runtime-rust/docs/superpowers \
   | rg -v 'docs/superpowers/(plans|specs)/2026-06-18' || echo "CLEAN"
 ```
 Expected: `CLEAN`.

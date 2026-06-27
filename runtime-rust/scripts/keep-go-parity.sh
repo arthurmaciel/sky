@@ -51,11 +51,17 @@ state_init() {
   printf 'BASE=%s\nlast_completed_phase=0\n' "$(git rev-parse HEAD)" > "$STATE_FILE"
 }
 state_get() {  # state_get <key> → value (empty if absent)
+  # Reject keys with sed/regex metacharacters — the key is spliced into a sed
+  # substitution below, so an unconstrained key could parse-error or over-match.
+  [[ "$1" =~ ^[A-Za-z0-9_]+$ ]] || { echo "ERROR: invalid state key: $1" >&2; return 2; }
   [ -f "$STATE_FILE" ] || return 0
   sed -n "s/^$1=//p" "$STATE_FILE" | tail -1
 }
 state_set() {  # state_set <key> <value> — portable (no in-place sed)
   local k="$1" v="$2" tmp
+  # Reject keys with awk-regex metacharacters — k is spliced into the awk match
+  # `$0 ~ "^"k"="`, so an unconstrained key could over-match or mis-write.
+  [[ "$k" =~ ^[A-Za-z0-9_]+$ ]] || { echo "ERROR: invalid state key: $k" >&2; return 2; }
   [ -f "$STATE_FILE" ] || state_init
   tmp="$(mktemp)"
   awk -v k="$k" -v v="$v" '
@@ -182,7 +188,7 @@ case "$cmd" in
     exit 1
     ;;
 
-  state-init)  state_init; echo "keep-go-parity: state @ $STATE_FILE (BASE=$(state_get BASE))" ;;
+  state-init)  if state_init; then echo "keep-go-parity: state @ $STATE_FILE (BASE=$(state_get BASE))"; else exit 2; fi ;;
   state-get)   state_get "${2:?state-get <key>}" ;;
   state-done)  state_done "${2:?state-done <phase-number>}"; echo "phase ${2} done (frontier=$(state_get last_completed_phase))" ;;
   state-show)  [ -f "$STATE_FILE" ] && cat "$STATE_FILE" || echo "(no run-state — fresh run)" ;;

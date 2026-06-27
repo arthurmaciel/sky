@@ -7,7 +7,21 @@ INHERENT impls at `main.rs:923-926` with the reason "a trait impl's method bound
 from the trait — out of scope"). Display/FromStr are already bridged specially — do NOT regress
 them.
 
+> **Note (line anchors are stale).** Every `main.rs:NNN` / `:NNNN` reference
+> below is as-of-2026-06-23 and no longer points at the cited code —
+> `tools/sky-ffi-inspect-rs/src/main.rs` has since grown past 16k lines and this
+> design has shipped. Locate the code by the named symbols
+> (`try_parametric_stub`, `parse_fn_item`, `is_inherent_impl` /
+> `trait_self_concrete`, `self_sky.is_empty()`, `full_union_bounds`,
+> `self_public_path`), not the line numbers.
+
 ## Scope (v1)
+
+> **SUPERSEDED — see Status Q2.** The "bound resolves … method-local" framing
+> below is the naive design the guardian ruling overturned: a bound restated
+> bare on the impl can have its definition on the TRAIT, so resolution must also
+> union the trait-def method's bounds (Q2-A). Shipped code does this via
+> `full_union_bounds` + `trait_def_generics`.
 
 **In:** a method on `impl Trait for ConcreteType` (concrete `Self`, not a blanket/generic impl),
 generic or not, whose every method-level generic bound resolves to the existing
@@ -47,7 +61,10 @@ pipeline never reads it).
 1. **Lift the inherent-only gate** (`main.rs:923-926`): attempt the parametric-stub path for a
    trait impl too, BUT only when `Self` is concrete (a named type, not a type-var) — else drop
    `trait-method-generic-self`.
-2. **Bound resolution stays method-local + impl-local.** Collect the method's own generics +
+2. **Bound resolution stays method-local + impl-local.** *(SUPERSEDED — see Status Q2.
+   This step is factually wrong: rustdoc does NOT inline trait-def bounds onto the impl-method
+   sig, so method-local resolution is unsound. Shipped behaviour adds the trait-def bound union,
+   Q2-A — `full_union_bounds` + `trait_def_generics`.)* Collect the method's own generics +
    where-clauses (rustdoc inlines a method's where-clauses on the method sig) + the impl block's
    concrete trait type-args (`impl From<i64> for Foo` → the trait param resolves to `i64`). Run the
    SAME modellable/closed-set gate the inherent path uses. A method type-param used but with no

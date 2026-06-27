@@ -6,8 +6,17 @@ unlock: the empirical `skyshop-rs`-no-shim test (2026-06-23) showed EVERY real o
 firestore / async-stripe / firebase is `async fn` and auto-FFI drops them — the shim crates
 exist ONLY to paper over this.
 
-**Status:** GUARDIAN-CLEARED — APPROVE-FOR-IMPLEMENTATION (design only; no implementation this pass,
-per user). The make-or-break was verified in source: Sky's `block_on` (`task.rs:5`) is a real
+**Status:** SUPERSEDED BY SHIPPED #44 — implemented in commits `1515a035` + `758cdf89` (see
+`docs/PROGRESS.md`). The implementation diverged from this design on two load-bearing points: (a) the
+Send gate split into two predicates — `is_sky_coercible_elem` (sync) vs `is_async_send_output` (async,
+primitives + `String` only) — rather than reusing the one coercibility predicate, because `Clone ≠ Send`
+(see C1 below as corrected); (b) C5 is enforced via a global panic hook that logs-and-resumes (never
+`exit`) so `tokio::spawn`'s internal `catch_unwind` maps the foreign panic → `Err`, rather than an
+in-wrapper `catch_unwind` around each await. The original design text below is retained as the approved
+plan of record.
+
+**(historical) Status:** GUARDIAN-CLEARED — APPROVE-FOR-IMPLEMENTATION (design only; no implementation
+this pass, per user). The make-or-break was verified in source: Sky's `block_on` (`task.rs:5`) is a real
 multi-thread `tokio::runtime::Runtime::new()` + `enable_all()` (reactor+timer present) on EVERY entry
 shape (cli/server/live/tui; webview = current-thread tokio, still `enable_all`). So native `.await` of
 a foreign tokio future works — NO "no reactor running" panic. The native-await-as-`Task` design ships
@@ -23,9 +32,12 @@ already-running worker). See the constraint checklist + phased plan below.
    shared mutable state straddles the catch). Without this the no-runtime-panic existential is violated.
 2. **[C1 — strict Send gate]** the multi-thread runtime + `task_parallel`'s `tokio::spawn` require a
    `Send` future. rustdoc does NOT state auto-trait `Send`, so gate CONSERVATIVE-CONJUNCTIVE: admit only
-   when every ARG type AND the Output type are provably `Send` (the closed Sky-coercible set is all
-   Send); else DROP `async-future-not-send`. Sound over-approximation — never admits a non-Send future.
-   Do NOT fork to `spawn_local`/current-thread (a non-Send future could still reach `task_parallel`).
+   when every ARG type AND the Output type are provably `Send`. NOTE the sync coercibility predicate is
+   NOT sufficient here: the Sky-coercible set admits `Clone`-opaque (clone-allowlisted) types, and
+   `Clone ≠ Send` (Rc-/cell-backed structs are `Clone + !Send`), so the async gate MUST use a strictly
+   tighter `Send`-only predicate — closed primitives + `String` only, no clone-opaque arm. Else DROP
+   `async-future-not-send`. Sound over-approximation — never admits a non-Send future. Do NOT fork to
+   `spawn_local`/current-thread (a non-Send future could still reach `task_parallel`).
 3. **[C2/C3 — by-value args]** no borrowed arg may straddle the await; `&self`/`&T` that must outlive
    the await → DROP or owned-clone bridge (compose with #45 generic-Self + the #28 by-ref pattern).
    #44 targets async FREE fns + (post-#45) by-value-receiver methods.
@@ -74,7 +86,8 @@ design available:
 1. Sky's Rust `Task` IS an async future: a `SkyTask<E,T> = Box::pin(async move { … })` driven by
    tokio (the generated entry does `block_on(sky_main())`; Sky.Live/server run on tokio; the Task
    executor is the ambient tokio runtime).
-2. The inspector ALREADY maps `Pin<Box<dyn Future<Output=T>>> → Task Error T` (`main.rs:~3468`).
+2. The inspector ALREADY maps `Pin<Box<dyn Future<Output=T>>> → Task Error T` (the
+   `format!("Task Error {}", inner)` arm at `tools/sky-ffi-inspect-rs/src/main.rs:~5898`).
 
 So a foreign `async fn foo(a) -> T` binds as a Sky **`Task Error T'`**, and codegen emits:
 ```rust

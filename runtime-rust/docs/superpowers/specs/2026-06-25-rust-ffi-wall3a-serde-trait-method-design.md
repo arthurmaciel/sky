@@ -1,6 +1,21 @@
 # WALL 3a (#59) — serde Serialize/Deserialize composes with the generic-Self trait-method path
 
-**Status: guardian-reviewed APPROVE-PLAN-WITH-CONSTRAINTS (2026-06-25).**
+**Status: IMPLEMENTED (#59).** Plan was guardian-reviewed
+APPROVE-PLAN-WITH-CONSTRAINTS (2026-06-25); the codegen route below has since
+landed — `TRSerdeValue`/`TRSerdeValueRef` live in the `TypeRef` ADT
+(`FfiCall.hs`), the inspector serde arms (`bounds_are_all_serde_or_marker`,
+`fn_serde_param_all_admissible`, `is_serde_trait_bound`) gate the parametric
+path in `main.rs`, and fixtures `79-ffi-serde-trait` + `81-ffi-serde-ref`
+exercise it. The body reads as a forward-looking plan (design intent + blocking
+constraints); treat it as the rationale record, not pending work.
+
+> **Line numbers are STALE.** Every `main.rs:NNNN` / `Ffi.hs:NNNN` /
+> `FfiCall.hs:NNNN` cite below was accurate as of 2026-06-25 against the
+> pre-#59 tree; the files have grown by hundreds of lines since (main.rs is now
+> ~16k lines). Navigate by the named symbol (`serde_reducible_method`,
+> `resolve_param_bounds`, `bound_to_concrete`, `renderCall`, `renderTypeRef`,
+> `TRSerdeValue`, …), not by the raw line number — `rg` the symbol to find its
+> current location.
 
 ## Problem
 firestore `get_obj`/`query_obj` drop `unmodellable-bound(Deserialize)`,

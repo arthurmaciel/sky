@@ -53,7 +53,7 @@ Implemented in the `Task.run` lowering (ExprEmitter): peel `App.x {...} |> Task.
 / `Task.run (App.x {...})` to the app peephole output, no `task_run`.
 
 **Tenet 3 — `mainIsTask` derives from the body, not `usesLive`.**
-`mainIsTask = usesBackendApp || not usesTaskRun`, where
+`mainIsTask = usesBackendApp || mainEntryTailReturnsTask`, where
 `usesBackendApp = usesLive || usesTui || usesWebview || usesCliProgram`. A main
 that yields a backend entry (Tenet 2 dropped its `Task.run`) is a `SkyTask` →
 `block_on`. A bare-`Task` main (no `Task.run`) is a `SkyTask` → `block_on`. A
@@ -62,11 +62,18 @@ pure-CLI `someTask |> Task.run` (no backend app) runs inline → `()`. `ret`
 
 > **Shipped-design note.** The implementation DROPPED `Cli.program` from
 > `usesBackendApp` — the shipped predicate is
-> `usesBackendApp = usesLive || usesTui || usesWebview` (ModuleEmitter.hs:1074).
+> `usesBackendApp = usesLive || usesTui || usesWebview` (ModuleEmitter.hs:1083).
 > `Cli.program` keeps its `Task.run` and runs inline, so Tenet 2/3's inclusion of
-> `Cli.program` in the backend-entry set did not ship. See
-> `docs/TECHNICAL-DETAILS.md` "Multibackend program-entry model" for the
-> authoritative current behaviour.
+> `Cli.program` in the backend-entry set did not ship. The `not usesTaskRun`
+> disjunct of the original Tenet 3 formula was ALSO dropped as unsound: a program
+> that calls `Task.run` inline yet whose entry-`main` body TAIL is itself a Task
+> (e.g. `14-task-demo`) must still `block_on` (a dropped tail future silently
+> loses its effect under deferred-effect lowering). The shipped signal probes the
+> body tail's task-ness directly — `mainBodyTailIsTask = usesBackendApp ||
+> mainEntryTailReturnsTask solvedTypes body` (ModuleEmitter.hs:1093),
+> surfaced via `builderMainReturnsTask` and consumed as `mainIsTask =
+> mainReturnsTask` (Emitter.hs:390). See `docs/TECHNICAL-DETAILS.md`
+> "Multibackend program-entry model" for the authoritative current behaviour.
 
 This changes the *codegen* of pure-Tui `Tui.app{} |> Task.run` mains (21/38/41)
 from "run `task_run` inline, `main : ()`" to "drop + `main : SkyTask` + entry
@@ -106,11 +113,15 @@ unaffected because init's *body* is unchanged).
 
 ## Components touched (all in-boundary)
 
-- `runtime-rust/src/sky_runtime/live/req.rs` — `#[derive(Default)]` on `LiveReq`
-  (+ `SkyDict: Default` if missing).
-- `src/Sky/Generate/Rust/Builder/Walker.hs` — `usesBackendApp` flag (extend the
-  usage analysis: Tui / Webview / Cli.program as backend entries).
-- `src/Sky/Generate/Rust/Builder/Emitter.hs` — `mainIsTask = usesBackendApp || not usesTaskRun`.
+- `runtime-rust/src/sky_runtime/live/req.rs` — (not needed under Option A: the
+  Live wrapper discards the req via `|_r| init(())`, so no `Default` construction
+  is required; `LiveReq` ships `#[derive(Clone, Debug)]`).
+- `src/Sky/Generate/Rust/Builder/Walker.hs` — `analyzeKernelUsage` supplies the
+  `usesTui` / `usesWebview` / `usesLive` usage flags; the derived `usesBackendApp`
+  is computed in `ModuleEmitter.hs` (line 1083) from them.
+- `src/Sky/Generate/Rust/Builder/Emitter.hs` — `mainIsTask = mainReturnsTask`
+  (Emitter.hs:390), where `mainReturnsTask = builderMainReturnsTask =
+  usesBackendApp || mainEntryTailReturnsTask`.
 - `src/Sky/Generate/Rust/Builder/ModuleEmitter.hs` — `ret` condition mirrors it.
 - `src/Sky/Generate/Rust/Builder/ExprEmitter.hs` — (a) drop `Task.run` on a
   backend-entry app-future uniformly; (b) `Tui.app`/`Tui.program`/`Cli.program`

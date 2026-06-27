@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -184,7 +185,13 @@ def run_one(inspector: str, crate: str, results_dir: Path, timeout: int,
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 proc.kill()
-            proc.communicate()  # reap so no zombie lingers
+            # Bound the reap: a grandchild that escaped the process group
+            # (setsid / double-fork / inherited pipe fds) must not wedge the
+            # sweep past the per-crate timeout.
+            try:
+                proc.communicate(timeout=5)  # reap so no zombie lingers
+            except subprocess.TimeoutExpired:
+                pass
             raise
         if proc.returncode != 0:
             status = "inspector-error"
@@ -333,8 +340,19 @@ def main() -> None:
                 k, v = part.split("=", 1)
                 overrides[k.strip()] = v.strip()
 
-    crates = ([(c.strip(), CLASS_OF.get(c.strip(), "?")) for c in args.crates.split(",")]
-              if args.crates else CRATES)
+    if args.crates:
+        crates = []
+        for c in args.crates.split(","):
+            name = c.strip()
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+                # `name` is interpolated straight into an output file path in
+                # run_one; reject anything that could escape results_dir
+                # (path separators, `..`) before it reaches the filesystem.
+                sys.exit(f"error: invalid crate name {name!r} (allowed: letters, "
+                         "digits, '_', '.', '-')")
+            crates.append((name, CLASS_OF.get(name, "?")))
+    else:
+        crates = CRATES
     print(f"inspector: {inspector}")
     print(f"results  : {results_dir}")
     print(f"crates   : {len(crates)} (timeout {args.timeout}s each, resumable)\n")

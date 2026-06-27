@@ -421,7 +421,7 @@ fail=0
 assert_eq() { if [ "$1" = "$2" ]; then echo "ok   : $3"; else echo "FAIL : $3 want[$2] got[$1]"; fail=1; fi; }
 
 # Drive the script's state subcommands against a throwaway state file.
-export SKY_KGP_STATE="$(mktemp -u)/state"        # script honours this override
+export SKY_KGP_STATE="$(mktemp -d)/state"        # script honours this override
 bash "$KGP" state-init   >/dev/null
 assert_eq "$(bash "$KGP" state-get last_completed_phase)" "0" "state-init sets last_completed_phase=0"
 BASE="$(bash "$KGP" state-get BASE)"
@@ -500,7 +500,7 @@ Add to `keep_go_parity_test.sh` before `exit "$fail"`:
 
 ```bash
 # scoped-sweep --dry-run prints a RUST_EXAMPLES list derived from BASE, no sweep run.
-export SKY_KGP_STATE="$(mktemp -u)/state2"
+export SKY_KGP_STATE="$(mktemp -d)/state2"
 bash "$KGP" state-init >/dev/null
 OUT="$(bash "$KGP" scoped-sweep --dry-run 2>&1)"
 assert_eq "$(printf '%s\n' "$OUT" | grep -c 'RUST_EXAMPLES=')" "1" "scoped-sweep --dry-run emits a RUST_EXAMPLES= line"
@@ -527,7 +527,7 @@ Add to the `case "$cmd"` block:
     echo "scoped-sweep: ${#SCOPED[@]} example(s) since $base"
     echo "RUST_EXAMPLES=$list"
     if [ "${2:-}" = "--dry-run" ]; then
-      echo "would run: SKY_SWEEP_FORCE=1 RUST_EXAMPLES='$list' bash $SCRIPTS/examples-sweep.sh"
+      echo "would run: SKY_SWEEP_FORCE=1 bash $SCRIPTS/examples-sweep.sh (with RUST_EXAMPLES set as above)"
       exit 0
     fi
     if command -v timeout >/dev/null 2>&1; then

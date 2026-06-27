@@ -84,9 +84,11 @@ Map the rollup to the strategic alternatives:
 - many `rich`/`usable` crates (strong `free` + `ctor` surface) -> confirms the **Alt 1** universe is real & worth widening (monomorphize-on-demand, std-type mapping, slice/iterator coercion).
 - `framework` crates landing `peripheral`/`empty` (accessor-only or no constructable surface) -> confirms frameworks need **Alt 2** (generated idiomatic glue) or **Alt 3** (Sky-native modules over the crate, the Sky.Live model).
 
-When asked to record findings, update the `## FFI usage` section of
-`runtime-rust/README.md` and (optionally) drop a dated report under
-`docs/runtime-rust/`. Then follow the user's usual **sky-rust-backend:update-docs**.
+When asked to record findings, log a dated report under
+`runtime-rust/docs/PROGRESS.md`, then run the user's usual
+**sky-rust-backend:update-docs** — it regenerates the `### FFI usage` section of
+`runtime-rust/README.md` (from `## Getting started` downward) from current truth.
+Never hand-edit that section directly.
 
 ## Hygiene
 

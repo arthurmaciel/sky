@@ -1,14 +1,26 @@
 # FFI Firestore CRUD Walls — Implementation Spec
 
 **Scope.** Two blockers in `tools/sky-ffi-inspect-rs/src/main.rs` prevent
-real Firestore CRUD operations from binding shim-free. This document is the
-verified-against-current-code TDD design for both fixes.
+real Firestore CRUD operations from binding shim-free. This document is the TDD
+design for both fixes; both have since SHIPPED (WALL 1 7b47054f, WALL 2
+8a2f1738). Line cites below were verified against the code AT DESIGN TIME — the
+file has since grown to ~16k lines, so absolute line numbers in the pre-fix
+analysis (§1) and the rejected-plan exploration (§3/§5) are stale; the
+authoritative as-built anchors are the by-function-name lists in the Status
+section and the Summary table.
 
 ---
 
-## Status: WALL 1 SHIPPED (7b47054f). WALL 2 guardian-reviewed — BLOCK-PLAN-AS-WRITTEN → constrained Approach-B (2026-06-25)
+## Status: WALL 1 SHIPPED (7b47054f). WALL 2 SHIPPED (8a2f1738) — constrained Approach-B via the per-param mono pre-pass in `try_parametric_stub` (2026-06-25)
 
-### WALL 2 — guardian design ruling (SUPERSEDES §3's A-vs-B vacillation)
+### WALL 2 — guardian design ruling (SUPERSEDES §3's A-vs-B vacillation; this ruling is what SHIPPED)
+
+> **As-built note.** This ruling is the design that landed in `8a2f1738`. The
+> constrained Approach-B it prescribes — the per-PARAM mono pre-pass — is IMPLEMENTED
+> in `try_parametric_stub` (search for `WALL 2 MONO PRE-PASS (#58, constraints 2/3/4/5)`),
+> NOT the `classify_param_bound → Ok(None)` routing that §3 / §5-P2 / the Summary
+> table below still describe as the plan. Read §3 and §5 as the historical
+> exploration that the ruling here supersedes.
 
 **§3 as written is BLOCKED.** Approach A (route through `resolve_generics`) is
 STRUCTURALLY UNAVAILABLE for the firestore shape and §3's summary wrongly
@@ -65,18 +77,22 @@ COVERAGE TRAP (greenlights a fix that leaves firestore red).
 9. **Guardian-final MUST run with `SKY_DCE=0` + a real `cargo build`** of fixture
    75 (the #45 lesson — DCE-on hid #46's broken std-trait wrappers).
 
-Line cites (current main.rs): routing 1140-1145 · UFCS rationale 1127-1136 ·
-serde-escape inherent-only 1090 · `bound_to_concrete` last-segment 5246-5247,
-AsRef ungated arm 5275-5291, Display gated arm 5260-5264 · `trait_is_crate_local`
-5344-5349 · `std_trait_tag` 3713-3740 · `classify_param_bound` 5614-5644 ·
-`full_union_bounds` 5798-5807 · **BoundCrossImpl gate 6548-6559** · turbofish
-6570 · `resolve_param_bounds` conflict 7449-7460 · #25 test 8806-8820.
+Code anchors (by function name — line numbers approximate, refreshed at
+8a2f1738; the file moves, the names don't): routing decision
+`is_concrete_trait_method` / `serde_reducible_method` / `is_inherent_impl`
+(~1538-1808) · `bound_to_concrete` (6711; last-segment `name` 6714, AsRef/Borrow/
+Into/From arm — now `std_trait_tag`-GATED per constraint 1 at 6742-6786, Display
+gated arm 6727-6732) · `trait_is_crate_local` (6839) · `std_trait_tag` (4759) ·
+`classify_param_bound` (7111-7148) · `full_union_bounds` (7266) · **WALL 2 MONO
+PRE-PASS** in `try_parametric_stub` (8126-8230 — the SHIPPED fix) · **BoundCrossImpl
+gate** (8274-8285) · turbofish `type_args` (8337) · `resolve_param_bounds`
+(9638) · #25 test `test_classify_param_bound_crate_local_clone_drops` (11821).
 
 ### WALL 1 — guardian constraints (BLOCKING, must hold in the impl)
 
 1. **[LOAD-BEARING] Restore `is_public(it)` on the type-registration arm** of
-   `walk_module_with_path` — the §2 draft (line ~204) DROPPED it; the current
-   code gates at main.rs:4133. A `pub use private::*` re-exports ONLY the public
+   `walk_module_with_path` — the §2 draft (line ~290) DROPPED it; the SHIPPED
+   code gates at main.rs:5374 (`walk_module_with_path`). A `pub use private::*` re-exports ONLY the public
    items of `private`; registering a `pub(crate)`/bare child publishes a path
    that does not resolve from outside the crate → `<mp::Internal as Trait>::m`
    → **E0603 cargo-fail** (the type-checks-but-cargo-fails class). Arm becomes
@@ -103,12 +119,14 @@ AsRef ungated arm 5275-5291, Display gated arm 5260-5264 · `trait_is_crate_loca
    `tools/` → the crate deny-lints apply; a panic on a real crate's rustdoc
    aborts `sky add`. Use `.get()`/`if let`/`match`; keep `if let Some(mp)` on
    `mpath_from_doc`.
-6. **Make-or-break (C5) — PASS, no change:** `const TYPE_KINDS` (main.rs:3911)
+6. **Make-or-break (C5) — PASS, no change:** `const TYPE_KINDS` (main.rs:5178)
    includes `"trait"`; `FirestoreGetByIdSupport` registers.
 
-Key current-code anchors: gate 4133 · `insert_shorter` 4071 · seed 4078-4085 ·
-`seen` 4087 · `ufcs_trait_path_with_args` 3795-3837 (emits `base` verbatim →
-E0603 surface) · `TYPE_KINDS` 3911 · `item_is_type` 3914 · `is_public` 1662.
+Code anchors (by function name — line numbers approximate, refreshed at 7b47054f):
+type-registration gate 5374 · `insert_shorter_path` 5323 · seed 5427-5436 ·
+`seen` keyed `(mid, mp)` 5351/5353 · `ufcs_trait_path_with_args` 4871 (emits
+`base` verbatim → E0603 surface) · `TYPE_KINDS` 5178 · `item_is_type` 5181 ·
+`is_public` 2340.
 
 ---
 
@@ -120,9 +138,11 @@ E0603 surface) · `TYPE_KINDS` 3911 · `item_is_type` 3914 · `is_public` 1662.
 private intermediate module, causing ~2054 `trait-method-trait-unreachable` drops
 for firestore.
 
-**Confirmed against current code (main.rs lines 4052-4165).**
+**Confirmed against the PRE-FIX code (main.rs lines below are pre-7b47054f; the
+loop has since been replaced by `collect_reachable_paths` + `walk_module_with_path`
+at ~5346-5438).**
 
-The core loop at lines 4087-4163:
+The core (pre-fix) loop:
 
 ```rust
 // line 4079-4084: seed stack with PUBLIC crate-local modules only
@@ -195,6 +215,10 @@ with a synthetic public-path prefix — they're pushed bare and then fail at
 ---
 
 ### WALL 2 — `S: AsRef<str>` in `classify_param_bound` (P2)
+
+> **Pre-fix analysis.** Line numbers below are pre-8a2f1738 and now stale; the
+> drop pathway is real, but the SHIPPED fix is the per-param mono pre-pass in
+> `try_parametric_stub` (not `classify_param_bound`). See the Status section.
 
 **Claimed.** `classify_param_bound` returns `Err(UnmodellableBound("AsRef"))` →
 method drops. Fix: model `AsRef<str>` as `String`.
@@ -387,12 +411,22 @@ make-or-break check: if `TYPE_KINDS` does NOT include `"trait"`, then
 with the fix. The UFCS path needs trait IDs in `REACHABLE_PATHS`.
 
 **File:** `tools/sky-ffi-inspect-rs/src/main.rs`
-**Function:** `collect_reachable_paths` (line 4052)
-**Change:** Replace the current DFS with path-passing DFS via a helper function.
+**Function:** `collect_reachable_paths` (5401) + new helper `walk_module_with_path` (5346)
+**Change:** Replace the DFS with path-passing DFS via a helper function. (SHIPPED 7b47054f.)
 
 ---
 
 ## 3. WALL 2 fix algorithm — `AsRef<str>` in parametric stub path
+
+> **SUPERSEDED — as-built differs.** Neither Approach A nor the
+> `classify_param_bound → Ok(None)` form of Approach B below is what SHIPPED
+> (8a2f1738). The guardian ruling (top of doc) rejected both: the SHIPPED fix is a
+> per-PARAM **mono pre-pass** added to `try_parametric_stub` (search
+> `WALL 2 MONO PRE-PASS (#58, constraints 2/3/4/5)`, main.rs ~8126-8230) that runs
+> BEFORE `full_union_bounds`/the BoundCrossImpl gate, calls `resolve_param_bounds`
+> per param, and removes fully-resolved params from `tyvars`/`order` (so they never
+> hit the gate or emit a turbofish slot). `classify_param_bound` was NOT given an
+> `Ok(None)` arm. Read the A-vs-B discussion below as historical exploration.
 
 ### The actual gap
 
@@ -465,16 +499,19 @@ fn classify_param_bound(bound: &serde_json::Value) -> Result<Option<String>, Gen
 }
 ```
 
-**Soundness gate (critical).** The new `bound_to_concrete` check at the end
-only fires AFTER the existing crate-local check fails (`std_trait_tag` + the
-modellable-5 path). A crate-local trait named `AsRef` would be rejected by
-`std_trait_tag` (it checks the resolved id, not the name) and would NOT reach
-the new arm if `bound_to_concrete` also guards on the std canonical path. We
-must verify `bound_to_concrete` itself is safe for this — at line 5254-5258 it
-checks `std_trait_tag` for `Display`/`ToString`; for `AsRef` at line 5269 it
-uses the last-segment name match `"AsRef"`. This is a soundness gap if a
-crate-local `trait AsRef<T>` exists — `bound_to_concrete` would return `Some`
-for it. To close this:
+**Soundness gate (critical) — RESOLVED in the shipped code.** The new
+`bound_to_concrete` check at the end only fires AFTER the existing crate-local
+check fails (`std_trait_tag` + the modellable-5 path). A crate-local trait named
+`AsRef` would be rejected by `std_trait_tag` (it checks the resolved id, not the
+name) and would NOT reach the new arm if `bound_to_concrete` also guards on the
+std canonical path. The Display/ToString arm of `bound_to_concrete` already
+gates on `std_trait_tag` (main.rs 6727-6732); the AsRef/Borrow/Into/From arm was
+the ungated last-segment gap described here. **Constraint 1 closed it**: that arm
+now also gates on `std_trait_tag(tr)` BEFORE the last-segment match (main.rs
+6742-6755), so a crate-local `trait AsRef<T>` (crate_id 0) resolves to `None` and
+falls through to the `_ => None` drop — `bound_to_concrete` is authoritative, the
+`!is_crate_local` guard below is defense-in-depth. Original write-up of the gap
+and the close-it sketch kept below for context:
 
 ```rust
 // In the new arm: only admit when the bound is a CONFIRMED std trait
@@ -677,8 +714,15 @@ state for WALL 2.
 
 **Step 2 (implement — two sub-steps).**
 
-Sub-step A: In `classify_param_bound` (line 5602), add after the existing
-modellable-5 + marker checks:
+> **As-built:** the SHIPPED fix (8a2f1738) did NOT add the Sub-step-A
+> `classify_param_bound → Ok(None)` arm nor the Sub-step-B stub-builder change as
+> written. It instead added the per-PARAM mono pre-pass in `try_parametric_stub`
+> (main.rs ~8126-8230) that removes resolvable params from `tyvars`/`order` before
+> the BoundCrossImpl gate. See the guardian ruling at the top of the doc. The two
+> sub-steps below are the historical (rejected) plan.
+
+Sub-step A: In `classify_param_bound` (then ~line 5602; now 7111), add after the
+existing modellable-5 + marker checks:
 
 ```rust
 // A bound that fully resolves to a concrete Sky type via bound_to_concrete
@@ -754,10 +798,12 @@ After 75 passes:
 
 ## Summary table
 
-| Wall | Location | Lines | Fix | Soundness risk | Priority |
-|---|---|---|---|---|---|
-| WALL 1 | `collect_reachable_paths` | 4052–4165 | Recursive `walk_module_with_path` with synthetic public path for private glob targets | Cycle (seen-set), TYPE_KINDS must include trait | P1 |
-| WALL 2 | `classify_param_bound` + routing dispatch | 5602–5638 + call sites | Treat `bound_to_concrete`-resolvable bounds as marker-equivalent (Ok(None)); route to `resolve_generics` for fully-monomorphizable methods | `!is_crate_local` guard required; BoundCrossImpl reconciliation | P2 |
+Line numbers are approximate (the file moves); both walls SHIPPED.
+
+| Wall | Location (function) | Fix (as-built) | Soundness risk | Priority |
+|---|---|---|---|---|
+| WALL 1 | `collect_reachable_paths` / `walk_module_with_path` (~5346–5438) | Recursive `walk_module_with_path` with synthetic public path for private glob targets; `is_public` type-reg gate; `seen` keyed `(mid, mp)` | Cycle (seen-set), TYPE_KINDS must include trait | P1 (SHIPPED 7b47054f) |
+| WALL 2 | per-param mono pre-pass in `try_parametric_stub` (~8126–8230) | Resolve each used param via `resolve_param_bounds` BEFORE `full_union_bounds`/BoundCrossImpl; remove fully-resolved params from `tyvars`/`order`; substitute the concrete in all sig positions. `bound_to_concrete` AsRef arm `std_trait_tag`-gated (constraint 1). NOT `classify_param_bound → Ok(None)`. | `!is_crate_local`/`std_trait_tag` guard; BoundCrossImpl reconciliation | P2 (SHIPPED 8a2f1738) |
 
 **Fixture:** `runtime-rust/tests/sky/75-ffi-nested-glob-asref/` (new)
 **File modified:** `tools/sky-ffi-inspect-rs/src/main.rs` (both walls, one file)

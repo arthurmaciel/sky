@@ -37,9 +37,9 @@ covers the unique-impl-decode / firestore-style generic-Self async-send.
   (recommended: WALL-I output-serializes the concrete response to a JSON `String`). ⇒
   **WALL-H and WALL-I are ONE coupled arc; ship WALL-H's mechanism, realize usability in WALL-I.**
 - **Q-H2 → trait-identity keying** (canonical-path allowlist `SERDE_TRAIT_PATHS`,
-  `main.rs:6109`). Adding `"miniserde::de::Deserialize"` is one line — BUT necessary-not-
-  sufficient: the existing reduce `method_all_serde_reducible` (`main.rs:8750`) covers only
-  METHOD-declared serde params and `return false`s for impl/struct-declared (line 8789).
+  `main.rs:6342`). Adding `"miniserde::de::Deserialize"` is one line — BUT necessary-not-
+  sufficient: the existing reduce `method_all_serde_reducible` (`main.rs:9172`) covers only
+  METHOD-declared serde params and `return false`s for impl/struct-declared (line 9212).
   WALL-H's `T` is **impl-declared** → the impl-declared-T-open threading (§3.2) is genuinely
   NEW code; the allowlist only makes the bound recognized, not threaded.
 - **Verified vs spec:** impl 332 is INHERENT (not a trait impl); items `[330,331]` exactly;
@@ -385,7 +385,7 @@ for the 330 async path, and interacts with the #59/#65 serde-bound-T machinery
 
 - **B1** — add `"miniserde::de::Deserialize"` to `SERDE_TRAIT_PATHS` (keep the crate-local
   veto). Implement impl-declared-T-open threading SEPARATELY — `method_all_serde_reducible`
-  (main.rs:8789) does NOT cover impl-declared params.
+  (main.rs:9212) does NOT cover impl-declared params.
 - **B2** — discriminate by the bound trait's NATURE, not position: `C: StripeClient`
   (unique-impl trait) → WALL-G mono; `T: miniserde::Deserialize` (open decode bound) →
   thread OPEN. `T` must NEVER reach the unique-impl resolver (`Deserialize` has 0/many impls
@@ -400,7 +400,7 @@ for the 330 async path, and interacts with the #59/#65 serde-bound-T machinery
   CONDITIONALLY-Send-on-T (`PhantomData<T>` + Send fields); an unconditionally-Send model is
   a FALSE GREEN on the spawn's `Customizable<T>: Send` obligation.
 - **B6** — WALL-G's concrete client Sky surface must be the OWNED `Client` via the
-  `isOwnRefTy` case-(A) path (Ffi.hs:794); the fixture must combine async-send + owned
+  `isOwnRefTy` case-(A) path (Ffi.hs:762); the fixture must combine async-send + owned
   cross-crate client (a combination no shipped fixture yet exercises).
 - **B7** — `miniserde` becomes a DIRECT generated-Cargo.toml `[dependencies]` (else E0433),
   version from the invocation set; DROP on version skew vs what async-stripe-client-core
@@ -471,14 +471,14 @@ Attempted finding (a) [register the Self-mono'd concrete's frozen Send into
 PROVABLY_SEND_OPAQUE_NAMES + have `is_provably_send_opaque_return` consult it]. It did NOT
 bind `send` — REVERTED (no unverified partial). Precise diagnosis from the attempt:
 
-- `self_mono_subst` IS applied to the method sig BEFORE `parse_fn_item` (main.rs:1483-1488,
-  "Runs FIRST so … parse_fn_item sees the concrete sig"). So the async gate already sees the
+- `self_mono_subst` IS applied to the method sig BEFORE `parse_fn_item` (main.rs:1484 computed,
+  1597 applied: "Runs FIRST so … parse_fn_item sees the concrete sig"). So the async gate already sees the
   CONCRETE `Customizable<Resp>` receiver + `Resp` output — the output-registration idea was
   not the blocker.
 - **The blocker is the RECEIVER Send proof.** The async wrapper MOVES `self`
   (`Customizable<Resp>`, by value) into the `async move {}` spawn block → needs
   `Customizable<Resp>: Send`. But every async-Send gate (`is_provably_send_opaque_return`
-  5306, `recv_provably_async_send` 4250, `is_async_send_output` 5279) **rejects any
+  5519, `recv_provably_async_send` 4454, `is_async_send_output` 5499) **rejects any
   `<`-containing type outright** — a generic INSTANTIATION like `Customizable<Resp>` can't be
   proven Send by the current name-set machinery. (`send_blocking` binds because the sync path
   has no spawn → no receiver-Send obligation.)

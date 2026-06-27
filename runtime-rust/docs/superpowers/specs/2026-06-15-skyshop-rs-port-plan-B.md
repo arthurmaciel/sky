@@ -281,7 +281,7 @@ preserved, mechanism adapted · **stub** build-green placeholder first.
 | `src/State.sky` (177) | **1:1** | Pure types/Msg/constants. Only `Prelude`/`Maybe`/`Dict`. Zero FFI. |
 | `src/Lib/Translation.sky` (781) | **1:1** | Pure `case`-on-string, EN/中文. Chinese literals emit verbatim as UTF-8 `&str`. |
 | `src/Lib/Money.sky` (72) | **1:1** | Pure arithmetic/formatting (confirm no FFI; same as Translation class). |
-| `src/Lib/Cart.sky` (523) | **1:1** | All I/O goes through `Lib/Db` + `Uuid.newString` → only change is the `Uuid` import (see below); the body's `case`-on-`Result` shape is untouched because `Lib/Db` stays sync. `getOrderWithItems` tuple return ports as-is. |
+| `src/Lib/Cart.sky` (523) | **rewrite (import only)** | All I/O goes through `Lib/Db` + `Uuid.newString` → only change is the `Uuid` import (same as Products, see below); the body's `case`-on-`Result` shape is untouched because `Lib/Db` stays sync. `getOrderWithItems` tuple return ports as-is. |
 | `src/Lib/Products.sky` (252) | **rewrite (import only)** | Same as Cart: logic 1:1, only `import Github.Com.Google.Uuid as Uuid` → `import Rust.Uuid as Uuid` (or `Sky.Core.Uuid`). Call sites `Uuid.newString ()` unchanged if the wrapper/kernel matches the `() -> Result Error String` shape; else `Sky.Core.Uuid.v4` (bare). |
 | `src/Lib/Db.sky` (545) | **rewrite (FFI surface)** | Replace `import Cloud.Google.Com.Go.Firestore`, `import Context`, `import Fmt` with `import Rust.FirestoreShim as Fs`. Collapse the ~15 fine-grained `Firestore.*` calls onto the **coarse** wrapper (Decision 6 / §FFI). `ctx`/`Context.background ()`/`js "nil"` vanish (wrapper owns context). `wrapDbError`'s `String.contains` heuristics stay — wrapper preserves the gRPC error text (Decision 7). `snapshotToDict`/`mapToStringDict`/`anyToString`(`Fmt.sprint`) replaced by the wrapper returning pre-flattened `Dict String String` rows (Decision 5). `intVal`/`boolVal`/`floatVal`/`getField`/`getInt`/`getBool` are **pure Sky — 1:1**. |
 | `src/Lib/Stripe.sky` (569) | **rewrite (FFI surface)** | Replace the ~30 fine-grained `Stripe.*`/`Session.*`/`Customer.*` builder calls with **3 coarse** wrapper calls: `stripeCreateCheckout`, `stripeGetOrCreateCustomer`, `stripeVerifySession` (Decision §Stripe). `apiKey == "" → Err invalidInput` early-out preserved. The `PaymentStatus`/`CheckoutInfo` record types + the field extraction logic stay; only the source of the data changes (wrapper JSON → flat `Dict`, then build the record). `deductStock`/`deductItemStock` are pure `Lib/Db` calls → **1:1**. |
@@ -300,7 +300,8 @@ preserved, mechanism adapted · **stub** build-green placeholder first.
 
 **Net divergence surface:** `init` (1 line) + the three FFI-surface modules'
 import lines and coarse-call substitutions + `Notify` dead-import drop + Uuid
-import. ~5 of 19 files touched; **14 of 19 ported byte-for-byte.**
+import. 7 of 19 files touched (Db, Stripe, Auth, Notify, Main, Products, Cart);
+**12 of 19 ported byte-for-byte.**
 
 ---
 
@@ -314,7 +315,8 @@ import. ~5 of 19 files touched; **14 of 19 ported byte-for-byte.**
 - `RustDepSpec` has only `RustVersion` + `RustGitDep` — **no local-path variant**.
   **Resolution (in-doctrine, zero compiler change): publish each wrapper crate to a
   git repo and reference it via `RustGitDep`.** The FFI inspector already supports
-  git crates (`Sky.Build.Rust.Ffi.inspectGitCrate`, `--git <url>`), slug =
+  git crates (`Sky.Build.Rust.Ffi.runRustInspectorGit`, inspector binary flag
+  `--git URL [--rev|--branch|--tag]`), slug =
   `slugify(_pkgName)`, artifacts at `.skycache/ffi/rust/<slug>.{kernel.json,skyi,
   _bindings.rs}` (Q3.3). This is buildable **today**.
 
@@ -327,7 +329,7 @@ import. ~5 of 19 files touched; **14 of 19 ported byte-for-byte.**
 
 - **Recommended in-boundary enhancement (small, optional): add `RustPathDep`** to
   `Sky.Sky.Toml.Rust` (`path = "…"` constructor) + `emitDepLine` (`{ path = "…" }`)
-  + a `inspectPathCrate` analog in `Sky.Build.Rust.Ffi` (mirror `inspectGitCrate`,
+  + a `inspectPathCrate` analog in `Sky.Build.Rust.Ffi` (mirror `runRustInspectorGit`,
   `--manifest-path`). This lets the wrapper crates live **inside**
   `examples/rust/skyshop-rs/` (e.g. `firestore-shim/`, `stripe-shim/`,
   `firebase-auth-shim/` sibling dirs) and be referenced by relative path — far
@@ -579,9 +581,10 @@ gate in `equiv-sweep.sh` accepts an `out` entry. Nothing re-introduces a
 
 ## Summary
 
-- **The port is near-verbatim, not a rewrite.** 14/19 `.sky` files port
+- **The port is near-verbatim, not a rewrite.** 12/19 `.sky` files port
   byte-for-byte; only `Lib/Db`, `Lib/Stripe`, `Lib/Auth` (FFI surface), `Lib/Notify`
-  (drop 3 dead Go imports), and `Main.init` (1-line Dict→`req.cookies`) change.
+  (drop 3 dead Go imports), `Main.init` (1-line Dict→`req.cookies`), and
+  `Lib/Products` + `Lib/Cart` (Uuid import only) change.
 - **Lynchpin:** the wrapper crates expose **synchronous, fallible-pure**
   `fn -> Result<T,String>` (the inspector binds them as Sky `Result`, NOT `Task`),
   so every `case`-on-`Result` call site across `update`/`init`/`Page/*` is

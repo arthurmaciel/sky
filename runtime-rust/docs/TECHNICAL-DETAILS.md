@@ -79,7 +79,7 @@ type collision and full fault isolation.
   spool) mirror Go's behaviour; OTLP's JSON encoding means no protobuf dep.
 - **Client JS served as a cacheable external asset with SRI (Rust-only).** Go inlines
   the full `CLIENT_JS` body inside every page's `<script>` tag so the browser
-  re-downloads ~36 KB of identical JS on every page load / session. The Rust backend
+  re-downloads ~73 KB of identical JS on every page load / session. The Rust backend
   serves the client body as a **separate HTTP route** (`GET
   /_sky/client.<hex16>.js`) with `Cache-Control: public, max-age=31536000,
   immutable` — the browser fetches it once and reuses the cached copy for all
@@ -121,7 +121,7 @@ return `any` narrowed by `rt.Coerce` reflectively.) The value travels as its rea
 type `A`; the one `serde` decode is provably-shaped because the kernel owns both
 the SELECT and the `Value`. (`live/hub.rs`.)
 
-### Telemetry spill — one schema end-to-end · WAL + `mode=rw` reader
+### Telemetry spill — one schema end-to-end · WAL + `mode=rwc` reader
 
 The embedded console uses **one** schema end-to-end (the hub
 `service_name/time/trace_id/…` schema) for both the writer
@@ -129,9 +129,10 @@ The embedded console uses **one** schema end-to-end (the hub
 per-app spill plus the hub schema); the Rust spill is an internal writer↔reader
 contract, so a single source of truth is the richer one the console records need.
 The spill is WAL (concurrent parent-writer + console-reader without livelock), and
-the console reader opens `mode=rw`, not `mode=ro`: a `mode=ro` connection can't
-attach `-wal`/`-shm` shared memory and silently reads stale/empty data; `mode=rw`
-participates in WAL and sees all committed writes (the console only ever `SELECT`s).
+the console reader opens `mode=rwc` (rw + create), not `mode=ro`: a `mode=ro`
+connection can't attach `-wal`/`-shm` shared memory and silently reads
+stale/empty data; `mode=rwc` participates in WAL and sees all committed writes
+(the console only ever `SELECT`s).
 
 ### Pub/Sub broker — per-type `Broker<T>` keyed by `TypeId`
 
@@ -285,7 +286,7 @@ rewrite when that lands.
 
 ### `runtime-rust/tests/sky/` — FFI + framework fixtures
 
-The FFI / framework fixture set is 50+ Sky projects under
+The FFI / framework fixture set is 120+ Sky projects under
 `runtime-rust/tests/sky/`, each building + running from a wiped slate. They cover:
 
 - **Leaf FFI crates** (rand, num_cpus, chrono, uuid, roman, semver, bytesize, …) —

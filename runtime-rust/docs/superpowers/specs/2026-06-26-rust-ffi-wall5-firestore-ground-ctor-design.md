@@ -1,5 +1,14 @@
 # WALL 5 — Firestore ground constructor: empirical design spec
 
+> **STATUS — IMPLEMENTED in `da939c23` (2026-06-26).** This is the
+> pre-implementation design spec; the fix shipped as designed (inspector-only
+> `collect_generic_result_aliases` + `expand_generic_alias`, in both converters).
+> Retained for archaeology. The "Mode: read-only investigation + design" note
+> below describes the spec's authoring state, not current reality. The §4 proof
+> fixture shipped as `runtime-rust/tests/sky/80-ffi-result-alias` (crate
+> `result-alias-crate`); the real firestore ground ctors `with_options` /
+> `for_default_project_id` now bind as `Task Error FirestoreDb`.
+
 - **Task:** #63 (the gating firestore blocker)
 - **Date:** 2026-06-26
 - **Branch / HEAD context:** `feat/runtime-rust`, firestore re-measured at HEAD `cadb5c60` (all walls in)
@@ -143,24 +152,28 @@ For `with_options` / `for_default_project_id`:
 
 1. `is_async = true`.
 2. Not `unsafe`; `resolve_generics` returns `Some(empty)` (no generic params) — **not** the drop.
-3. No `impl Trait`, no `dyn` object — passes 2773–2817.
-4. **Output rendering (line 2874–2882).** Output JSON is
+3. No `impl Trait`, no `dyn` object — passes the impl-Trait / dyn-object check.
+4. **Output rendering.** Output JSON is
    `resolved_path { path: "FirestoreResult", id: 1137, args: <Self> }`.
    Both `rustdoc_type_to_rust_str` and `rustdoc_type_to_sky` call `resolve_alias`,
    which is backed by `collect_aliases` — and **`collect_aliases` skips GENERIC
-   aliases** (`src/main.rs` ~3942: `if generic { continue; }`). `FirestoreResult<T>`
+   aliases** (`src/main.rs` `collect_aliases`: `if generic { continue; }`). `FirestoreResult<T>`
    is generic, so it is NOT in `ALIAS_MAP`. The converters therefore render it
    **opaquely** as `FirestoreResult<FirestoreDb>` (rust) and `FirestoreResult FirestoreDb`
    (sky) — the alias is never expanded to `Result<FirestoreDb, FirestoreError>`.
    `subst_self` then maps `Self -> FirestoreDb` inside that opaque shell.
 5. `classify_effect` → `effectful` (async).
-6. **Async-Send OUTPUT gate (3107–3159).** `ret.rust_type = "FirestoreResult<FirestoreDb>"`.
+6. **Async-Send OUTPUT gate** (the `output_is_send` → `async-future-not-send`
+   path). `ret.rust_type = "FirestoreResult<FirestoreDb>"`.
    The gate tries `strip_prefix("Result<")` to unwrap the `T` of a fallible async
    return — this **fails** (the string starts with `FirestoreResult<`, not `Result<`),
    so `inner_rt` falls back to the whole `"FirestoreResult<FirestoreDb>"`.
    `is_async_send_output` (primitives+String only) = false; `is_async_send_seq` =
-   false; `is_provably_send_opaque_return` **rejects any string containing `<`** →
-   false. `output_is_send = false` → `return None`.
+   false; `is_provably_send_opaque_return("FirestoreResult<FirestoreDb>")` →
+   false (at spec time it rejected any string containing `<` outright; WALL-H/#87
+   later routed the `<` case to `is_generic_instantiation_send`, which still
+   rejects an unresolved crate-Result alias — so the drop is unchanged).
+   `output_is_send = false` → `return None`.
    The drop is recorded as `record_tail_drop("async-future-not-send", …)` — but
    `"async-future-not-send"` is **not** in the `--audit` histogram's printed reason
    list, so the drop is silent in the audit summary (this is why the re-measure

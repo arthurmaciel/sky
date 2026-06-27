@@ -103,13 +103,14 @@ GO_TIMEOUT="${GO_TIMEOUT:-600}"
 # ── Orphan reaping ──────────────────────────────────────────────────────────
 SERVER_PIDS=()
 cleanup() {
+  # Every server this script spawns is tracked in SERVER_PIDS (boot_server_once
+  # captures each $!), so reaping that list reaps exactly our processes. A blanket
+  # `pkill -f 'sky-app'` would substring-match every process in the user's session
+  # whose command line contains 'sky-app' — unrelated processes outside this run —
+  # so it is intentionally NOT used here.
   for pid in "${SERVER_PIDS[@]:-}"; do [ -n "${pid:-}" ] && kill -TERM "$pid" 2>/dev/null; done
   sleep 1
   for pid in "${SERVER_PIDS[@]:-}"; do [ -n "${pid:-}" ] && kill -KILL "$pid" 2>/dev/null; done
-  # Match the binary basename (fixed substring) rather than interpolating
-  # $CARGO_TARGET_DIR into the pkill -f regex — a cache path with regex
-  # metacharacters (. + ( ) would otherwise broaden/narrow the match.
-  pkill -f 'sky-app' 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
@@ -210,9 +211,10 @@ ab_throughput() { # $1=port
   echo "${rps:-}"
 }
 
-# Peak RSS (MB, 1 decimal) of a pid from /proc VmRSS. "" if unreadable.
+# Peak RSS (MB, 1 decimal) of a pid from /proc VmHWM (kernel-tracked high-water
+# mark — the true peak, not the instantaneous VmRSS at reap time). "" if unreadable.
 rss_mb() { # $1=pid
-  local kb; kb="$(awk '/^VmRSS:/{print $2}' "/proc/$1/status" 2>/dev/null)"
+  local kb; kb="$(awk '/^VmHWM:/{print $2}' "/proc/$1/status" 2>/dev/null)"
   [ -n "$kb" ] && awk -v k="$kb" 'BEGIN{printf "%.1f", k/1024}' || echo ""
 }
 
@@ -267,8 +269,9 @@ for entry in "${EXAMPLES[@]}"; do
 
   # 2. Dynamic release build.
   if ( cd "$d" && timeout "$CARGO_TIMEOUT" cargo build --release --manifest-path sky-out/rust/Cargo.toml ) >>"$LOG" 2>&1; then
-    dyn_b="$(fsize "$CARGO_TARGET_DIR/release/sky-app")"
     DYN_BIN="$CARGO_TARGET_DIR/release/sky-app"
+    [ -f "$DYN_BIN" ] || DYN_BIN="$DYN_BIN.exe"   # Windows emits sky-app.exe
+    dyn_b="$(fsize "$DYN_BIN")"
   else
     say "     dynamic release build FAILED"
     DYN_BIN=""
@@ -305,7 +308,9 @@ for entry in "${EXAMPLES[@]}"; do
 
   # 4. Go release build (fully-static baseline). Best-effort; may fail on composites.
   if ( cd "$d" && timeout "$GO_TIMEOUT" "$SKY_BIN" build src/Main.sky ) >>"$LOG" 2>&1; then
-    go_b="$(fsize "$d/sky-out/app")"
+    GO_BIN="$d/sky-out/app"
+    [ -f "$GO_BIN" ] || GO_BIN="$GO_BIN.exe"   # Windows emits app.exe
+    go_b="$(fsize "$GO_BIN")"
   else
     say "     go build n/a (best-effort)"
   fi

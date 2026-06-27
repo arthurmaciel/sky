@@ -476,7 +476,6 @@ exercise_server_equiv() {
   gboot="$(_boot_server_at "$go_bin" "$gport" "$grun" "$log.go")"
   gpid="${gboot%%:*}"; gp="${gboot##*:}"
   if [ -z "$gpid" ]; then
-    grep -qiE "$PANIC_RE" "$log.go" 2>/dev/null
     rm -rf "$grun" "$rrun"; cat "$log.go" >>"$log" 2>/dev/null
     echo "go-ref-broken"; return 0
   fi

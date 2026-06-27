@@ -54,10 +54,11 @@ cleanup() {
     for pid in "${SERVER_PIDS[@]:-}"; do [ -n "${pid:-}" ] && kill -TERM "$pid" 2>/dev/null; done
     sleep 1
     for pid in "${SERVER_PIDS[@]:-}"; do [ -n "${pid:-}" ] && kill -KILL "$pid" 2>/dev/null; done
-    # Match the binary basename (fixed substring) rather than interpolating
-    # $CARGO_TARGET_DIR into the pkill -f regex — a cache path with regex
-    # metacharacters would otherwise broaden/narrow the match.
-    pkill -f 'sky-app' 2>/dev/null
+    # Backstop sweep scoped to THIS run's unique private-dir token (every server
+    # launches from "$WORK/…", so its command line contains $RUN_TOKEN) — never a
+    # broad 'sky-app' that could reap another run's / another user's process.
+    [ -n "${RUN_TOKEN:-}" ] && pkill -f "$RUN_TOKEN" 2>/dev/null
+    [ -n "${WORK:-}" ] && rm -rf "$WORK"
 }
 trap cleanup EXIT INT TERM
 
@@ -70,30 +71,48 @@ command -v curl  >/dev/null || die "curl not on PATH"
 [ -d "$FIXTURE_DIR" ]       || die "fixture missing: $FIXTURE_DIR"
 HAVE_AB=0; command -v ab >/dev/null && HAVE_AB=1
 
+# Validate numeric tunables BEFORE any arithmetic / loop / fan-out uses them. An
+# unvalidated env value otherwise busy-spins a core (RSS_SAMPLE_SEC=0 → sleep 0)
+# or forks an unbounded burst (AB_C=200000 → process-table exhaustion).
+for _tunable in LOAD_SECONDS AB_N AB_C RSS_SAMPLE_SEC SERVER_CEILING; do
+    _v="${!_tunable}"
+    { [[ "$_v" =~ ^[0-9]+$ ]] && [ "$_v" -ge 1 ]; } \
+        || die "$_tunable must be a positive integer (got '$_v')"
+done
+# Clamp concurrency so a typo'd/hostile AB_C cannot fork an unbounded curl burst.
+[ "$AB_C" -le 1000 ] || { info "AB_C=$AB_C exceeds ceiling 1000 — clamping to 1000."; AB_C=1000; }
+
 # The per-server watchdog kills the server after SERVER_CEILING seconds; if that
 # is <= the load window it would pre-empt a legitimate measurement. Fail closed.
 [ "$SERVER_CEILING" -gt "$LOAD_SECONDS" ] || \
     die "SERVER_CEILING ($SERVER_CEILING) must exceed LOAD_SECONDS ($LOAD_SECONDS) — else the watchdog pre-empts the run"
 
+# Per-run private workdir (mktemp → mode 0700, unguessable name): every binary +
+# log lives here, so no fixed /tmp path is symlink-clobberable and no cp/redirect
+# can be diverted through an attacker-planted symlink (CWE-377/CWE-59).
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/alloc-stress.XXXXXX")" || die "mktemp -d failed"
+RUN_TOKEN="$(basename "$WORK")"   # unique substring for the scoped pkill backstop
+RESULT_FILE="$WORK/result"        # run_variant writes its result line here
+
 # ── 1. Emit the Rust project once, then build the four variants ─────────────
 info "Emitting Rust project (sky build --backend rust) ..."
 ( cd "$FIXTURE_DIR" && timeout 600 "$SKY_BIN" build --backend rust src/Main.sky ) \
-    >/tmp/alloc-stress-emit.log 2>&1 || { tail -20 /tmp/alloc-stress-emit.log; die "sky emit/build failed"; }
+    >"$WORK/emit.log" 2>&1 || { tail -20 "$WORK/emit.log"; die "sky emit/build failed"; }
 [ -d "$RUST_DIR" ] || die "emitted Rust dir missing: $RUST_DIR"
 
 DYN_SRC="$CARGO_TARGET_DIR/release/sky-app"
 MUSL_SRC="$CARGO_TARGET_DIR/$MUSL_TRIPLE/release/sky-app"
-BIN_A="/tmp/alloc-stress-A-dyn-sys"     # dynamic glibc, system malloc (default)
-BIN_B="/tmp/alloc-stress-B-dyn-mi"      # dynamic glibc, mimalloc
-BIN_C="/tmp/alloc-stress-C-musl-mi"     # static musl, mimalloc (the deploy artifact)
-BIN_D="/tmp/alloc-stress-D-musl-sys"    # static musl, musl's own malloc
+BIN_A="$WORK/A-dyn-sys"     # dynamic glibc, system malloc (default)
+BIN_B="$WORK/B-dyn-mi"      # dynamic glibc, mimalloc
+BIN_C="$WORK/C-musl-mi"     # static musl, mimalloc (the deploy artifact)
+BIN_D="$WORK/D-musl-sys"    # static musl, musl's own malloc
 
 # build_variant <desc> <src-binary> <dest> [extra cargo args...]
 build_variant() {
     local desc="$1" src="$2" dest="$3"; shift 3
     info "Building $desc ..."
     timeout 1200 cargo build --release --manifest-path "$RUST_DIR/Cargo.toml" "$@" \
-        >/tmp/alloc-stress-build.log 2>&1 || { tail -25 /tmp/alloc-stress-build.log; die "$desc build failed"; }
+        >"$WORK/build.log" 2>&1 || { tail -25 "$WORK/build.log"; die "$desc build failed"; }
     [ -x "$src" ] || die "$desc: expected binary missing at $src"
     cp -f "$src" "$dest"
 }
@@ -126,13 +145,18 @@ rss_kb() { local v; v="$(awk '/^VmRSS:/{print $2}' "/proc/$1/status" 2>/dev/null
 # run_variant <label> <binary> → echoes "throughput peakRSS startRSS endRSS growth"
 run_variant() {
     local label="$1" bin="$2"
-    local logf="/tmp/alloc-stress-server-$label.log" abf="/tmp/alloc-stress-ab-$label.log"
+    local logf="$WORK/server-$label.log" abf="$WORK/ab-$label.log"
     info "[$label] launching server ..."
     "$bin" >"$logf" 2>&1 &
     local srv=$!; SERVER_PIDS+=("$srv")
     ( sleep "$SERVER_CEILING"; kill -KILL "$srv" 2>/dev/null ) &
     local watchdog=$!
-    if ! wait_for_server "$srv"; then tail -20 "$logf" >&2; die "[$label] server did not become ready"; fi
+    if ! wait_for_server "$srv"; then
+        tail -20 "$logf" >&2
+        kill "$watchdog" 2>/dev/null; kill -KILL "$srv" 2>/dev/null
+        info "[$label] server did not become ready"
+        return 1
+    fi
     info "[$label] server up (pid $srv); driving load ~${LOAD_SECONDS}s ..."
     : > "$abf"
     (
@@ -176,14 +200,21 @@ run_variant() {
     kill -TERM "$srv" 2>/dev/null; sleep 0.5; kill -KILL "$srv" 2>/dev/null
     local growth; growth="$(awk -v e="$end_kb" -v s="$start_kb" 'BEGIN{ if(s>0) printf "%.3f", e/s; else print 0 }')"
     info "[$label] samples=${#samples[@]} thr=${thr}/s peak=$((peak_kb/1024))MB start=$((start_kb/1024))MB end=$((end_kb/1024))MB growth=${growth}x"
-    echo "$thr $peak_kb $start_kb $end_kb $growth"
+    printf '%s %s %s %s %s\n' "$thr" "$peak_kb" "$start_kb" "$end_kb" "$growth" > "$RESULT_FILE"
 }
 
 # ── 2. Run the four variants ────────────────────────────────────────────────
-read -r A_THR A_PEAK A_START A_END A_GROWTH < <(run_variant "A-dyn-sys"  "$BIN_A")
-read -r B_THR B_PEAK B_START B_END B_GROWTH < <(run_variant "B-dyn-mi"   "$BIN_B")
-read -r C_THR C_PEAK C_START C_END C_GROWTH < <(run_variant "C-musl-mi"  "$BIN_C")
-read -r D_THR D_PEAK D_START D_END D_GROWTH < <(run_variant "D-musl-sys" "$BIN_D")
+# Call run_variant in the PARENT shell (not in `<(…)` process substitution): so
+# its SERVER_PIDS+= reaches the cleanup trap and a `return 1` (server-not-ready)
+# fails the run loudly instead of silently yielding empty metrics.
+run_variant "A-dyn-sys"  "$BIN_A" || die "A-dyn-sys variant run failed"
+read -r A_THR A_PEAK A_START A_END A_GROWTH < "$RESULT_FILE"
+run_variant "B-dyn-mi"   "$BIN_B" || die "B-dyn-mi variant run failed"
+read -r B_THR B_PEAK B_START B_END B_GROWTH < "$RESULT_FILE"
+run_variant "C-musl-mi"  "$BIN_C" || die "C-musl-mi variant run failed"
+read -r C_THR C_PEAK C_START C_END C_GROWTH < "$RESULT_FILE"
+run_variant "D-musl-sys" "$BIN_D" || die "D-musl-sys variant run failed"
+read -r D_THR D_PEAK D_START D_END D_GROWTH < "$RESULT_FILE"
 
 # ── 3. Report — 2×2 matrix + isolated effects ───────────────────────────────
 mb() { awk -v k="$1" 'BEGIN{ printf "%.1f", k/1024 }'; }

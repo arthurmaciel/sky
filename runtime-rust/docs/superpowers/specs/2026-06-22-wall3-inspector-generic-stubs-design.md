@@ -122,8 +122,9 @@ author `examples/`.
 ## GUARDIAN-LOCKED constraints (design review 2026-06-22 — APPROVE-WITH-CONSTRAINTS)
 BLOCKING (must be in the implementation before code):
 - **C1 (floor)** — thread the OWNING impl-block + struct-def generics + `where_predicates`
-  into the bound-union alongside the method's, for every USED type-param. (`main.rs:728`
-  currently drops `impl_data["generics"]` — where `K: Hash+Eq` lives.) Union BEFORE
+  into the bound-union alongside the method's, for every USED type-param. (the impl-walk
+  in `main.rs` `parse_rustdoc` currently drops `impl_data["generics"]` — where `K: Hash+Eq`
+  lives; line offsets here are as-of-2026-06-22 snapshots.) Union BEFORE
   trait-name extraction.
 - **C2 (floor, the silent under-emit)** — the where-pred gather keys on `bp.type.generic`
   (`{"generic":NAME}`). An associated-type projection `<K as Foo>::Item: Bar` arrives as a
@@ -137,10 +138,10 @@ BLOCKING (must be in the implementation before code):
   If a struct/impl has defaulted type params carrying bounds the stub doesn't bind, DROP+
   report unless the default is provably erased.
 - **C5 (floor, impls)** — gather bounds ONLY from the impl block that OWNS the walked method
-  (`main.rs:687`); cross-impl/blanket availability is out of scope ⇒ drop.
+  (the owning-impl walk in `main.rs` `parse_rustdoc`); cross-impl/blanket availability is out of scope ⇒ drop.
 - **4a (drift, the modellable-5 set)** — `{Hash,Eq,Ord,Clone,Default}` lives in Haskell
-  (`FfiInstance.hs:276`); the inspector has NO such constant (its `MARKER_TRAITS` is a
-  13-elem SUPERSET for a different purpose — do NOT reuse). SINGLE SOURCE OF TRUTH (emit
+  (`FfiInstance.hs` `modellableTrait`); the inspector has NO such constant (its
+  `MARKER_TRAITS` is a 15-elem SUPERSET for a different purpose — do NOT reuse). SINGLE SOURCE OF TRUTH (emit
   the 5-set from one place both consume) OR a guard test parsing both literals + asserting
   set-equality. The drift test MUST cover this constant, not only the Call schema.
 - **4b (drift, the Call schema)** — round-trip corpus PLUS negative cases: unknown

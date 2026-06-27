@@ -57,8 +57,9 @@ OR `SKY_SWEEP_FORCE=1` → proceeds. (`night_guard` lives in `lib/checks.sh`.)
 
 - `SKY_CONSOLE_EMBED=off runtime-rust/scripts/rust-perf.sh` over the both-backend
   perf-runnable set (`perf_set` from `lib/examples.sh` = build_set; cli/server/
-  live). tui/webview/fyne get build + cold-start only (no throughput metric;
-  hyperfine would hang on an input/window-waiting binary). `rust-perf.sh`
+  live). tui/webview/fyne are skipped entirely by the perf sweep (no throughput
+  metric, and hyperfine cold-start would hang on an input/window-waiting binary);
+  their build + run smoke is covered by the sibling examples-sweep. `rust-perf.sh`
   self-skips (exit 3) anything a backend can't build; each call is
   `timeout`-bounded + orphan-reaped.
 - **Core-feature metrics (not just `GET /`).** `ab GET /` measures the cold

@@ -200,10 +200,12 @@ def fence_re(region_id: str) -> re.Pattern:
 def splice(text: str, region_id: str, body: str) -> str:
     pat = fence_re(region_id)
     if not pat.search(text):
-        raise SystemExit(
+        print(
             f"error: AUTOGEN:{region_id} fence not found in README — "
-            f"add the BEGIN/END comment markers around the table first."
+            f"add the BEGIN/END comment markers around the table first.",
+            file=sys.stderr,
         )
+        raise SystemExit(4)
     # body is the inner content (no surrounding newlines); fences supply them.
     return pat.sub(lambda m: m.group(1) + body + m.group(2), text)
 
@@ -583,7 +585,7 @@ def main(argv) -> int:
             return cmd_examples(args)
         if args.cmd == "headline-check":
             return cmd_headline_check(args)
-    except FileNotFoundError as e:
+    except (OSError, UnicodeDecodeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 4
     return 4

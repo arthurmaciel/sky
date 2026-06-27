@@ -84,14 +84,20 @@ build_target() { # $1=example dir  $2=go|rust  -> echoes the release binary path
     ( cd "$d" && timeout 300 "$SKY" build src/Main.sky ) >/tmp/perf-build-go.log 2>&1 || return 1
     # Both backends share $d/sky-out; the rust build's `rm -rf sky-out` would
     # wipe this binary. Copy it out so it survives the rust build.
-    local dst="/tmp/perf-$(basename "$d")-go.bin"
+    # mktemp (not a fixed /tmp name): on a shared host a pre-planted symlink at a
+    # predictable path would redirect this cp onto a victim file, and two parallel
+    # runs would clobber each other's go binary.
+    local dst; dst="$(mktemp "${TMPDIR:-/tmp}/perf-go-XXXXXX.bin")" || return 1
     cp "$d/sky-out/app" "$dst" || return 1
+    chmod +x "$dst" 2>/dev/null   # cp keeps the mktemp file's 600 mode; restore exec
     echo "$dst"
   else
     ( cd "$d" && timeout 300 "$SKY" build src/Main.sky --backend rust ) >/tmp/perf-build-rust-gen.log 2>&1 || return 1
     ( cd "$d" && timeout 900 cargo build --release --manifest-path sky-out/rust/Cargo.toml ) >/tmp/perf-build-rust.log 2>&1 || return 1
     local rel="${CARGO_TARGET_DIR:-$d/sky-out/rust/target}/release"
-    find "$rel" -maxdepth 1 -type f -executable -name 'sky-app' 2>/dev/null | head -1
+    local bin; bin=$(find "$rel" -maxdepth 1 -type f -executable -name 'sky-app' 2>/dev/null | head -1)
+    [ -n "$bin" ] || return 1
+    echo "$bin"
   fi
 }
 
@@ -99,8 +105,13 @@ free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0)
 probe_binsize() { stat -c%s "$1"; }
 
 probe_coldstart_cli() { # $1=binary -> median ms
-  ( cd "$(perf_app_cwd)" && hyperfine --warmup 3 --runs "$COLD_RUNS" --export-json /tmp/perf-hf.json "$1" ) >/dev/null 2>&1 || { echo 0; return; }
-  python3 -c 'import json;d=json.load(open("/tmp/perf-hf.json"));print(d["results"][0]["median"]*1000)'
+  # mktemp export path (not a fixed /tmp name → no symlink-clobber / parallel-run
+  # collision). `timeout` hard-bounds the COLD_RUNS+3 invocations and `</dev/null`
+  # detaches stdin so a CLI that blocks on Io.readLine can't wedge the probe.
+  local hf; hf="$(mktemp "${TMPDIR:-/tmp}/perf-hf-XXXXXX.json")" || { echo 0; return; }
+  ( cd "$(perf_app_cwd)" && timeout 120 hyperfine --warmup 3 --runs "$COLD_RUNS" --export-json "$hf" "$1" </dev/null ) >/dev/null 2>&1 || { rm -f "$hf"; echo 0; return; }
+  python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["results"][0]["median"]*1000)' "$hf" 2>/dev/null || echo 0
+  rm -f "$hf"
 }
 
 READY_TIMEOUT_S="${READY_TIMEOUT_S:-10}"
@@ -251,7 +262,11 @@ probe_live_event() { # $1=binary -> req/s
   pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${rps:-0}"
 }
 
-SSE_WINDOW_S="${SSE_WINDOW_S:-3}"
+# Validate the env-overridable window so it travels as DATA, never spliced into a
+# python program text (it reaches pyf as a numeric argv value). numval echoes 0
+# for a non-numeric override; fall back to the 3 s default so a typo can't zero
+# the divisor below.
+SSE_WINDOW_S="$(numval "${SSE_WINDOW_S:-3}")"; [ "$SSE_WINDOW_S" = 0 ] && SSE_WINDOW_S=3
 
 # Discover an SSE endpoint by probing the example's GET routes for a
 # text/event-stream response (the streaming route, not the "/" landing page).
@@ -282,7 +297,7 @@ sse_eps_on() { # $1=port $2=exampleDir -> events/sec
   wait
   for c in $(seq 1 "${SSE_CONC:-16}"); do total=$((total + $(cat "$tmp/$c" 2>/dev/null || echo 0))); done
   rm -rf "$tmp"
-  python3 -c "print(round($total/$SSE_WINDOW_S,2))" 2>/dev/null || echo 0
+  pyf "round(a[0]/a[1],2)" "$total" "$SSE_WINDOW_S" 2>/dev/null || echo 0
 }
 
 # WebSocket round-trips/sec: connect to the ws route, send/recv echo frames over
@@ -378,13 +393,13 @@ probe_broadcast() { # $1=binary $2=exampleDir -> patches/sec across subscribers
   printf '{"handlerId":"%s","msg":"submit","args":[{"text":"hi"}],"seq":1}' "$hid" > "$tmp/body"
   ( local end; end=$(( $(date +%s) + ${SSE_WINDOW_S%.*} ))
     while [ "$(date +%s)" -lt "$end" ]; do
-      curl -s -o /dev/null -H "Cookie: $pck" -H 'Content-Type: application/json' --data-binary @"$tmp/body" "http://127.0.0.1:$port/_sky/event" 2>/dev/null
+      curl -s -o /dev/null --max-time 2 -H "Cookie: $pck" -H 'Content-Type: application/json' --data-binary @"$tmp/body" "http://127.0.0.1:$port/_sky/event" 2>/dev/null
     done ) &
   wait
   local total=0
   for c in $(seq 1 "$nsub"); do total=$((total + $(cat "$tmp/n$c" 2>/dev/null || echo 0))); done
   rm -rf "$tmp"; pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-  python3 -c "print(round($total/$SSE_WINDOW_S,2))" 2>/dev/null || echo 0
+  pyf "round(a[0]/a[1],2)" "$total" "$SSE_WINDOW_S" 2>/dev/null || echo 0
 }
 
 # Server-shape probes share ONE server instance. Server.listen apps hard-bind a
@@ -411,7 +426,7 @@ collect_server_metrics() { # $1=binary $2=exampleDir -> metric lines
   pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 }
 
-probe_rss_cli() { ( cd "$(perf_app_cwd)" && timeout 30 /usr/bin/time -v "$1" </dev/null ) 2>/tmp/perf-time.txt >/dev/null || true; awk '/Maximum resident set size/{print $NF}' /tmp/perf-time.txt; }
+probe_rss_cli() { local tf; tf="$(mktemp "${TMPDIR:-/tmp}/perf-time-XXXXXX.txt")" || { echo 0; return; }; ( cd "$(perf_app_cwd)" && timeout 30 /usr/bin/time -v "$1" </dev/null ) 2>"$tf" >/dev/null || true; awk '/Maximum resident set size/{print $NF}' "$tf"; rm -f "$tf"; }
 
 probe_rss_server() { # $1=binary -> peak RSS KB under load
   local pp; pp=$(start_server "$1") || { echo 0; return; }
@@ -497,6 +512,10 @@ gate_metric() { # $1=shape $2=metric $3=go $4=rust -> row; 0 pass / 1 fail
 
 run_one() { # $1=example -> table + exit code
   local ex="$1" d="examples/$1" shape="${SHAPE:-}"
+  # Whitelist the example name before it composes a filesystem path (examples/$ex)
+  # and the /tmp/rust-perf-$ex.json artifact — rejects path traversal / injection
+  # via the user-supplied arg.
+  [[ "$ex" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "invalid example name: $ex"; return 2; }
   [ -n "$shape" ] || shape=$(detect_shape "$d")
   local gobin rustbin
   gobin=$(build_target "$d" go)   || { echo "go build failed for $ex"; return 3; }

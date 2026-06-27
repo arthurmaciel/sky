@@ -14,13 +14,13 @@ tree-shakes to ~4k reached lines.
 
 ## Verified current state (2026-06-22, two read-only mappers + firsthand grep)
 The Rust FFI path is more developed than "nothing":
-- Inspector (`tools/sky-ffi-inspect-rs/src/main.rs`, 2827 ln) runs `cargo +nightly
+- Inspector (`tools/sky-ffi-inspect-rs/src/main.rs`) runs `cargo +nightly
   rustdoc --output-format json`, emits `PkgInfo { functions:[Function], modules }`.
   Captures free fns, inherent + associated methods (receiver threading), async
   (`effect="effectful"`), self-returning builder setters (`selfReturning`). Maps
   `Vec/Option/Result/&str` to Sky types; crate-local opaque types qualified to
   `::crate::Type`.
-- Haskell glue `src/Sky/Build/Rust/Ffi.hs` (784 ln) emits Rust wrappers: opaque
+- Haskell glue `src/Sky/Build/Rust/Ffi.hs` emits Rust wrappers: opaque
   by-value `::crate::Type` params, instance/static/free method dispatch,
   `Result<T,E>`→Sky-Result and async→`Box::pin(async{…})`→Sky-Task bridging,
   self-returning setter owned-threading. `.skyi` opaque fallback = Sky `String`.
@@ -56,7 +56,7 @@ The Rust FFI path is more developed than "nothing":
 - `RustFfi.n` (`src/Sky/Build/Rust/Ffi.hs`) emits the FULL `*_bindings.rs` (every
   `_pkgFns` symbol, deduped, `#![allow(dead_code)]`) at **`sky add` / FFI-install time**
   (invoked from `app/Main.hs`), cached under `.skycache/ffi/rust/<slug>_bindings.rs`.
-- Build time just COPIES the cached file (`src/Sky/Generate/Rust/Project.hs:230-231`).
+- Build time copies the cached file (the dep-bindings copy loop ~`src/Sky/Generate/Rust/Project.hs:286-302`; since S4 shipped this is routed through `writeFilteredBindings`, which copies verbatim on the fail-safe path).
 - The shared whole-program DCE (`Sky.Build.Dce.reachableWholeProgram`, result in
   `globalReachableProgram :: IORef (Set Dce.Ref)`, kinds `TopRef`/`FfiRef`/`CtorRef`)
   already gates `main.rs` user-code emission — but NOTHING filters the copied wrappers.

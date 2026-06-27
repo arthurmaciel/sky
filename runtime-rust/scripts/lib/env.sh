@@ -54,7 +54,11 @@ fi
 # ── Repo-root detection → REPO + SKY_BIN ────────────────────────────────────
 # Honour an explicit SKY_REPO; else detect via the runner-script anchor (works
 # whether sourced from $PWD or a known checkout). Don't cd — that's the caller's.
-REPO="${SKY_REPO:-${REPO:-}}"
+# Only SKY_REPO seeds the root — never a pre-existing $REPO. REPO is a common var
+# unrelated tooling/CI exports; trusting an inherited value would poison every
+# "$REPO/..." path. Autodetection below re-derives the same root, so re-sourcing
+# stays idempotent.
+REPO="${SKY_REPO:-}"
 [ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/lib/examples.sh" ] && REPO="$PWD"
 # Checkout-agnostic fallback: ask git for the repo root (works from any subdir of
 # any clone). Anchored on THIS file's location so it's independent of $PWD.

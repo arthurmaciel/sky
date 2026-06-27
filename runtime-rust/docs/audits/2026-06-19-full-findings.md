@@ -1,7 +1,7 @@
 # Full principles-audit findings — 2026-06-19
 
 Machine-generated record of the whole-codebase swarm re-audit (131 files, 58 review agents).
-Severity summary: 8 high · 16 medium · 53 low · 54 clean · 191 findings / 78 files.
+Severity summary: 8 high · 16 medium · 54 low · 53 clean · 191 findings / 78 files.
 High/medium dispositions are in `../CODE-REVIEW.md` (dated section). This file is the
 complete per-file record including the low (parity/efficiency/readability) findings.
 
@@ -349,7 +349,7 @@ complete per-file record including the low (parity/efficiency/readability) findi
 - **low/security** changed (l59-61): `since` is interpolated into format!("{since}..HEAD") and passed as a positional arg to git diff. Not shell-evaluated (Command, not shell), so no shell injection. But git treats a leading-dash token as an option: a since of e.g. `--output=...` would parse as a flag rather than a revision range. since comes from head_sha/internal state (not untrusted), so exploitability is low, but a `--` end-of-options guard before the range is correct hardening at zero cost.
 - **low/correctness** changed (l68-73): Rename entries from `git diff --name-status` emit `Rxxx\told\tnew` (three tab fields). The code takes the SECOND field as path, so for a rename it indexes the OLD path as an upsert and never sees the NEW path, and the rename is not modelled as delete-old + add-new. Result: after a rename the incremental index keeps the stale old path and misses the new file. Self-heals on full reindex, but a real working-tree-faithfulness gap.
 
-## `runtime-rust/scripts/quality-audit.sh` — clean
+## `runtime-rust/scripts/quality-audit.sh` — low
 - **low/readability** main body (l30,l55,l69,l136): `FEATURES="--all-features"` is deliberately left unquoted in the cargo invocations so it word-splits to a flag (or nothing). Safe here because FEATURES is always set under `-u` and contains no attacker-controlled or whitespace-bearing content; noted only because unquoted expansion is the usual footgun. No fix needed.
 
 ## Clean (no findings)

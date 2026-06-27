@@ -1,6 +1,6 @@
 # Incremental Sky→Rust codegen for `sky watch` — plan (guardian-reviewed)
 
-Status: SCOPED (not started). Guardian soundness review: 2026-06-22.
+Status: SCOPED → HOLD on autonomous implementation (see "Evidence & decision" below). Guardian soundness review: 2026-06-22.
 Cardinal hazard: a stale cache producing a WRONG build (a miscompile that type-checks).
 Every stage below is gated on the soundness invariants + the equivalence backstop (I5).
 
@@ -21,7 +21,7 @@ residual is the Haskell-side full re-parse/typecheck/lower, dominated by reproce
   (`cacheHit` requires `outDir/main.go`, which a Rust build never writes) → the Rust
   backend always does the full compile, even when source is unchanged.
 - `source.hash` is a NON-cryptographic rolling hash (`length + foldl (\a c -> a*31+c)`),
-  `Compile.hs:758-764`.
+  `computeSourceHash` at `Compile.hs:867-873`.
 
 ## Soundness invariants (apply to every stage)
 - **I1 — key completeness.** A cached artifact's key captures EVERY input affecting it:

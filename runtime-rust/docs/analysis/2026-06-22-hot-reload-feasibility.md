@@ -56,9 +56,10 @@ without a full `cargo build` + process restart?
 monomorphic Rust function**
 (`src/Sky/Generate/Rust/Builder/ModuleEmitter.hs:586`).
 
-The live runtime takes it as `Arc<dyn Fn(Model)->Html<Msg>>`
-(`runtime-rust/src/sky_runtime/live/mod.rs:471,506,737`;
-wrapped at `mod.rs:746` as `Arc::new(view)`).
+The live runtime holds it as a monomorphic `Arc<FView>` with bound
+`FView: Fn(Model)->Html<Msg>`
+(`runtime-rust/src/sky_runtime/live/mod.rs:134,374,533,548`;
+wrapped at `mod.rs:1043` (and `:1101`) as `Arc::new(view)`).
 
 The **output** of `view` — the `Html<Msg>` / `Element<Msg>` tree — IS pure
 data:
@@ -68,7 +69,7 @@ data:
 
 The **SSE diff+patch path already exists**:
 `runtime-rust/src/sky_runtime/live/diff.rs:45` produces `Vec<Patch>`,
-and `mod.rs:543` serialises and sends them over SSE.
+and `mod.rs:650-652` serialises and sends them over SSE.
 
 The missing piece is getting *new view behaviour* into the running process
 without a restart. The `Html`/`Element` tree is data, but the Rust function
@@ -94,7 +95,7 @@ Even in the narrowest form, this requires:
 - A serde bridge between the live in-memory `Model` (typed Rust struct) and
   the interpreter's view of it (untyped Sky expression). This is non-trivial:
   `Model` is a generated Rust struct with `serde::Serialize` / `Deserialize`
-  bounds (`live/mod.rs:731`), so JSON round-trip is available, but the
+  bounds (`live/mod.rs:1028` (and `:1076`)), so JSON round-trip is available, but the
   interpreter must reconstruct a Sky value from that JSON to evaluate the view.
 - Zero `unsafe`. The interpreter must return `Result`; any miss triggers the
   rebuild fallback. The compiled path must be touched nowhere.

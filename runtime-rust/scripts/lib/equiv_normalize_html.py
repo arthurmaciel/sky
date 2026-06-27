@@ -39,14 +39,26 @@ DELIVERY_ATTRS = ('data-sky-pc-rules', 'data-sky-mq-q', 'data-sky-mq-rules',
                   'data-sky-tr-rules', 'data-sky-tr-respect', 'data-sky-anim-name',
                   'data-sky-anim-rules', 'data-sky-anim-keyframes')
 GO_STYLE_SCOPE = ('data-sky-pc', 'data-sky-mq', 'data-sky-anim', 'data-sky-tr')
+# NB: keys MUST be lowercase — HTMLParser lowercases every attribute name during
+# parsing, so `k in SVG_COORD` always sees the lowercased form ('viewbox', not
+# 'viewBox'). A camelCase entry here would be dead (never match).
 SVG_COORD = {'d', 'x', 'y', 'x1', 'y1', 'x2', 'y2', 'cx', 'cy', 'r', 'rx', 'ry',
              'width', 'height', 'points', 'fill-opacity', 'stroke-width',
-             'offset', 'viewBox', 'dx', 'dy'}
+             'offset', 'viewbox', 'dx', 'dy'}
 SVG_TAGS = ('svg', 'path', 'rect', 'circle', 'line', 'polyline', 'polygon', 'text', 'g')
 
 
 def norm_skyid(v):
     return v.replace('#', '_').replace('.', '_')
+
+
+def esc_attr(v):
+    # HTMLParser unescapes entities inside attribute values, so re-serialising the
+    # raw value would corrupt the markup (an embedded `"`/`&`/`<`/`>` breaks the
+    # quoting and can make two distinct inputs collide). Re-escape for a faithful,
+    # unambiguous round-trip. `&` first so already-escaped output isn't double-hit.
+    return (v.replace('&', '&amp;').replace('<', '&lt;')
+             .replace('>', '&gt;').replace('"', '&quot;'))
 
 
 def norm_style_text(t):
@@ -96,7 +108,7 @@ class Norm(HTMLParser):
         norm.sort(key=lambda kv: kv[0])
         s = '<' + tag
         for k, v in norm:
-            s += ' %s="%s"' % (k, v)
+            s += ' %s="%s"' % (k, esc_attr(v))
         s += ' />' if selfclose else '>'
         self.out.append(s)
         if tag == 'style':
@@ -130,32 +142,81 @@ class Norm(HTMLParser):
         (self.style_buf if self.in_style else self.out).append('&#%s;' % n)
 
 
+class RootExtractor(HTMLParser):
+    """Capture the outerHTML of the element carrying id="sky-root" via a real
+    stack-based parse. Robust against `>` inside attribute values (a greedy
+    `[^>]*?` regex truncates on those) and free of the O(n^2) regex tag-scan; the
+    parser advances linearly. Reconstructs faithfully (raw start tags via
+    get_starttag_text, entities re-emitted) so the downstream Norm parse is
+    equivalent to feeding the original subtree substring."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.parts = []
+        self.depth = 0
+        self.capturing = False
+        self.done = False
+
+    def _is_root(self, attrs):
+        return not self.capturing and any(
+            k == 'id' and v == 'sky-root' for k, v in attrs)
+
+    def handle_starttag(self, tag, attrs):
+        if self.done:
+            return
+        if self._is_root(attrs):
+            self.capturing = True
+            self.depth = 0
+        if self.capturing:
+            self.parts.append(self.get_starttag_text())
+            if tag in VOID:
+                if self.depth == 0:
+                    self.done = True
+            else:
+                self.depth += 1
+
+    def handle_startendtag(self, tag, attrs):
+        if self.done:
+            return
+        if self._is_root(attrs):
+            self.parts.append(self.get_starttag_text())
+            self.done = True
+            return
+        if self.capturing:
+            self.parts.append(self.get_starttag_text())
+
+    def handle_endtag(self, tag):
+        if self.done or not self.capturing:
+            return
+        self.parts.append('</%s>' % tag)
+        if tag not in VOID:
+            self.depth -= 1
+            if self.depth <= 0:
+                self.done = True
+
+    def handle_data(self, d):
+        if self.capturing and not self.done:
+            self.parts.append(d)
+
+    def handle_entityref(self, n):
+        if self.capturing and not self.done:
+            self.parts.append('&%s;' % n)
+
+    def handle_charref(self, n):
+        if self.capturing and not self.done:
+            self.parts.append('&#%s;' % n)
+
+
 def extract_sky_root(html):
     """Return the #sky-root element subtree (the rendered Std.Ui view), or '' —
     we compare the VIEW, not the page shell (Go inlines client JS, Rust externalises
     it; the shell legitimately differs)."""
-    i = html.find('id="sky-root"')
-    if i < 0:
+    if 'id="sky-root"' not in html:
         return ''
-    s = html.rfind('<', 0, i)
-    tagre = re.compile(r'<(/?)([a-zA-Z][\w-]*)([^>]*?)(/?)>')
-    pos, depth, started, out = s, 0, False, []
-    n = len(html)
-    while pos < n:
-        m = tagre.search(html, pos)
-        if not m:
-            break
-        out.append(html[pos:m.end()])
-        pos = m.end()
-        closing = m.group(1) == '/'
-        selfclose = m.group(4) == '/'
-        tag = m.group(2)
-        if not selfclose and tag not in VOID:
-            depth += -1 if closing else 1
-            started = True
-            if started and depth == 0:
-                break
-    return ''.join(out)
+    ex = RootExtractor()
+    ex.feed(html)
+    ex.close()
+    return ''.join(ex.parts)
 
 
 def normalize(path):
@@ -168,4 +229,7 @@ def normalize(path):
 
 
 if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        sys.stderr.write('usage: equiv_normalize_html.py <page.html>\n')
+        sys.exit(2)
     sys.stdout.write(normalize(sys.argv[1]))

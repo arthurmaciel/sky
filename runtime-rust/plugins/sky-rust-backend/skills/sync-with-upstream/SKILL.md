@@ -88,8 +88,12 @@ by keeping **upstream's** version of the codegen and re-wrapping our dispatch:
                    case Toml._backend config of
                        Toml.BackendRust -> do
                            rawAliases <- readIORef globalKernelAlias
-                           RustProject.generateRustProject config (canMod : map snd validDeps)
+                           -- (skeleton — the real arm also runs the Rust DCE +
+                           -- FFI-generic gates that produce prunedEntry/prunedDeps/
+                           -- reached/dceOff/genWrappers; see Compile.hs ~1945-2088)
+                           RustProject.generateRustProject config (prunedEntry : prunedDeps)
                                entrySrcMod typesWithDeps rawAliases outDir srcHash
+                               reached dceOff genWrappers
                        Toml.BackendGo ->
                            <upstream's IO block — the `if not (null …) then … else …`>
    ```
@@ -113,9 +117,12 @@ extracting the field the Rust code actually needs; never change the Go path.
 ```bash
 cabal build exe:sky 2>&1 | grep -iE "error:" -A4 | head
 ```
-Iterate until it compiles, then install:
+Iterate until it compiles, then build (NEVER `--install-method=copy` —
+`sky-out/sky` is a symlink to the dist-newstyle binary that `cabal build` updates
+in place; see `runtime-rust/CLAUDE.md` build rules):
 ```bash
-cabal install --overwrite-policy=always --installdir=./sky-out --install-method=copy exe:sky
+cabal build exe:sky
+ln -sf "$(cabal list-bin exe:sky)" sky-out/sky   # one-time: (re)point the symlink
 ./sky-out/sky --version    # prints: sky dev
 ```
 

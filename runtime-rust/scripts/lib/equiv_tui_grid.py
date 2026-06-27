@@ -87,5 +87,17 @@ def render(path, rows, cols=80):
 
 
 if __name__ == '__main__':
-    rows = int(sys.argv[2]) if len(sys.argv) > 2 else 50
+    if len(sys.argv) < 2:
+        sys.stderr.write(__doc__)
+        sys.exit(2)
+    rows = 50
+    if len(sys.argv) > 2:
+        try:
+            rows = int(sys.argv[2])
+        except ValueError:
+            sys.stderr.write("equiv_tui_grid: rows must be an integer, got %r\n" % sys.argv[2])
+            sys.exit(2)
+        if rows <= 0:
+            sys.stderr.write("equiv_tui_grid: rows must be positive, got %d\n" % rows)
+            sys.exit(2)
     sys.stdout.write(render(sys.argv[1], rows))

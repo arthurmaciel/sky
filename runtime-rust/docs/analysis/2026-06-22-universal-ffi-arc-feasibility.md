@@ -6,6 +6,13 @@ arc after the generics keystone (Walls #1–#3, #20). Answers, per remaining fea
 framework? showstopper?* — then orders the work from **empirical demand** measured on
 five real crates. Under the settled guardian-supervision rule.
 
+> **Outcome (2026-06-23).** The arc is CLOSED — closures (#28), iterators
+> (`IntoIterator`-param floor), and the trait-object `dyn` tail (#26) all shipped
+> on `feat/runtime-rust`. The per-feature "Closed" annotations below record what
+> landed; the "Recommended order" and "Net verdict" sections are preserved as the
+> original 2026-06-22 analysis snapshot (their forward-looking phrasing is
+> intentional, not stale).
+
 ## Empirical demand (the ordering input)
 
 Method: generated rustdoc JSON for `itertools`, `regex`, `chrono`, `indexmap`,
@@ -25,6 +32,12 @@ missed this and reported itertools as having ~1 closure — corrected).
 | plain generic type-param fn | 3% | 10% | 5% | 2% | 5% |
 | **trait-object (`dyn`)** | 0 | 0 | **1** | 0 | 0 |
 | const generic | 1% | 0% | 1% | 1% | 0% |
+
+_Each column is rounded to whole percents **independently**: the **any arc feature**
+row is computed from the raw classified set and then rounded, so it need not equal
+the rounded sum of its component rows (closure + iter-param + iter-return +
+trait-obj). That is why indexmap reads 9%+1% = "11%" and chrono 1% = "2%" — the
+union keeps fractional shares the components shed when each rounds down._
 
 ### Reading it
 - **`dyn` trait-objects: demand ≈ 0** (1 method in ~3900). Not an epic.
@@ -48,15 +61,16 @@ over the closure: `pub fn rust_x<F: Fn(A) -> B>(f: F, ..)`. The Sky lambda argum
 lowers to a Rust `move |a| ..` closure — **the identical lowering the stdlib HOFs
 already use**: `list.rs` kernels take `impl Fn(A)->B + Clone` and codegen already
 feeds Sky lambdas to them. So the runtime/codegen seam exists and is proven; the only
-gate is that `FfiInstance.hs:267` currently classifies a Sky `TLambda` arg as
-`Left "function type"` (dropped). Lifting that one classification + rendering the
+gate is that `skyTypeToRustClosed` (`FfiInstance.hs:283`) currently classifies a Sky
+`TLambda` arg as `Left "function type"` (dropped). Lifting that one classification + rendering the
 arrow type into the wrapper's `Fn(..)` bound is the work.
 **Hardest unknown (guardian-corrected — the `Fn`-by-construction claim was overstated).**
 A Sky lambda's Rust trait kind is decided by **what its body does to captures**, not by
 Sky purity. It is `Fn` *only because* of the emitter's clone-on-capture discipline
-(`ExprEmitter.hs:582`); a lambda that captures a **non-`Clone`** value (`SkyTask`,
-`Decoder`, a future) is *moved-in* → it is **`FnOnce`**, sound for a single call only
-(`ExprEmitter.hs:2047`). So the closures epic carries six BLOCKING soundness
+(the `ecCloneVars` `.clone()`-insertion in `ExprEmitter.hs`); a lambda that captures
+a **non-`Clone`** value (`SkyTask`, `Decoder`, a future) is *moved-in* → it is
+**`FnOnce`**, sound for a single call only (the `gateFfiClosureLambda` capture gate in
+`ExprEmitter.hs`). So the closures epic carries six BLOCKING soundness
 constraints (guardian-locked):
 1. **`Fn`/`FnMut` wrapper sound only when every capture is `Clone`.** A non-`Clone`
    capture in a multi-call slot ⇒ DROP+REPORT (E4400), never emit — else `E0525`/
@@ -85,7 +99,8 @@ E4400 + coverage report all apply unchanged.
 - `IntoIterator` **param** → SOUND. A Sky `List` is a `Vec`, which already *is*
   `IntoIterator`; the wrapper is generic `<I: IntoIterator<Item = A>>` and the call
   passes the Vec. The inspector already resolves `IntoIterator<Item=X>` to a concrete
-  `X` (`sky-ffi-inspect-rs/src/main.rs:3463,4729`). Rides the (A)-model. **This is the
+  `X` (`concrete_for_inner_type` + the `IterKind` classifier in
+  `sky-ffi-inspect-rs/src/main.rs`). Rides the (A)-model. **This is the
   v1 iterators epic.**
 - `impl Iterator` **return** → **DROP+REPORT in v1.** Eager `.collect()` is NOT sound:
   rustdoc exposes only `impl Iterator<Item=X>` with **no finiteness metadata**, and the
@@ -117,9 +132,12 @@ The inspector's GENERIC/parametric path (`type_to_typeref`) already dropped
 `dyn Trait`'s opaque type-arg as EMPTY (`Box<dyn UserTrait>` → `Box<>`, `&dyn
 UserTrait` → `&`). That under-bound slot slipped past the `fn_types_nameable`
 string-gate and bound → E0308 at the host (the arc's under-bind class). Fixed by an
-`is_dyn_trait_object` gate in `parse_fn_item` that DROPS any param/return carrying a
-non-`Fn`/`FnMut`/`FnOnce` `dyn Trait` (the Fn-family is excluded so `dyn Fn` still
-routes to the closure seam). Over-drop of a real `dyn UserTrait` is correct
+`is_dyn_trait_object_including_fn` gate in `parse_fn_item` that DROPS any param/return
+carrying ANY `dyn Trait` OBJECT — **including** a `dyn Fn`/`FnMut`/`FnOnce` object
+(a `Box<dyn Fn>` / `&dyn Fn` in a non-generic signature is never satisfiable from
+Sky). Only a GENERIC `F: Fn` bound reaches the closure seam (`try_parametric_stub`);
+the Fn-exclusion lives SOLELY in the closure-seam predicate `is_dyn_trait_object`,
+not in this gate. Over-drop of a real `dyn UserTrait` is correct
 (feasibility-mandated). Regression: `dyn_box_param_drops` / `dyn_ref_param_drops` /
 `dyn_box_return_drops` (+ `dyn_fn_param_still_routes_to_closure_seam` /
 `normal_ref_param_does_not_over_drop` / `impl_trait_nonfn_param_drops` /
@@ -130,13 +148,14 @@ routes to the closure seam). Over-drop of a real `dyn UserTrait` is correct
 1. **Finish #22 — borrowed-ref / owned-copy return** (already in flight). Biggest
    *independent* plain-method demand (regex 21%, indexmap 25%); no arc dependency;
    nearly done. Unblocks the "boring but essential" surface first.
+   **Closed 2026-06-23 (#22).**
 2. **Closures / HOFs** — the top NEW epic. Functional-collection keystone (itertools
    24%); rides the (A)-model and the proven Sky-lambda→Rust-closure seam; lift the
-   `TLambda` drop, render the arrow into an `Fn(..)` bound. **← brainstorm this next.**
+   `TLambda` drop, render the arrow into an `Fn(..)` bound. **Closed 2026-06-23 (#28).**
 3. **Iterators (`IntoIterator` param only, v1)** — builds directly on #2: pass the Sky
    `List` `Vec` into a `<I: IntoIterator<Item=A>>` wrapper. `impl Iterator` **returns**
    are dropped+reported in v1 (finiteness undecidable from rustdoc). Dissolves much
-   assoc-type residue.
+   assoc-type residue. **Closed 2026-06-23 (IntoIterator-param floor shipped).**
 4. **Re-measure the assoc-type-projection residue** after 2+3 — expected to shrink
    sharply; scope only what remains.
 5. **Trait-objects** — no epic; `dyn Fn` absorbed by #2, the rest dropped+reported.
@@ -148,6 +167,9 @@ The arc is **viable with no showstopper** for the features that have demand. Clo
 are the keystone and ride an already-proven seam; iterators ride closures; `dyn`
 trait-objects have ~0 demand and need no epic. Borrowed-ref return (#22) is the largest
 independent demand and is already in flight. Proceed: finish #22, then build closures.
+**Closed 2026-06-23.** All of the above shipped — #22 (borrowed-ref/owned-copy),
+#28 (closures), the `IntoIterator`-param iterator floor, and the `dyn`/#26 trait-object
+tail; the arc reached the "viable, no showstopper" verdict it forecast.
 ```
 Measurement harness: /tmp/ffi-demand/{run.sh,classify.py}; rustdoc JSON cached under
 the shared target dir. Re-runnable; read-only wrt the Sky repo.

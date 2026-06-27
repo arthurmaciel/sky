@@ -47,18 +47,21 @@ PANIC_PATTERNS = [
     (re.compile(r"(?:\.|::)expect_err\s*\("), "expect_err(...) panics on Ok → match/return"),
     (re.compile(r"unwrap_unchecked\s*\("), "unwrap_unchecked() is UB on None/Err → forbidden"),
     (re.compile(r"get_unchecked(?:_mut)?\s*\("), "get_unchecked() is UB on OOB → use .get()"),
-    (re.compile(r"(?:^|[^\w!])panic!\s*\("), "panic! → return an Err / total fallback"),
-    (re.compile(r"(?:^|[^\w])unreachable!\s*\("), "unreachable! → handle the case totally"),
-    (re.compile(r"(?:^|[^\w])todo!\s*\("), "todo! → finish it (no panic stub in runtime code)"),
-    (re.compile(r"(?:^|[^\w])unimplemented!\s*\("), "unimplemented! → implement or return Err"),
+    (re.compile(r"(?:^|[^\w!])panic\s*!\s*\("), "panic! → return an Err / total fallback"),
+    (re.compile(r"(?:^|[^\w])unreachable\s*!\s*\("), "unreachable! → handle the case totally"),
+    (re.compile(r"(?:^|[^\w])todo\s*!\s*\("), "todo! → finish it (no panic stub in runtime code)"),
+    (re.compile(r"(?:^|[^\w])unimplemented\s*!\s*\("), "unimplemented! → implement or return Err"),
 ]
 
 
 def strip_comments_and_strings(code: str) -> str:
-    """Replace the bytes of //-line comments, /*…*/ block comments, and string
-    literals (normal, raw `r#"…"#`) with spaces, preserving length + newlines.
-    So a `.unwrap()` inside a doc example or an embedded HTML/SQL template never
-    triggers, and the indexing scan only sees real code."""
+    """Replace the bytes of //-line comments, /*…*/ block comments, string
+    literals (normal, raw `r#"…"#`), and char/byte-char literals (`'x'`, `b'x'`,
+    `'\\''`, `'"'`) with spaces, preserving length + newlines. So a `.unwrap()`
+    inside a doc example or an embedded HTML/SQL template never triggers, a `'"'`
+    char literal can't open a phantom string that blanks following real code, and
+    the indexing scan only sees real code. Lifetimes (`'a`, `'static`, `'_`) are
+    left intact — they carry no quotes that could confuse the scan."""
     out = list(code)
     n = len(code)
     i = 0
@@ -100,6 +103,37 @@ def strip_comments_and_strings(code: str) -> str:
                         out[p] = " "
                 i = end
                 continue
+        if c == "'":
+            # Char/byte-char literal vs lifetime. A char literal is
+            # ' <char|escape> '; a lifetime ('a, 'static, '_) has no closing quote
+            # after its first char. Blanking the literal stops a `'"'` inner quote
+            # from opening phantom string mode (which would blank real code after).
+            if nxt == "\\":
+                # escaped char literal: '\n' '\'' '\\' '\u{..}'
+                out[i] = " "
+                if i + 1 < n:
+                    out[i + 1] = " "  # backslash
+                i += 2
+                if i < n:
+                    if code[i] != "\n":
+                        out[i] = " "  # the escaped char (n, t, ', \\, u, …)
+                    i += 1
+                while i < n and code[i] != "'":
+                    if code[i] != "\n":
+                        out[i] = " "
+                    i += 1
+                if i < n:
+                    out[i] = " "  # closing '
+                    i += 1
+                continue
+            if i + 2 < n and code[i + 2] == "'":
+                # non-escaped single char: ' X '
+                out[i] = out[i + 1] = out[i + 2] = " "
+                i += 3
+                continue
+            # otherwise a lifetime — leave intact
+            i += 1
+            continue
         if c == '"':
             out[i] = " "
             i += 1
@@ -186,20 +220,27 @@ def main() -> None:
     if not content.strip():
         sys.exit(0)
 
-    # Test exemption: ONLY a literal test attribute in the chunk (a bare `assert!`
+    # Strip comments + string/char literals ONCE up front so every subsequent
+    # check sees real code only. The test exemption MUST run on the stripped text:
+    # a `#[test]` / `#[cfg(test)]` mentioned inside a comment or a string literal
+    # must NOT disarm the guard (it would be a one-comment bypass).
+    stripped = strip_comments_and_strings(content)
+
+    # Test exemption: ONLY a literal test attribute in real code (a bare `assert!`
     # no longer disarms the guard — that was a one-token bypass). An edit that adds
     # raw runtime code never carries these, so it stays guarded.
-    if re.search(r"#\[\s*test\s*\]|#\[\s*cfg\(\s*test\s*\)\s*\]", content):
+    if re.search(r"#\[\s*test\s*\]|#\[\s*cfg\(\s*test\s*\)\s*\]", stripped):
         sys.exit(0)
 
-    code = content if len(content) <= MAX_SCAN else content[:MAX_SCAN]
-    code = strip_comments_and_strings(code)
-
     violations = []
+    # The cheap fixed-pattern panic checks run over the FULL stripped content
+    # (linear, no ReDoS); only the O(n) indexing char-scan is capped at MAX_SCAN so
+    # a multi-MB / long-lined Write stays bounded (matches the module docstring).
     for pat, msg in PANIC_PATTERNS:
-        if pat.search(code):
+        if pat.search(stripped):
             violations.append(msg)
-    if has_subscript_indexing(code):
+    scan = stripped if len(stripped) <= MAX_SCAN else stripped[:MAX_SCAN]
+    if has_subscript_indexing(scan):
         violations.append("`x[i]` / `x[a..b]` indexing may panic → use .get()/.get_mut() or a slice pattern `[x]`")
 
     if not violations:

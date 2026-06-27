@@ -168,6 +168,8 @@ fi
 
 # ── Disk hygiene + done ────────────────────────────────────────────────────
 for ex in "${EXAMPLES[@]}"; do
+  ex="${ex#examples/}"; ex="${ex%/}"
+  case "$ex" in ""|*/*|..) continue;; esac
   rm -rf "examples/$ex/sky-out" "examples/$ex/.skycache" "examples/$ex/.skydeps" 2>/dev/null
 done
 command -v go >/dev/null 2>&1 && go clean -cache >/dev/null 2>&1 || true

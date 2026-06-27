@@ -8,6 +8,20 @@
 - Domain severity: P0=9 · P1=40 · P2=34 · P3=16
 - Critic severity: P1=3 · P2=4 · P3=2
 
+> **Severity & deduplication note (read before trusting the headline tallies).**
+> The per-gap severity tags below predate the critic's corrections — the
+> "Severity corrections suggested by critic" section is **authoritative** for the
+> three gaps it re-rates: SSE buffer-drop metric (header [P3] → **P2**),
+> SKY_CONSOLE_AUTH=app console mode (headers [P1] → **P2**), and Db.exec/Db.query
+> SqlValue typed binding (header [P1] → **P0**). Additionally, **two gaps are
+> filed in two subsystems each**, so the 99-domain / P0=9 / P1=40 totals
+> double-count them: (a) hub read-kernel tenant-prefix SQL enforcement appears as
+> console-observability [P1] and db-auth-security [P0] — the security-framed
+> **P0** copy is the authoritative one; (b) SKY_CONSOLE_AUTH=app appears as
+> console-observability [P1] and db-auth-security [P1]. Counting each gap once,
+> the distinct-domain-gap total is 97 (and the P0 list holds 9 entries because
+> the tenant-prefix gap is itself listed once there).
+
 ### P0 — blockers (feature missing/broken that defeats an app shape or security guarantee)
 
 - **SSE reconnect-resync full-body frame never sent by Rust server** — _live-core_ (M)
@@ -227,6 +241,7 @@
 - **Go loc:** runtime-go/rt/console_inline_cfg.go:evaluateConsoleAuth; runtime-go/rt/console.go:MountEmbeddedConsole
 - **Rust loc (fix lands):** runtime-rust/src/sky_runtime/live/console.rs:gate_blocked; runtime-rust/src/sky_runtime/live/mod.rs (thread the consoleAuth closure into the gate)
 - **Fill approach:** Thread the Sky-side consoleAuth callback (already a typed closure in the Live cfg) into the gate: when SKY_CONSOLE_AUTH=app, call it with the request, on Just(identity) mint the __Host-sky_console cookie (HKDF-derived key like Go) and allow, on Nothing emit console.auth.denied + 403. Requires codegen to pass the cfg field through to the router state, mirroring the existing __Host cookie machinery in csrf.rs.
+- **Duplicate:** Same gap as the db-auth-security entry "Console SKY_CONSOLE_AUTH=app mode (row-poly consoleAuth callback) not implemented" [P1] — a cross-subsystem duplicate, counted once. The critic re-rates this gap to P2 (graceful 501 refusal, not an auth bypass — see "Severity corrections suggested by critic").
 
 #### [P1] No readiness probes — /_sky/readyz cannot reflect DB pool / session store health  ·  status: partial  ·  effort: M
 
@@ -243,6 +258,7 @@
 - **Go loc:** runtime-go/rt/hub/store.go:HubStoreReaderWithTenant; runtime-go/rt/hub_bridge.go
 - **Rust loc (fix lands):** runtime-rust/src/sky_runtime/live/hub.rs:read_logs_value; runtime-rust/src/sky_runtime/live/hub.rs:read_metrics_value; runtime-rust/src/sky_runtime/live/hub.rs:read_traces_value
 - **Fill approach:** Add a tenant scope (from SKY_CONSOLE_TENANT / the request identity) threaded into open_spill+query builders so every SELECT appends AND service_name LIKE <tenant-prefix> (or a tenant column predicate matching Go's schema). Validate the prefix against an allowlist charset like the Db.updateFields column guard to keep the dynamic SQL injection-free.
+- **Duplicate:** Same gap as the db-auth-security entry "Hub read kernels: no tenant-prefix SQL enforcement (v0.16.6 multi-tenant defence-in-depth absent)" [P0], which is the authoritative copy (security framing) and the one counted in the P0 list. This console-observability [P1] copy is a cross-subsystem duplicate — counted once.
 
 #### [P2] In-process fallback console is a 2-tab minimal shell vs Go's 5-tab JSON API surface  ·  status: divergent  ·  effort: M
 
@@ -921,13 +937,13 @@ OTHER CROSS-CUTTERS. `Std.Ui.Lazy` (LRU subtree cache + SKY_UI_LAZY_CAP) is enti
 - **Rust loc:** runtime-rust/src/sky_runtime/trace.rs (no exporter); runtime-rust/src/sky_runtime/live/observability.rs:79 (span middleware records to ring only)
 - **Fill approach:** Add an OTLP/HTTP exporter behind a feature gate (opentelemetry-otlp or a thin reqwest+serde OTLP/JSON poster) enabled when usesLive/usesServer. On boot, if OTEL_EXPORTER_OTLP_ENDPOINT is set, batch the telemetry span ring and POST OTLP/JSON resource-spans honouring OTEL_EXPORTER_OTLP_{HEADERS,PROTOCOL} and OTEL_SERVICE_{NAME,VERSION}/sampler args; reuse the hub_exporter batching loop. Mirror Go's port-mismatch warning. Gate the heavy crate so lean CLI apps stay slim.
 
-#### [P1] Federation ingest endpoint is OPEN by default in Rust (no auto-generated token) — unauthenticated telemetry injection  ·  area: console-observability federation receiver ∩ http-server request auth  ·  effort: M
+#### [P1] Federation ingest endpoint is open in DEV when SKY_INGEST_TOKEN is unset — production fails CLOSED (Go auto-generates a token, closing dev too)  ·  area: console-observability federation receiver ∩ http-server request auth  ·  effort: M
 
 - **Why missed:** console-observability checked the console READ gate (gate_blocked) and http-server owned request auth on the Sky.Http.Server path; neither owned the DEFAULT POSTURE of the federation ingest receiver — it sits exactly between 'who serves the endpoint' and 'who authenticates it', and each auditor assumed the other had it.
 - **Go behavior:** Go's IngestTokenInit auto-generates a 32-byte crypto/rand hex token at process boot (operator-overridable via SKY_INGEST_TOKEN) and passes it to spawned children, so /_sky/observability/ingest is CLOSED by default — every POST must present a matching X-Sky-Ingest-Token (constant-time compared).
-- **Gap:** Rust's ingest_token_blocked (console.rs:225) returns None (allow) when SKY_INGEST_TOKEN is unset, and nothing auto-generates the token. So a Rust Sky.Live/Server app that doesn't manually set SKY_INGEST_TOKEN accepts unauthenticated, forged log/span/metric POSTs from any network peer into its console telemetry store — a telemetry-poisoning / log-injection vector. The constant-time compare itself is correct; the DEFAULT POSTURE is fail-open vs Go's fail-closed.
+- **Gap:** Rust's ingest_token_blocked (console.rs:277) returns None (allow) when SKY_INGEST_TOKEN is unset ONLY in dev mode; in production (telemetry::production_from_env()) it returns 401 "observability ingest requires SKY_INGEST_TOKEN in production" (console.rs:286-294), so the endpoint fails CLOSED on any non-dev deploy. The constant-time compare itself is correct. The residual divergence is dev-only: Go auto-generates a 32-byte token at boot so its ingest is closed even in dev, whereas Rust leaves it open in dev when no token is set — a single-process / no-federation posture, not a production network-exposure hole. Batch-1 (see "Implementation status") accordingly marked this DROPPED as already-implemented / better-than-Go.
 - **Go loc:** runtime-go/rt/observability_ingest.go:137 IngestTokenInit (auto-generate 32-byte token); runtime-go/rt/observability_ingest.go:43 X-Sky-Ingest-Token requirement
-- **Rust loc:** runtime-rust/src/sky_runtime/live/console.rs:225 ingest_token_blocked (None when unset → open); runtime-rust/src/sky_runtime/live/mod.rs:1142 post(console::ingest) registration
+- **Rust loc:** runtime-rust/src/sky_runtime/live/console.rs:277 ingest_token_blocked (None when unset in dev; 401 in production); runtime-rust/src/sky_runtime/live/mod.rs:1591 post(console::ingest) registration
 - **Fill approach:** Port IngestTokenInit: at Live/Server boot pick SKY_INGEST_TOKEN if set, else generate 32 OS-random bytes hex (OsRng) into a OnceLock; pass it to spawned sub-apps via the child env (the SpawnBinary path). Change ingest_token_blocked to compare against the resolved token (always present after init) so the endpoint is closed-by-default, matching Go. Keep ct_eq. Fixture: ingest without a token is 401 when no env override is set.
 
 #### [P2] Federation push payload omits namespace + metrics — Rust↔Go federation wire-format incompatible  ·  area: push_exporter (sender) ∩ console::ingest (receiver) — split wire contract  ·  effort: M

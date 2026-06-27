@@ -36,7 +36,12 @@ SKY="${SKY_BIN:-$REPO/sky-out/sky}"
 [ -x "$SKY" ] || { echo "ERROR: sky binary not found at $SKY." >&2; exit 2; }
 NORM_HTML="$_dir/lib/equiv_normalize_html.py"
 NORM_TUI="$_dir/lib/equiv_tui_grid.py"
-HIST="${TMPDIR:-/tmp}/sky-equiv-render"; mkdir -p "$HIST"
+HIST="${TMPDIR:-/tmp}/sky-equiv-render"; mkdir -p -m 700 "$HIST" 2>/dev/null || true
+# Multi-user /tmp clobber guard: refuse a pre-existing symlink or a dir not owned
+# by the current user (a predictable shared path is otherwise symlink-attackable).
+if [ -L "$HIST" ] || [ ! -d "$HIST" ] || [ ! -O "$HIST" ]; then
+  echo "ERROR: $HIST is not a directory owned by the current user (refusing to use)." >&2; exit 2
+fi
 
 # Wired examples (extend as render-heavy examples are added).
 LIVE_EXAMPLES=(26-ui-showcase)
@@ -58,7 +63,10 @@ build_both() {
   ( cd "$d" && timeout 600 "$SKY" build --backend rust src/Main.sky ) >"$HIST/rust-build.log" 2>&1 || { echo "  rust build failed (see $HIST/rust-build.log)"; return 1; }
   RUST_BIN="$(find "${CARGO_TARGET_DIR:-$d/sky-out/rust/target}/debug" -maxdepth 1 -type f -executable -name sky-app 2>/dev/null | head -1)"
   [ -x "$RUST_BIN" ] || { echo "  rust binary not found"; return 1; }
-  ( cd "$d" && rm -rf sky-out/rust/target ) >/dev/null 2>&1   # disk hygiene
+  # disk hygiene — only prune the local target when CARGO_TARGET_DIR holds the
+  # binary elsewhere; without it RUST_BIN lives under sky-out/rust/target and this
+  # rm would delete it before it is served/captured.
+  [ -z "${CARGO_TARGET_DIR:-}" ] || ( cd "$d" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
 }
 
 # serve_and_get <binary> <out.html> — serve in an isolated cwd, GET /, kill.
@@ -66,6 +74,7 @@ serve_and_get() {
   local bin="$1" out="$2" p; p="$(free_port)"
   local rd; rd="$(mktemp -d "$HIST/serve.XXXXXX")"
   ( cd "$rd" && exec env SKY_LIVE_PORT="$p" PORT="$p" \
+      SKY_CONSOLE_EMBED=off \
       SKY_AUTH_TOKEN_SECRET="sky-equiv-render-test-secret-0123456789-abcdef" \
       "$bin" ) >"$HIST/serve.log" 2>&1 &
   local pid=$!

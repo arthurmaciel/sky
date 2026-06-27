@@ -84,6 +84,7 @@ NO_EQUIV="${SKY_SWEEP_NO_EQUIV:-0}"
 [ "$BUILD_ONLY" = 1 ] && NO_EQUIV=1   # build-only implies no equiv
 if [ "$BUILD_ONLY" != 1 ]; then
   command -v curl >/dev/null 2>&1 || { echo "ERROR: curl required for RUN/EQUIV (set SKY_SWEEP_BUILD_ONLY=1 for a fast compile-only run)." >&2; exit 2; }
+  command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 required for free_port (RUN/EQUIV port allocation); set SKY_SWEEP_BUILD_ONLY=1 for compile-only." >&2; exit 2; }
 fi
 if [ "$NO_EQUIV" != 1 ]; then
   command -v go >/dev/null 2>&1 || { echo "ERROR: go required for Go≡Rust EQUIV (set SKY_SWEEP_NO_EQUIV=1 or SKY_SWEEP_BUILD_ONLY=1)." >&2; exit 2; }

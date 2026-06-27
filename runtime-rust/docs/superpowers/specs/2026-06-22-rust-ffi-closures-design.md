@@ -1,5 +1,11 @@
 # Closures / HOFs auto-FFI — design (the arc keystone)
 
+> **SHIPPED (#28)** — this design was implemented; the machinery below lives in
+> `src/Sky/Build/Rust/FfiInstance.hs` (Phase 2/3/4 closure-capture allowlist,
+> drop+report, per-call capture gate) + `src/Sky/Build/Rust/FfiCall.hs`
+> (`ClosureKind`). The forward-looking framing below ("Pending user review",
+> "the gate to lift") is the original design record, kept for history.
+
 Status: BRAINSTORM-APPROVED; GUARDIAN-CLEARED for v1 with multi-call `Fn` (user-required).
 Path: guardian-final APPROVE-WITH-CONSTRAINTS on the FnOnce-floor cut → user required
 multi-call `Fn` → guardian REJECTED the denylist gate (`ecNoCloneVars` incomplete) →
