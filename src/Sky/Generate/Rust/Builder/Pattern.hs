@@ -124,9 +124,18 @@ patternToRustArg _ _ pat@(Ann.At _ (Can.PTuple _ _ _))
 patternToRustArg singleVarEnums idx pat =
     let paramName = "__p" ++ show idx
         rustPat = patternToRustPattern pat
+        -- A refutable arg pattern (Sky allows `f (Just x) = …`) called with the
+        -- non-matching variant lands here. We can't synthesise a return value, so
+        -- the let-else must diverge — but emit a CLASSIFIED panic with an accurate
+        -- message (a USER non-exhaustive-call, not an internal `unreachable!()`
+        -- invariant). It is contained by the runtime's recover boundaries (server
+        -- CatchPanicLayer → 500, sync panic-gate → classified exit), matching Go's
+        -- recover behaviour. (The fully-total fix — rejecting non-exhaustive
+        -- function/lambda arg patterns — is a SHARED front-end exhaustiveness
+        -- change, outside the Rust-backend boundary.)
         elseClause = if patternIsIrrefutable singleVarEnums pat
                      then ""
-                     else " else { unreachable!() }"
+                     else " else { panic!(\"Sky: non-exhaustive pattern match on a function argument\") }"
         prelude = "let " ++ rustPat ++ " = " ++ paramName ++ elseClause ++ "; "
     in (paramName, prelude)
 
