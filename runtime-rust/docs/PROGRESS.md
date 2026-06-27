@@ -17,6 +17,35 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 14:25 — FFI queue triage — #85/#86 resolved by reasoning; remainder is guardian-drop / CI-scale / premature
+
+After closing every locally-fixable bug/gap this session (E-001, E-002, #53, #66,
+#98), triaged the rest of the "full automatic FFI" queue against the project rules
+(soundness > completeness; respect guardian rulings; no-local-sweeps; no zero-gain
+churn). Resolution:
+
+- **#85 (!Send cross-crate name-collision NEGATIVE fixture) — resolved, no code.**
+  The soundness is ALREADY unit-guarded by `wallg_async_send_opaque_full_path_only`
+  (`tools/sky-ffi-inspect-rs/src/main.rs:10846`): it tests the exact case — a
+  different crate's same-named concrete (`&siblingcrate::Client`, the cross-crate
+  !Send collision) is REFUSED (no bare-last fallback), bare `&Client` refused. An
+  e2e fixture is redundant + impractical to stage so it genuinely exercises the
+  collision (false-lock risk).
+- **#86 (type-id-keyed Send oracle) — won't-do, no gain.** Oracle already sound via
+  full-path string keying (same unit test). Type-id refactor = zero soundness gain
+  + churn/regression risk on the security-sensitive async-Send gate.
+- **#33 (dyn-Fn trait-object params) — stands as guardian-ruled SOUND-drop**, ≈0
+  demand (empirical #27); the method drops cleanly with a diagnostic, no miscompile.
+- **#79 (WALL-B transitive-dep version pin) — premature**; needs a 2nd
+  transitive-FFI crate to even exercise. Revisit when one ships.
+- **#68 / #70 / #71 (firestore fluent API / stripe drop histogram / Phase-4
+  5-crate sweep) — CI-scale**: each needs building firestore/async-stripe-scale
+  real crates, which the no-local-sweeps discipline puts on the 3-OS CI, not this
+  slim box.
+
+Net: the locally-doable, sound FFI work is complete for this session; the open
+items are bounded by guardian rulings, CI-scale builds, or a missing trigger.
+
 ## 2026-06-27 14:10 — #98 CLOSED — re-thunked Task discard now runs (Go auto-force parity)
 
 **What.** Closed the R1 residual the guardian flagged in the #96 final review. After
