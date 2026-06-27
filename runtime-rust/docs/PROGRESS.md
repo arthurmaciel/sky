@@ -17,6 +17,19 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 04:00 — #62 VERIFIED-RESOLVED (stale): 48/51 pass on rustc-1.92
+
+**What.** #62 claimed `48-ffi-generics` + `51-ffi-trait-methods` fail on local rustc-1.92.0 (rustdoc-shape
+drift, `make_from_box1` vs `Box1.make`). Reproduced via the ACTUAL harness path (stub-staging:
+`ffi-stub/*.kernel.json` + `*_bindings.rs` copied into `.skycache/ffi/rust/`, then `sky build --backend rust`)
+on rustc 1.92.0 — BOTH PASS: 48 → `Box1 Int -> 42 / Box1 String -> hi`, 51 → `area -> 12.56 / scaledBy -> 6`,
+build rc=0 + correct run. The original symptom was the NO-STUB path (the live inspector emits the current
+`method_from_type` names, which the stub-based Main.sky doesn't call) — NOT the harness path. With proper
+stub-staging the names match and it builds+runs. Stale → closed by verification (CI's 3-OS gate confirms).
+No code change. **Affected.** docs + task #62 (completed).
+
+---
+
 ## 2026-06-27 03:35 — #33 GUARDIAN-RULED sound-drop (DEFER): dyn-Fn closure params stay dropped
 
 **What.** Reproduced #33 (probe: a non-generic `Box<dyn Fn(i64)->i64>` param drops the whole method,
