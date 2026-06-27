@@ -233,6 +233,7 @@ executable sky
     Sky.Build.EmbeddedInspector
     Sky.Build.EmbeddedInspectorRust
     Sky.Build.FfiGen
+    Sky.Build.Rust.NumCoerce
     Sky.Build.Rust.Ffi
     Sky.Build.Rust.FfiCall
     Sky.Build.Rust.FfiInstance

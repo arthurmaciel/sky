@@ -64,6 +64,7 @@ import qualified Data.Aeson.Types as AT
 import qualified Data.Text as T
 
 import Sky.Generate.Rust.Builder.Naming (mangleTVar)
+import Sky.Build.Rust.NumCoerce (numSaturate, numCarrier)
 
 
 -- ─── the typed call-AST ──────────────────────────────────────────────
@@ -499,6 +500,14 @@ renderCall c params =
     -- the owned local that lives for the duration of the call. Sound: the
     -- reference never escapes the wrapper, and `sv_j` outlives the call.
     renderValueArg j (Just TRSerdeValueRef) = "&sv_" ++ show j
+    -- [#95] A concrete numeric param (`TRPrim w`): the wrapper param is the Sky
+    -- CARRIER (i64/f64, see 'renderArgTypeAt'); narrow it to the foreign width
+    -- `w` at the call site via the SATURATING 'numSaturate' (TOTAL, no
+    -- wraparound). For w ∈ {i64,f64} numSaturate is identity → byte-identical to
+    -- the pre-#95 bare `argJ`. A residual monomorphised type-variable is `TRParam`
+    -- (a DIFFERENT ctor), so this can never mis-coerce a generic `T`.
+    renderValueArg j (Just (TRPrim w))
+        | Just _ <- numCarrier w = numSaturate w (argName j)
     -- C6: an `Iterator<Item=T>`-bound arg (in `iterAdapters`) is passed
     -- `argJ.into_iter()` — a `Vec<T>` is not itself an `Iterator`, so the host
     -- `impl Iterator` param needs the adapter. An `IntoIterator`-bound arg (NOT
@@ -550,6 +559,12 @@ renderArgType c params j = case drop j (_call_argTypes c) of
 -- over @_call_argTypes@ to build the wrapper fn signature.
 renderArgTypeAt :: [String] -> Int -> TypeRef -> String
 renderArgTypeAt _      j TRClosure{} = "F" ++ show j
+-- [#95] A concrete numeric param travels across the FFI boundary as its Sky
+-- CARRIER (every integer width as `i64`, every float as `f64`) — the runtime
+-- always supplies the carrier. The call site ('renderValueArg') narrows back to
+-- the foreign width via the saturating 'numSaturate'. For w ∈ {i64,f64} the
+-- carrier IS the width → byte-identical to the pre-#95 `renderTypeRef`.
+renderArgTypeAt params _ (TRPrim w) | Just carrier <- numCarrier w = carrier
 renderArgTypeAt params _ tr          = renderTypeRef params tr
 
 

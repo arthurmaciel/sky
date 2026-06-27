@@ -93,6 +93,7 @@ import Sky.Build.Rust.FfiCall
     , Receiver(..), ByKind(..)
     , _call_argTypes, _call_receiver, _call_ret, _call_isAsync
     )
+import Sky.Build.Rust.NumCoerce (numWidenScalar)
 import Sky.Generate.Rust.Builder.Naming (mangleTVar)
 import qualified Sky.Reporting.Annotation as A
 import qualified Sky.Reporting.Diagnostic as Diag
@@ -573,15 +574,31 @@ synthesiseGenericWrapper gf =
                     TRCtor _ (ok : _) | retIsResult -> ok
                     other                           -> other
                 okIsSerde = isSerdeRef okRef
+                -- [#95] A concrete numeric scalar OK return (`TRPrim w`) widens to
+                -- its Sky carrier (i64/f64), TOTAL + saturating for widths beyond
+                -- i64 — the RETURN-side counterpart of the param 'numSaturate',
+                -- shared with the inherent path via the leaf 'numWidenScalar'. A
+                -- residual monomorphised type-variable is `TRParam` (a DIFFERENT
+                -- ctor) so this can never mis-coerce a generic `T`; serde + numeric
+                -- are mutually exclusive (a numeric return is never serde).
+                -- Only NON-carrier widths need coercion: i64/f64 already ARE the
+                -- Sky carrier, so excluding them keeps every existing i64/f64-
+                -- returning projected wrapper byte-identical (no redundant `as`,
+                -- no `__ret` bind).
+                okNumWiden = case okRef of
+                    TRPrim w | w /= "i64", w /= "f64" -> numWidenScalar w
+                    _                                  -> Nothing
                 -- The wrapper's Rust return INNER type (the `_` in
                 -- `SkyResult<SkyError, _>`). A serde OK → Sky-facing `String`
-                -- (the JSON text the `to_string` wrap yields). A unit OK (`()`,
-                -- the `put_obj -> Result<(), _>` shape) → `()`. Everything else
-                -- renders the OK TypeRef directly. NEVER the raw `Result<…>` (the
-                -- Result layer becomes the SkyResult wrapper, not a nested type).
+                -- (the JSON text the `to_string` wrap yields). A numeric OK → its
+                -- Sky carrier (#95). A unit OK (`()`, the `put_obj -> Result<(), _>`
+                -- shape) → `()`. Everything else renders the OK TypeRef directly.
+                -- NEVER the raw `Result<…>` (the Result layer becomes the SkyResult
+                -- wrapper, not a nested type).
                 retR
-                    | okIsSerde = "String"
-                    | otherwise = renderTypeRef params okRef
+                    | okIsSerde                  = "String"
+                    | Just (c, _) <- okNumWiden  = c
+                    | otherwise                  = renderTypeRef params okRef
                 -- The host-call expression (UFCS callee + serde turbofish +
                 -- `sv_j` serde args + receiver borrow), walked from the AST.
                 -- For an async host this is the un-awaited future; the body adds
@@ -593,8 +610,9 @@ synthesiseGenericWrapper gf =
                 -- Value's Serialize never errs; never `.unwrap()`). Otherwise the
                 -- value passes through unchanged.
                 retCoerceOk e
-                    | okIsSerde = "serde_json::to_string(&(" ++ e ++ ")).unwrap_or_default()"
-                    | otherwise = e
+                    | okIsSerde                  = "serde_json::to_string(&(" ++ e ++ ")).unwrap_or_default()"
+                    | Just (_, co) <- okNumWiden = co e   -- [#95] saturating numeric widen
+                    | otherwise                  = e
                 -- [WALL 3a / #59, constraint 2/8] serde param prelude: each serde
                 -- value-arg's Sky `String` is deserialised to a `serde_json::Value`
                 -- local `sv_j` BEFORE the call (fallible → early-return Err on bad
@@ -726,11 +744,29 @@ synthesiseGenericWrapper gf =
                 -- The SYNC host body. A fallible (`Result<_,_>`) host matches
                 -- Ok/Err; an infallible host wraps directly in `ok_res`.
                 syncBody
+                    -- [#83/B8] The Err arm routes the foreign error through
+                    -- `sky_error_from_foreign` (server-log under a correlation id +
+                    -- return a generic redacted message), NOT a raw `{:?}` Debug —
+                    -- which leaks request URLs / bearer tokens / API keys into the
+                    -- Sky-visible error. Parity with the async path (asyncBody),
+                    -- which already redacts. Closes the B8 leak on the SYNC projected
+                    -- path (guardian #95 finding).
                     | retIsResult =
                         [ "    match " ++ bodyR ++ " { Ok(v) => ok_res("
                             ++ retCoerceOk "v" ++ "), Err(e) => SkyResult::Err("
-                            ++ "str_err(&format!(\"{:?}\", e))) }"
+                            ++ "sky_error_from_foreign(e)) }"
                         ]
+                    -- [#95, guardian C5] An infallible-sync numeric return must
+                    -- bind the foreign call to a local FIRST: `numWidenScalar`'s
+                    -- i128 arm evaluates its arg twice (isize widens losslessly,
+                    -- single-eval), and `bodyR` IS the foreign call — inlining it
+                    -- would invoke the foreign fn twice. The `__ret` bind is a
+                    -- correct safe superset for every non-carrier numeric return.
+                    -- Non-numeric returns keep the byte-identical inline
+                    -- `ok_res(retCoerceOk bodyR)`.
+                    | Just _ <- okNumWiden =
+                        [ "    let __ret = " ++ bodyR ++ ";"
+                        , "    ok_res(" ++ retCoerceOk "__ret" ++ ")" ]
                     | otherwise = [ "    ok_res(" ++ retCoerceOk bodyR ++ ")" ]
                 body
                     -- A closure-carrying wrapper keeps the catch_unwind boundary

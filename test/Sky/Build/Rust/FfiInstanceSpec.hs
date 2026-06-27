@@ -371,6 +371,47 @@ spec = do
             -- by-mut-ref receiver: `mut arg0` binding + `&mut arg0` first-arg.
             src `shouldContain` "mut arg0: ::tm::Bag<T>"
             src `shouldContain` "<::tm::Bag as ::tm::Insertable>::insert(&mut arg0, arg1)"
+        -- [#95] SATURATING numeric param + return coercion on the projected/UFCS
+        -- path: a `widen(&self, n: usize, w: u32, x: f32) -> usize` trait method.
+        it "saturates numeric params (carrier sig + numSaturate call site) and widens a numeric return" $ do
+            let widenFn = GenericFn
+                    { _gf_kernelName = "Rust_Np"
+                    , _gf_baseName   = "rust_np_widen"
+                    , _gf_refName    = "widen"
+                    , _gf_generic    = mkGen [] [] widenCall
+                    , _gf_region     = A.one
+                    , _gf_file       = "T.sky"
+                    }
+                widenCall = Call.Call
+                    { Call._call_kind     = Call.CallMethod
+                    , Call._call_path     = ["::np", "Calc"]
+                    , Call._call_typeArgs = []
+                    , Call._call_method   = Just "widen"
+                    , Call._call_receiver = Just (Call.Receiver 0 Call.ByRef)
+                    , Call._call_args     = [1, 2, 3]
+                    , Call._call_argTypes = [ Call.TRCtor "::np::Calc" []
+                                            , Call.TRPrim "usize"
+                                            , Call.TRPrim "u32"
+                                            , Call.TRPrim "f32" ]
+                    , Call._call_ret      = Call.TRPrim "usize"
+                    , Call._call_assocOnType = True
+                    , Call._call_iterAdapters = []
+                    , Call._call_traitQualifier = Just ("::np::Calc", "::np::Widen")
+                    , Call._call_borrowAsRefArgs = []
+                    , Call._call_isAsync = False
+                    , Call._call_methodTurbofish = []
+                    }
+                src = okSrc (synthesiseGenericWrapper widenFn)
+            -- params travel as the Sky CARRIER (i64/f64), NOT the foreign width.
+            src `shouldContain` "arg1: i64, arg2: i64, arg3: f64"
+            -- call site narrows each via the SATURATING numSaturate (no wraparound).
+            src `shouldContain` "usize::try_from((arg1).max(0)).unwrap_or(usize::MAX)"
+            src `shouldContain` "(arg2).clamp(0, u32::MAX as i64) as u32"
+            src `shouldContain` "(arg3) as f32"
+            -- usize RETURN: carrier-i64 wrapper type + C5 `__ret` bind + widen.
+            src `shouldContain` "-> SkyResult<SkyError, i64>"
+            src `shouldContain` "let __ret ="
+            src `shouldContain` "ok_res((__ret).min(i64::MAX as usize) as i64)"
     describe "#28 closure-capture Clone allowlist" $ do
         it "rustTypeIsClone is a positive allowlist over closed Clone types" $ do
             map rustTypeIsClone ["i64","String","bool","char","()","Vec<i64>","SkyMaybe<i64>","f64"]

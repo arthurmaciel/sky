@@ -45,6 +45,7 @@ import Sky.Build.FfiGen
     ( PkgInfo(..), FnInfo(..)
     , slugify, lowerFirst, capitaliseFirst, splitOnChar, emitKernelJson, wrapperSkyType
     )
+import Sky.Build.Rust.NumCoerce (numSaturate, numWidenScalar, isNumericRust)
 import Sky.Generate.Rust.Builder.Naming (toSnakeCase, rustSafeIdent)
 
 
@@ -331,56 +332,9 @@ skyTypeToRust s
     | otherwise = "String"  -- fallback for unrecognised types
 
 
--- | True when the given Rust type string is a primitive numeric type.
--- Used to pick `as <T>` casts instead of `.try_into().unwrap()` or `.into()`.
-isNumericRust :: String -> Bool
-isNumericRust t = t `elem`
-    [ "i8", "i16", "i32", "i64", "i128"
-    , "u8", "u16", "u32", "u64", "u128"
-    , "isize", "usize", "f32", "f64" ]
-
--- | [#82] SATURATING coercion of a Sky `Int`(i64) / `Float`(f64) call-site value
--- `e` into a foreign numeric param of width `raw`. The PARAM-side sibling of
--- `translateRustRet`'s return saturation (#16): a caller-supplied out-of-range
--- value clamps into the target's representable range — TOTAL, no panic, no silent
--- wraparound (CLAUDE.md "no silent numeric coercion"). The single source of every
--- SCALAR numeric param/field/ctor-arg cast (guardian #82 B8): `argCall` (method
--- args), `setValExpr` (field setters), `ctorArgOwned` (enum ctors) — each top-level
--- + its Option<numeric> arm — all route here. (A `Vec<numeric>` element write in a
--- setter/ctor also routes here per-element for an int→int-narrowing element (#94);
--- a FLOAT-source element keeps Rust's already-saturating `as`.) `e` must be a side-effect-free
--- expr (a bound local) — the `isize` arm evaluates it more than once.
---
--- Platform-correctness BY CONSTRUCTION (guardian #82 Q2): `usize`/`isize` are
--- platform-width, so they route through `try_from` (a bare `as` would truncate on
--- 32-bit, which CI — all 64-bit — can never catch). `unwrap_or`/`unwrap_or_else`
--- are clippy-clean (no unwrap/expect/panic).
-numSaturate :: String -> String -> String
-numSaturate raw e = case raw of
-    "f32"   -> par ++ " as f32"                              -- precision-lossy, total
-    "f64"   -> e                                             -- identity
-    "i64"   -> e                                             -- identity
-    -- signed narrowing: clamp into [MIN, MAX] of the target, then a lossless `as`.
-    t | t `elem` ["i8", "i16", "i32"]
-            -> par ++ ".clamp(" ++ t ++ "::MIN as i64, " ++ t ++ "::MAX as i64) as " ++ t
-    -- unsigned narrowing: clamp into [0, MAX], then a lossless `as`.
-      | t `elem` ["u8", "u16", "u32"]
-            -> par ++ ".clamp(0, " ++ t ++ "::MAX as i64) as " ++ t
-    -- u64: every non-negative i64 fits u64; negatives saturate to 0.
-      | t == "u64"  -> par ++ ".max(0) as u64"
-    -- u128 / i128: WIDER than i64. i128 is a pure sign-preserving widen; u128
-    -- saturates negatives to 0 (a bare `as u128` would sign-extend -1 to ~3.4e38).
-      | t == "i128" -> par ++ " as i128"
-      | t == "u128" -> par ++ ".max(0) as u128"
-    -- usize / isize: PLATFORM-WIDTH → try_from (32-bit-correct by construction).
-      | t == "usize"
-            -> "usize::try_from(" ++ par ++ ".max(0)).unwrap_or(usize::MAX)"
-      | t == "isize"
-            -> "isize::try_from(" ++ e ++ ").unwrap_or_else(|_| if "
-               ++ par ++ " < 0 { isize::MIN } else { isize::MAX })"
-      | otherwise -> par ++ " as " ++ raw                    -- unreachable; total fallback
-  where
-    par = "(" ++ e ++ ")"
+-- `isNumericRust` + `numSaturate` now live in the leaf module
+-- `Sky.Build.Rust.NumCoerce` (imported above, re-exported below) so the leaf
+-- codegen modules can use them without an import cycle through this module.
 
 
 -- | True when the given Rust type string is a `Copy` primitive, so a field
@@ -658,22 +612,11 @@ translateRustRet raw0 =
                , \e -> if co "x" == "x" then e
                        else e ++ ".into_iter().map(|x| " ++ co "x" ++ ").collect()" )
           Nothing
-            -- Sky `Int` is `i64`. Ints that LOSSLESSLY widen into i64
-            -- (i8..i32, u8..u32, and i64 itself) keep the plain `as i64` —
-            -- the widening can never change the value.
-            | raw `elem` intLosslessRusts -> ("i64", \e -> "(" ++ e ++ ") as i64")
-            -- Ints WIDER than i64 (u64/usize/u128/i128/isize) can hold values
-            -- outside i64's range; a bare `as i64` would sign-flip/truncate
-            -- (e.g. `u64::MAX as i64 == -1`). Coerce with a TOTAL SATURATING
-            -- clamp into i64 range instead: no panic, no sign-flip, and a
-            -- real-world `len() -> usize` still round-trips (lengths never
-            -- exceed i64::MAX). `unwrap_or` is clippy-clean (no unwrap/expect).
-            | raw `elem` intSaturateUnsignedRusts ->
-                ("i64", \e -> "(" ++ e ++ ").min(i64::MAX as " ++ raw ++ ") as i64")
-            | raw `elem` intSaturateWideRusts ->
-                ("i64", \e -> "i64::try_from(" ++ e
-                              ++ ").unwrap_or(if (" ++ e ++ ") < 0 { i64::MIN } else { i64::MAX })")
-            | raw `elem` floatRusts -> ("f64", \e -> "(" ++ e ++ ") as f64")
+            -- [#16/#95] Scalar numeric widening (i*/u*/isize/usize/f*) → the Sky
+            -- carrier (i64/f64), TOTAL + saturating for widths exceeding i64.
+            -- Delegated to the leaf `numWidenScalar` so the scalar coercion has
+            -- ONE source, shared with the projected/UFCS path (#95).
+            | Just r <- numWidenScalar raw -> r
             | raw == "bool"   -> ("bool", id)
             | raw == "String" -> ("String", id)
             -- [#47(a)] serde-bound return: serde_json::Value → Sky String (JSON text).
@@ -688,17 +631,6 @@ translateRustRet raw0 =
                         in (dt, \e -> e ++ ".to_owned()")
             | otherwise -> (raw, id)   -- opaque type: keep as-is, no coercion
   where
-    -- Lossless: every value fits in i64 after widening. `isize` is i16/i32/i64
-    -- depending on target pointer width — all ≤ i64, so it widens losslessly.
-    intLosslessRusts = [ "i8","i16","i32","i64","u8","u16","u32","isize" ]
-    -- Unsigned types whose max can exceed i64::MAX (u64/u128 always; usize is
-    -- u32 on 32-bit / u64 on 64-bit). Unsigned can only OVER-shoot (never
-    -- negative), so a one-sided `.min(i64::MAX as T)` clamp is total + correct.
-    intSaturateUnsignedRusts = [ "u64","usize","u128" ]
-    -- Signed 128-bit — can exceed i64 in BOTH directions, so saturate via total
-    -- `try_from` (Ok → value; Err → clamp to i64::MIN when negative else MAX).
-    intSaturateWideRusts = [ "i128" ]
-    floatRusts = [ "f32", "f64" ]
     stripRef s =
         let s1 = dropWhile (\c -> c == '&' || c == ' ') s
         in case stripPrefix "mut " s1 of
