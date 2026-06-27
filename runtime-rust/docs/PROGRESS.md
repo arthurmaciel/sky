@@ -17,6 +17,46 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 15:10 — #68 (WALL 6 firestore fluent) RE-SCOPED via minimal stubs — shape (a) already works; real blocker is the lifetime-BORROWING builder
+
+Reproduced #68 with minimal stub crates (no real firestore needed — the WALL code
+fixes never need the real crate, only the real-crate PROOF does). Findings:
+
+- **Shape (a) "private `fluent_api` module → E0603" ALREADY WORKS.** A crate-local
+  type defined in a PRIVATE module but PUBLICLY re-exported at the crate root
+  (`pub use fluent_api::FluentSelect;` — firestore's actual shape) binds correctly:
+  `db.fluent()` → `fluent_from_db : Db -> Result Error FluentSelect`, the field
+  accessors + `run` bind, the wrapper references the PUBLIC path
+  `::fluentcrate::FluentSelect`, build green. `collect_reachable_paths` resolves the
+  named re-export (the WALL-1 machinery already handles it). An earlier "drop"
+  observation was a stale git-dep-commit / stale-inspector artifact. Locked by new
+  unit test `wall6_private_module_named_reexport_resolves_public_path`.
+  A plain owned struct with a PRIVATE field correctly generates NO field accessors
+  (visibility gate works) — so the E0603 framing is a non-issue for re-exported types.
+
+- **The REAL blocker is the lifetime-BORROWING builder.** firestore's fluent
+  builders BORROW the db (`FluentSelect<'a> { db: &'a str }`, `fn fluent(&self) ->
+  FluentSelect<'_>`). A minimal stub of that shape cargo-fails under SKY_DCE=0 with:
+  E0521 (borrowed data escapes — `fluent_from_db(arg0: Db) -> FluentSelect` returns
+  a value borrowing the moved `arg0`), E0106 (the lifetime-param return type emitted
+  without a lifetime arg), and E0616 (a field accessor generated for the PRIVATE
+  `db` field — a visibility-gate bypass that appears ONLY in the lifetime-struct case).
+  ROOT CAUSE: a struct with a non-`'static` lifetime parameter is BORROWED data —
+  it cannot cross the FFI boundary as an owned Sky value. The sound fix is a
+  fail-closed DROP (the WALL-3b borrowed-ref family, #60, extended from `&T` to
+  `T<'a>`): drop methods returning/taking a lifetime-parameterized type by value,
+  and drop that type's accessors/methods. Currently they BIND → cargo-fail.
+
+  This is a soundness-sensitive binding-gate policy change (which methods bind) →
+  needs guardian design before implementing; deliberately NOT rushed at the tail of
+  this session. Next concrete step: locate the borrowed-ref chokepoint (#60) and add
+  the lifetime-param → not-ownable gate, guardian-designed, with a stub fixture.
+  #68 stays in_progress with this sharpened scope (was mis-framed as "E0603 private
+  module"; the E0603 part is already handled).
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (new unit test
+`wall6_private_module_named_reexport_resolves_public_path`).
+
 ## 2026-06-27 14:25 — FFI queue triage — #85/#86 resolved by reasoning; remainder is guardian-drop / CI-scale / premature
 
 After closing every locally-fixable bug/gap this session (E-001, E-002, #53, #66,

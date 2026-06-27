@@ -11821,6 +11821,40 @@ mod tests {
         out
     }
 
+    // ── WALL-6 / #68 — crate-local type in a PRIVATE module, PUBLICLY re-exported
+    //    at the crate root via a NAMED `pub use` → must resolve to the public path
+    //    (the firestore db.fluent() return-type shape). ────────────────────────
+    #[test]
+    fn wall6_private_module_named_reexport_resolves_public_path() {
+        let doc = serde_json::json!({
+            "root": "67",
+            "index": {
+                "67": { "name": "fluentcrate", "crate_id": 0, "visibility": "public",
+                        "inner": { "module": { "items": [48, 66] } } },
+                "48": { "name": "Db", "crate_id": 0, "visibility": "public",
+                        "inner": { "struct": {} } },
+                // Named (non-glob) `pub use fluent_api::FluentSelect;` at the root.
+                "66": { "name": "FluentSelect", "crate_id": 0, "visibility": "public",
+                        "inner": { "use": { "source": "fluent_api::FluentSelect",
+                                            "name": "FluentSelect", "id": 2, "is_glob": false } } },
+                // The struct itself lives in the PRIVATE `fluent_api` module.
+                "2":  { "name": "FluentSelect", "crate_id": 0, "visibility": "public",
+                        "inner": { "struct": {} } }
+            },
+            "paths": {
+                "67": { "crate_id": 0, "path": ["fluentcrate"], "kind": "module" },
+                "48": { "crate_id": 0, "path": ["fluentcrate", "Db"], "kind": "struct" },
+                "2":  { "crate_id": 0, "path": ["fluentcrate", "fluent_api", "FluentSelect"], "kind": "struct" }
+            }
+        });
+        let reach = collect_reachable_paths(&doc);
+        assert_eq!(reach.get("48").map(|s| s.as_str()), Some("fluentcrate::Db"),
+            "Db should resolve to its root path");
+        assert_eq!(reach.get("2").map(|s| s.as_str()), Some("fluentcrate::FluentSelect"),
+            "a private-module type re-exported by a NAMED `pub use` at root must resolve \
+             to the public re-export path (not drop); got {:?}", reach.get("2"));
+    }
+
     // ── WALL-C / #76 — external type DEFINITION path → PUBLIC re-export ──────
 
     #[test]
