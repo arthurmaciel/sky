@@ -1,0 +1,16 @@
+[project]
+name = "96-ffi-external-trait-xcrate"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# WALL-K (#92): the 3-crate triangle. walk-method (A, the `go<T: Walker>` method) impls
+# nothing; walk-impl (C) holds the unique `impl Walker for Boots`; walk-trait (B) defines
+# the `Walker` trait — EXTERNAL to walk-method. WALL-K resolves `T: Walker` → Boots across
+# crates. walk-trait is also listed as a direct dep ONLY so the generated Cargo.toml carries
+# its git source: the WALL-B transitive-GIT-dep gap (#79) is orthogonal to WALL-K and
+# fixture-only (the real async-stripe-client-core is a crates.io crate, resolved by version).
+["rust.dependencies"]
+walk-method = { git = "file:///home/arthur/.cache/sky/96-ffi-external-trait-xcrate-method", branch = "master" }
+walk-impl = { git = "file:///home/arthur/.cache/sky/96-ffi-external-trait-xcrate-impl", branch = "master" }
+walk-trait = { git = "file:///home/arthur/.cache/sky/96-ffi-external-trait-xcrate-trait", branch = "master" }

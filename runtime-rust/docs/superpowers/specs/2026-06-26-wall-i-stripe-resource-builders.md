@@ -343,3 +343,64 @@ soundness danger zone) + then a heavy real-stripe cargo build to confirm end-to-
 
 The WALL-J Self::Output mechanism is DONE; WALL-K is the last cross-crate-client piece for the
 real `CreateCustomer::new(id).send(&client)`.
+
+## 12. WALL-K guardian DESIGN verdict — APPROVE-WITH-CONSTRAINTS (B1-B8)
+
+The two-gate widen is the correct minimal delta; the consumption machinery (frozen `send_ok`,
+`PROVABLY_SEND_OPAQUE_NAMES`, `__sky_xc_path`) is ALREADY wired by WALL-G/H and reused verbatim.
+Canonical-path agreement RESOLVES IN FAVOR: write side (`mirror_into_global_xc_index` →
+`canon_path_of_id` = `paths[id].path.join("::")`, no remap) and read side
+(`EXTERNAL_TRAIT_PATH_BY_ID` = same join + `alloc::`→`std::` remap) are byte-identical for
+`stripe_client_core::StripeClient` (no `alloc::` prefix → remap is a no-op).
+
+Constraints:
+- **B1** — unify write/read canon normalization: the read fallback in `xc_unique_for_trait_key`
+  should use `canon_path_of_id` over the current doc's `paths` (the EXACT write-side fn), not the
+  alloc-remapped `EXTERNAL_TRAIT_PATH_BY_ID`. Mismatch is fail-closed (miss → drop), never wrong-pick.
+- **B2** — empirically confirm `paths[<StripeClient id>].path` is byte-identical in core's + the
+  facade's rustdoc BEFORE relying on it (lib name `stripe_client_core`, no version/package-name).
+- **B3 (load-bearing)** — `C::Err` is NEWLY reachable (C never resolved pre-WALL-K). After
+  `C`→`Client`, the error becomes `<Client as StripeClient>::Err` which core's index CANNOT
+  resolve. Codegen MUST place the foreign error in an inference / `sky_error_from_foreign`
+  position, NEVER a Sky-surfaced named type. The fixture MUST carry `type Err` + use it in the
+  return error slot to prove it cargo-compiles.
+- **B4** — external acceptance goes ONLY in the `!local` arm; same `found.is_some()` ambiguity
+  counter; markers still skipped.
+- **B5** — reuse the frozen `send_ok`; add NO new Send derivation in the method-crate's pass.
+- **B6** — resolved concrete's owning crate must be a generated dep (facade is a direct manifest
+  dep → in Cargo.toml; fixture's impl-crate must be a manifest entry).
+- **B7** — closed-world uniqueness (`xc_unique_for_canon` len==1; 0/>1 → drop) is a sound pick.
+- **B8** — minimal 3-crate RED fixture FIRST: crate B `trait Ext { type Err; }`, crate C
+  `impl Ext for Conc { type Err = ConcErr }`, crate A `async fn m<T: Ext>(&self,&T) ->
+  Result<i64, T::Err>`; manifest [A, C] (B transitive). RED: `m` drops `unmodellable-bound Ext`;
+  GREEN: binds `T=Conc` + the `T::Err` slot cargo-compiles. Then real stripe.
+
+Full memo: guardian memory `aab61a38…` / dispatched 2026-06-26.
+
+### WALL-K SHIPPED (fixture 96, guardian-final CLEAN)
+
+Implemented the two-gate widen: (1) `mirror_into_global_xc_index` now also populates
+`TRAIT_ID_CANON_PATH` (renamed from `LOCAL_TRAIT_ID_CANON_PATH`) with EXTERNAL trait ids — every
+`kind=="trait"` entry in `doc["paths"]` via `canon_path_of_id` (B1: same normalizer as the
+GLOBAL_XC_IMPLS write key, no `alloc::` remap). (2) `single_concrete_impl_trait_key`'s `!local`
+arm accepts an external trait bound when `xc_unique_for_trait_key` resolves — EXCEPT a
+std/core/alloc-rooted trait (the canon-prefix gate), which stays owned by `bound_to_concrete` /
+the WALL-E fail-closed drop.
+
+Fixture `96-ffi-external-trait-xcrate` (3-crate triangle: walk-method `go<T: Walker>`, walk-trait
+the external `Walker`, walk-impl the unique `impl Walker for Boots`): `go_from_trip : Trip ->
+Boots -> Task Error String` resolves `T`→`Boots` cross-crate, cargo-clean SKY_DCE=0, runs
+`trip:x:boots`. This is the EXACT real-stripe `send<C: StripeClient>` shape.
+
+**Regression caught + fixed (the std-exclusion).** The first cut broadened the gate to ALL
+external traits, which made fixture 89 (WALL-E `Into<&'static str>` fail-closed drop) bind →
+E0277, because the fixture crate has a unique crate-local `From`/`Into` impl that the XC index
+mirrored. Excluding std/core/alloc traits (the guardian's recommended fidelity mitigation) fixes
+89 while keeping `StripeClient` (a `stripe_client_core::` dep trait) resolvable. Guardian-final
+APPROVED CLEAN (wrong-pick disproven: two distinct traits can't share a canonical path, so the
+resolved concrete provably satisfies the bound).
+
+**Stage 4 status:** the WALL-K mechanism — the LAST cross-crate piece — is proven on the 3-crate
+triangle (96), which mirrors stripe exactly. The remaining real-stripe end-to-end binding is a
+HEAVY multi-crate cargo build (async-stripe-core + facade + client-core + hyper/tokio) — pure
+real-crate verification, no remaining mechanism gap. All WALL-I/J/K mechanisms shipped.

@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain 94-ffi-inherent-self-output 95-ffi-inherent-self-output-async)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain 94-ffi-inherent-self-output 95-ffi-inherent-self-output-async 96-ffi-external-trait-xcrate)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -1125,6 +1125,58 @@ run_inherent_self_output_async() {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 96-ffi-external-trait-xcrate — WALL-K (#92): cross-crate resolution for an EXTERNAL
+# trait bound (the 3-crate triangle). `Trip::go<T: Walker>(&self, w: &T)` where Walker is
+# in crate B (walk-trait, EXTERNAL to method crate A) and its UNIQUE impl `Boots` is in
+# crate C (walk-impl). WALL-G keyed cross-crate resolution by crate-LOCAL trait only;
+# WALL-K routes an EXTERNAL trait bound's canon (canon_path_of_id over trait-kind
+# doc[paths]) to the global XC index. The exact real-stripe `send<C: StripeClient>` shape.
+# SKY_DCE=0. POSITIVE: go resolves T→Boots cross-crate + runs "trip:x:boots".
+# ─────────────────────────────────────────────────────────────────────────────
+run_external_trait_xcrate() {
+  local base=96-ffi-external-trait-xcrate
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+  [ -f "$src/setup.sh" ]     || { _fail "$base (no setup.sh)"; return; }
+
+  bash "$src/setup.sh" >/tmp/ffi-fixture-"$base".setup.log 2>&1 || {
+    _fail "$base (setup.sh failed — see /tmp/ffi-fixture-$base.setup.log)"; return; }
+  local mDir="$HOME/.cache/sky/$base-method" iDir="$HOME/.cache/sky/$base-impl" tDir="$HOME/.cache/sky/$base-trait"
+  [ -d "$mDir/.git" ] && [ -d "$iDir/.git" ] && [ -d "$tDir/.git" ] || {
+    _fail "$base (expected staged crates at $mDir + $iDir + $tDir)"; return; }
+
+  local wd; wd="$(mktemp -d "${TMPDIR:-/tmp}/ffi-fixture-$base.XXXXXX")" || { _fail "$base (mktemp)"; return; }
+  mkdir -p "$wd/src"
+  cp -r "$src/src/." "$wd/src/" 2>/dev/null || true
+  cp "$src/sky.toml" "$wd/sky.toml" || { _fail "$base (cp sky.toml)"; rm -rf "$wd"; return; }
+  local escM escI escT
+  escM="$(printf 'file://%s' "$mDir" | sed -e 's/[\/&]/\\&/g')"
+  escI="$(printf 'file://%s' "$iDir" | sed -e 's/[\/&]/\\&/g')"
+  escT="$(printf 'file://%s' "$tDir" | sed -e 's/[\/&]/\\&/g')"
+  sed -i -E "s|file://[^\"]*/$base-method|$escM|g; s|file://[^\"]*/$base-impl|$escI|g; s|file://[^\"]*/$base-trait|$escT|g" "$wd/sky.toml" \
+    || { _fail "$base (sed sky.toml)"; rm -rf "$wd"; return; }
+
+  local bin; bin="$(SKY_DCE=0 build_fixture "$wd")" || {
+    _fail "$base (build failed — external-trait C unresolved? unmodellable-bound / cargo-fail)"; rm -rf "$wd"; return; }
+
+  local skyi="$wd/.skycache/ffi/rust/walk-method.skyi"
+  if ! rg -q 'go_from_trip : Trip -> Boots -> Task Error String' "$skyi" 2>/dev/null; then
+    _fail "$base: go<T: Walker> did NOT resolve T→Boots cross-crate (WALL-K broken) — got: $(rg 'go_from_trip' "$skyi" 2>/dev/null)"; rm -rf "$wd"; return
+  fi
+
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (external-trait bound T: Walker → cross-crate walk_impl::Boots bound+ran 'trip:x:boots' · SKY_DCE=0 cargo-clean · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
 # ── Drive ────────────────────────────────────────────────────────────────────
 FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -1149,6 +1201,7 @@ for n in "${FIXTURES[@]}"; do
     93-ffi-customize-chain)   run_customize_chain ;;
     94-ffi-inherent-self-output) run_inherent_self_output ;;
     95-ffi-inherent-self-output-async) run_inherent_self_output_async ;;
+    96-ffi-external-trait-xcrate) run_external_trait_xcrate ;;
     *)                        run_basic "$n" ;;
   esac
 done

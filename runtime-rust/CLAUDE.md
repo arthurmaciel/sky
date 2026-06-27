@@ -694,6 +694,23 @@ log** — hold it to the same bar as a code review:
   Inline match-arm code that calls `.to_string()` on a `Decimal` field fails with
   E0599. Use the runtime helper `decimal_to_string(d)` everywhere a `Decimal` must
   become a `String` (SqlDecimal / SqlMoney arms in `sqlValueMatchArms`).
+- **Broadening cross-crate trait-impl resolution to EXTERNAL trait bounds MUST
+  exclude std/core/alloc traits, or it over-narrows std-bounded generics into a
+  cargo-fail.** WALL-K (#92) let a `T: ExternalTrait` bound resolve to a unique
+  cross-crate impl via the global XC index (the 3-crate triangle: method-crate,
+  trait-crate=dep, impl-crate=another dep — stripe `send<C: StripeClient>`). The
+  first cut accepted ANY non-local trait → a `T: Into<&'static str>` / `T: From<X>`
+  bound (a std conversion the WALL-E fail-closed path intends to DROP) got
+  monomorphized to a unique crate-local `impl From<…>` the XC index had mirrored →
+  E0277 (fixture 89 regressed). Fix: gate the external-trait acceptance on the
+  trait's canonical path NOT starting with `std::`/`core::`/`alloc::` (a genuine
+  project-DEP trait like `stripe_client_core::StripeClient` is fine; a std
+  conversion trait is owned by `bound_to_concrete` / the WALL-E drop). General
+  rule: a unique-impl monomorphizer widened to a new trait class must re-exclude
+  the trait families an EARLIER wall already fail-closed on. Sound-by-construction
+  point: two distinct traits can never share a fully-qualified canonical path, so a
+  canon-keyed XC lookup can't cross-resolve traits — the only risk is over-*scope*
+  (which std-exclusion closes), never a wrong-trait pick.
 - **A boundary fn that `format!("{e:?}")`s a foreign error into the USER-FACING
   message LEAKS secrets — "the runtime already redacts" must be VERIFIED at the
   fn, not assumed.** `sky_error_from_foreign` (core.rs) used to do

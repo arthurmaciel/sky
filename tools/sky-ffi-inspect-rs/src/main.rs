@@ -1441,7 +1441,7 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     // accumulates across the project's crates); the per-crate local-trait-id→canon
     // map IS reset here. Runs AFTER REACHABLE_PATHS + the Send sources above (it
     // freezes both the public path and the Send verdict in THIS owning crate).
-    LOCAL_TRAIT_ID_CANON_PATH.with(|c| c.borrow_mut().clear());
+    TRAIT_ID_CANON_PATH.with(|c| c.borrow_mut().clear());
     mirror_into_global_xc_index(doc);
 
     for (item_id, item) in index {
@@ -2491,7 +2491,7 @@ fn canon_path_of_id(paths: Option<&serde_json::Map<String, serde_json::Value>>, 
 /// re-population (the two-pass loop) idempotent while still counting two GENUINELY
 /// distinct cross-crate impls (different public paths) as ambiguous → drop.
 ///
-/// Also populates `LOCAL_TRAIT_ID_CANON_PATH` (this crate's local trait id → canonical
+/// Also populates `TRAIT_ID_CANON_PATH` (this crate's local trait id → canonical
 /// path) so the bind-time lookup can translate the per-crate trait KEY into the global
 /// key.  MUST run AFTER REACHABLE_PATHS + the Send sources are populated.
 fn mirror_into_global_xc_index(doc: &serde_json::Value) {
@@ -2507,9 +2507,31 @@ fn mirror_into_global_xc_index(doc: &serde_json::Value) {
             continue;
         }
         if let Some(cp) = canon_path_of_id(paths, id) {
-            LOCAL_TRAIT_ID_CANON_PATH.with(|c| {
+            TRAIT_ID_CANON_PATH.with(|c| {
                 c.borrow_mut().insert(id.clone(), cp);
             });
+        }
+    }
+    // [WALL-K #92] EXTERNAL trait id → canonical path. A `T: ExternalTrait` bound (the
+    // trait defined in a DEP — async-stripe-core's `send<C: StripeClient>`, StripeClient
+    // in client-core) must ALSO translate its per-crate id to the cross-crate-stable
+    // canon so the bind-time lookup can hit the global XC index (the impl lives in a
+    // THIRD crate — the facade). `doc["paths"]` records every external item with a
+    // `kind` + its canonical `path`; pick the `trait`-kind entries. Uses the SAME
+    // `canon_path_of_id` normalizer as the GLOBAL_XC_IMPLS write key (guardian B1 — no
+    // alloc-remap skew; `EXTERNAL_TRAIT_PATH_BY_ID` is NOT used here precisely because
+    // it applies an `alloc::`→`std::` remap the write side does not). A local id already
+    // inserted above is not overwritten (same canon either way).
+    if let Some(paths_map) = paths {
+        for (id, entry) in paths_map {
+            if entry.get("kind").and_then(|k| k.as_str()) != Some("trait") {
+                continue;
+            }
+            if let Some(cp) = canon_path_of_id(paths, id) {
+                TRAIT_ID_CANON_PATH.with(|c| {
+                    c.borrow_mut().entry(id.clone()).or_insert(cp);
+                });
+            }
         }
     }
 
@@ -2586,7 +2608,7 @@ fn xc_unique_for_canon(canon: &str) -> Option<XcImpl> {
 /// cross-crate `XcImpl`, or None. The bridge from the same-crate `concrete_for_unique_impl`
 /// key space to the canonical-path-keyed global index.
 fn xc_unique_for_trait_key(trait_key: &str) -> Option<XcImpl> {
-    let canon = LOCAL_TRAIT_ID_CANON_PATH.with(|c| c.borrow().get(trait_key).cloned())?;
+    let canon = TRAIT_ID_CANON_PATH.with(|c| c.borrow().get(trait_key).cloned())?;
     xc_unique_for_canon(&canon)
 }
 
@@ -4175,7 +4197,7 @@ thread_local! {
     // (from `doc["paths"]`). Lets `concrete_for_unique_impl` translate the per-crate
     // trait KEY (a local rustdoc id) into the cross-crate GLOBAL_XC_IMPLS key. Reset
     // per crate alongside REACHABLE_PATHS.
-    static LOCAL_TRAIT_ID_CANON_PATH: std::cell::RefCell<HashMap<String, String>> =
+    static TRAIT_ID_CANON_PATH: std::cell::RefCell<HashMap<String, String>> =
         std::cell::RefCell::new(HashMap::new());
 
     // [#52] Set of CRATE-LOCAL trait ids that themselves carry a `Send` supertrait
@@ -9610,11 +9632,31 @@ fn single_concrete_impl_trait_key(bounds: &[serde_json::Value]) -> Option<String
         let tr = b.get("trait_bound").and_then(|tb| tb.get("trait"))?;
         let id = tr.get("id")?;
         let key = item_id_to_str(id);
-        // Only a CRATE-LOCAL trait (same-crate-only, constraint 2).
+        // A CRATE-LOCAL trait (same-crate, #52 / WALL-G fixture-91 case) OR — [WALL-K
+        // #92] — an EXTERNAL trait bound that the project's global cross-crate index
+        // resolves to a UNIQUE concrete impl (the 3-crate triangle: method here, trait
+        // in a dep, impl in a sibling dep — stripe `send<C: StripeClient>`). The
+        // external branch is fail-closed: `xc_unique_for_trait_key` is None unless the
+        // trait's canon has EXACTLY ONE mirrored impl, so an unresolvable / ambiguous
+        // external bound still drops `unmodellable-bound`.
         let local = LOCAL_TYPE_IDS.with(|s| s.borrow().contains(&key))
             || REACHABLE_PATHS.with(|c| c.borrow().contains_key(&key));
         if !local {
-            return None;
+            // [WALL-K #92] An EXTERNAL trait bound resolves cross-crate ONLY when it is a
+            // genuine project-DEP trait (stripe `StripeClient` from client-core), NEVER a
+            // std/core/alloc trait. A `T: Into<&'static str>` / `T: From<..>` bound is a
+            // std conversion the existing `bound_to_concrete` / WALL-E fail-closed path
+            // owns; a unique crate-local `impl From<X> for Y` must NOT monomorphize it
+            // (regression #89 — over-narrowing a std-bounded generic → E0277). Gate on the
+            // trait's canon NOT being std-rooted, THEN require the unique XC impl.
+            let is_std = TRAIT_ID_CANON_PATH.with(|c| {
+                c.borrow().get(&key).map(|p| {
+                    p.starts_with("std::") || p.starts_with("core::") || p.starts_with("alloc::")
+                }).unwrap_or(false)
+            });
+            if is_std || xc_unique_for_trait_key(&key).is_none() {
+                return None;
+            }
         }
         // A SECOND real bound → ambiguous; refuse (over-drop is sound).
         if found.is_some() {

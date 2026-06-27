@@ -17,6 +17,38 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 22:10 — WALL-K (#92): cross-crate resolution for an EXTERNAL trait bound (3-crate triangle)
+
+**What.** The last cross-crate piece for the real stripe `send<C: StripeClient>`. WALL-G resolved a
+cross-crate impl only when the bound trait was crate-LOCAL to the method's crate (fixture 91). The
+real stripe is a 3-crate triangle — `send<C: StripeClient>` in core, `StripeClient` in client-core
+(EXTERNAL to core), impl in the facade. The external trait bound was hard-gated out before the XC
+index → `unmodellable-bound`.
+
+**Fix (inspector, guardian design B1-B8).** (1) Rename `LOCAL_TRAIT_ID_CANON_PATH` →
+`TRAIT_ID_CANON_PATH`; `mirror_into_global_xc_index` now also populates it with EXTERNAL trait ids
+(every `kind=="trait"` in `doc["paths"]` via `canon_path_of_id` — B1: identical normalizer to the
+GLOBAL_XC_IMPLS write key, no `alloc::` remap skew). (2) `single_concrete_impl_trait_key`'s `!local`
+arm accepts an external trait bound iff `xc_unique_for_trait_key` resolves AND the trait is NOT
+std/core/alloc-rooted (the latter stay owned by `bound_to_concrete`/WALL-E). Reuses WALL-G's frozen
+`send_ok` + `__sky_xc_path` consumption verbatim (no new Send logic).
+
+**Verification.** Fixture `96-ffi-external-trait-xcrate` (3-crate triangle): `go_from_trip : Trip ->
+Boots -> Task Error String` resolves `T: Walker`→`Boots` cross-crate, cargo-clean SKY_DCE=0, runs
+`trip:x:boots` — the exact real-stripe `send` shape. Regression caught: the first cut (all external
+traits) made fixture 89 (WALL-E `Into<&'static str>` drop) bind→E0277; the std/core/alloc exclusion
+(guardian's recommended mitigation) fixes 89 + keeps StripeClient. 217 unit tests; full FFI gate
+**42 ok · 0 fail**; clippy clean. Guardian-final APPROVED CLEAN (wrong-pick disproven — distinct
+traits can't share a canonical path). The real async-stripe `send` previously dropped
+`unmodellable-bound StripeClient`; WALL-K is what lets it resolve once the facade is in the manifest.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (canon-map rename + external population in
+`mirror_into_global_xc_index`; `single_concrete_impl_trait_key` external+std-exclusion gate),
+`runtime-rust/scripts/ffi-fixtures-test.sh` (`run_external_trait_xcrate` + 96), fixture
+`runtime-rust/tests/sky/96-ffi-external-trait-xcrate/`, spec §12.
+
+---
+
 ## 2026-06-26 20:40 — WALL-J Stage 1 (#91): sibling-impl `<Self as Trait>::Output` resolution
 
 **What.** The inherent-method assoc-projection wall. An inherent `fn out(&self) -> <Self as

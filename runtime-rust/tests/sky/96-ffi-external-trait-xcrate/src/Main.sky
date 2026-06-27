@@ -1,0 +1,35 @@
+module Main exposing (main)
+
+-- WALL-K (#92): the 3-crate triangle — `Trip.go<T: Walker>(w)` where Walker is an
+-- EXTERNAL trait (crate B) with its unique impl `Boots` in crate C. WALL-K resolves
+-- T → Boots cross-crate. Result<String, T::Err> = Task Error String.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Walk_method as M
+import Rust.Walk_impl as I
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    case M.new_from_trip "x" of
+        Ok trip ->
+            case I.new_from_boots () of
+                Ok boots ->
+                    M.go_from_trip trip boots
+                        |> Task.andThen
+                            (\s ->
+                                if s == "trip:x:boots" then
+                                    println "xtrait=trip:x:boots [ALL OK]"
+
+                                else
+                                    println ("xtrait=UNEXPECTED " ++ s)
+                            )
+                        |> Task.onError (\e -> println ("go-failed: " ++ Error.toString e))
+
+                Err e ->
+                    println ("boots-failed: " ++ Error.toString e)
+
+        Err e ->
+            println ("trip-failed: " ++ Error.toString e)

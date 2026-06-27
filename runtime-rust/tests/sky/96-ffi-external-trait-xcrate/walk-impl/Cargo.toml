@@ -1,0 +1,6 @@
+[package]
+name = "walk-impl"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+walk-trait = { git = "file:///home/arthur/.cache/sky/96-ffi-external-trait-xcrate-trait", branch = "master" }
