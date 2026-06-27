@@ -33,10 +33,16 @@ Each batch: read → fix → clippy `--all-targets --all-features -D warnings` +
 | `cc07c1e1` | **HIGH** style_inject.rs XSS strip (case-insens + fixpoint); html.rs `on*`/`srcdoc` XSS on BOTH sinks via `SafeAttrName` (parse-don't-validate); list.rs `sortWith` comparator panic (catch_unwind); file.rs `readFile` unbounded → 512 MiB ceiling | ✅ +5 regression tests |
 | `3d07b4ef` | **HIGH** RUSTSEC-2026-0185 quinn-proto 0.11.14→0.11.15 | ✅ cargo audit |
 | `80334f43` | **HIGH** system.rs env read/write race (UB) → RwLock; tui/layout.rs cell-count DoS clamp (px/vw/vh/fr) + ANSI-injection (Ui.html/paragraph/input value) sanitize_rune | ✅ guardian |
+| `5d732370` | **HIGH** server.rs WS outbound mpsc unbounded → bounded+try_send; **MED** rate-limit token-bucket idle-TTL eviction (refill==0 leak) | ✅ guardian |
+| `4a440e21` | **HIGH** 4 doc-drift: sync-with-upstream SKILL.md wrong Compile.hs dispatch names; 2 stale FFI-parity spec claims; 2026-06-19 audit header/body reconcile | ✅ verified |
+| `6852928e` | **HIGH×2** Sky.Live mortal session driver (Weak entry + liveness tick, closes immortal-driver leak) + SSE entry-pinning (watch-only survives eviction) + admission cap (session_count + SKY_LIVE_MAX_SESSIONS → 503) | ✅ guardian design + final |
 
-Remaining HIGH: server.rs WS unbounded mpsc; live/mod.rs session leak + admission cap; Pattern.hs `unreachable!()` on refutable arg pattern (codegen); 4 doc-drift. MED/LOW: in progress.
+**ALL HIGH fixed except one — Pattern.hs (codegen `unreachable!()` on refutable function/lambda arg pattern):** CONFIRMED Sky-reachable (`sky check` accepts `f (Just x)=x` called with `Nothing`, no exhaustiveness error). The architecturally-correct fix is front-end rejection of non-exhaustive function/lambda arg patterns — that lives in the SHARED `src/Sky/Type/Exhaustiveness.hs` / canonicaliser, **OUTSIDE the Rust-backend boundary** (and would also change Go, which currently relies on recover→500). The emitted `unreachable!()` is already CONTAINED at runtime by the existing recover boundaries (Sky.Http.Server `CatchPanicLayer`→500; synchronous panic-gate→classified exit 1), i.e. parity with Go's recover. **Disposition: ⏸️ deferred — needs an out-of-boundary shared-compiler change; SIGNALLED to the user.** In-boundary marginal option (classify the message instead of raw `unreachable!()`) is noted but not the real fix.
+
 rsa 0.9.10 (RUSTSEC-2023-0071 Marvin) — no upstream fix; deferred (tracked).
-Filed follow-ups: ~40 process-internal `SKY_*` env reads via read_env_var; render_node recursion depth limit.
+Filed follow-ups: ~40 process-internal `SKY_*` env reads via read_env_var; render_node recursion depth limit; WS full-vs-closed error message; HTTP server header-read/idle timeout (parity-audit P1).
+
+**Next: MED (~110) then LOW (~281), in-boundary, by component.**
 
 ### Deterministic tier (supply-chain + secgrep)
 
