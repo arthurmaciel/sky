@@ -37,6 +37,7 @@ import qualified Sky.AST.Canonical as Can
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Type.Solve as Solve
 import qualified Sky.Generate.Rust.Builder as RustBuilder
+import Sky.Generate.Rust.Builder.ExprEmitter (rustStringLit)
 import qualified Sky.Sky.Toml as Toml
 import qualified Sky.Build.Dce as Dce
 import qualified Sky.Build.Rust.Ffi as RustFfi
@@ -117,7 +118,10 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
              (if usesDb
               then [ "pub type DbPool = " ++ dbPool ++ ";"
                    , "pub type DbRow = " ++ dbRow ++ ";"
-                   , "pub const SKY_DB_URL: &str = " ++ show dbUrl ++ ";"
+                   -- rustStringLit (not Haskell `show`): `show`'s escapes diverge
+                   -- from Rust's for control/NUL/non-ASCII chars in a dbPath →
+                   -- invalid Rust string literal. Identical for ordinary URLs.
+                   , "pub const SKY_DB_URL: &str = " ++ rustStringLit dbUrl ++ ";"
                    , ""
                    -- sub-B.1: driver-specific helpers so db.rs stays backend-agnostic
                    ] ++ RustBuilder.dbBackendHelpers dbDriver
