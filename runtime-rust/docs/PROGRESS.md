@@ -17,6 +17,19 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 02:05 — #90: projected sky_of_typeref renders Sky container names (Vec→List / Option→Maybe / HashMap→Dict)
+
+**What.** `sky_of_typeref` (projected/UFCS `.skyi` renderer) emitted RAW Rust container heads
+(`Vec t`/`Option t`/`HashMap k v`) while the inherent `resolve_path_to_sky` uses Sky names
+(`List t`/`Maybe t`/`Dict String v`) — undefined Sky types that broke cross-path HM unification
+(same class as the #95 `u32` leak). Bounded fix (guardian-approved safe subset of approach A):
+map the three unambiguous heads to Sky names mirroring `resolve_path_to_sky` (Dict drops the key
+arg). Surface-only (codegen reads the call-AST TypeRef). Convergence-only → no regression; WALL-I
+opaque-bare branch untouched; String-likes/Box/HashSet left as-is (avoids the C5 owned-PathBuf→String
+projected cargo-fail risk). Deferred (guardian-confirmed sound, fail-closed): full shared-helper
+unification + String-likes/Box/HashSet → firestore-coupled work. Unit test + inspector suite 219/0 +
+fixture 99 (`pick: Option Int → Maybe Int`) green. Guardian design + final CLEAN. Commit `5f0fc7a1`.
+
 ## 2026-06-27 01:40 — #80: WALL-C std::collections root-collapse gated on a root-reexport allowlist
 
 **What.** WALL-C (#76) rule 2 collapsed ANY `std::collections::<private>::Type` → `std::collections::Type`,
