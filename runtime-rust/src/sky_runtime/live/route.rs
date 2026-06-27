@@ -69,8 +69,7 @@ pub fn match_params<Page>(routes: &[Route<Page>], path: &str) -> crate::sky_runt
         if let Some(values) = match_route(&rt.pattern, path) {
             let names = split_path(&rt.pattern)
                 .into_iter()
-                .filter(|s| s.starts_with(':'))
-                .map(|s| s[1..].to_string());
+                .filter_map(|s| s.strip_prefix(':').map(str::to_string));
             let mut d: SkyDict<String> = SkyDict::new();
             for (n, v) in names.zip(values) {
                 d.insert(n, v);

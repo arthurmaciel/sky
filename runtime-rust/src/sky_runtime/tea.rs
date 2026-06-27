@@ -236,7 +236,8 @@ where
         let mut submgr = SubManager::new(tx.clone());
         submgr.update(subscriptions(model.clone()));
         // Inline render (a closure borrowing `view` would make the future non-Send).
-        print!("{}", view(model.clone()));
+        // Fallible writes (NOT print!/println!, which panic on a broken pipe).
+        let _ = std::io::stdout().write_all(view(model.clone()).as_bytes());
         let _ = std::io::stdout().flush();
 
         while let Some(ev) = rx.recv().await {
@@ -250,11 +251,11 @@ where
             model = next;
             cli_run_cmd(cmd, &tx);
             submgr.update(subscriptions(model.clone()));
-            print!("{}", view(model.clone()));
+            let _ = std::io::stdout().write_all(view(model.clone()).as_bytes());
             let _ = std::io::stdout().flush();
         }
         submgr.stop_all();
-        println!();
+        let _ = std::io::stdout().write_all(b"\n");
         ok_res(())
     })
 }

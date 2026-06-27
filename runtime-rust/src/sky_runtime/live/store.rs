@@ -175,7 +175,12 @@ where
             .bind(sid).execute(&self.pool).await;
     }
     async fn sweep(&self) {
-        let cutoff = now_secs() - self.ttl.as_secs() as i64;
+        // Total cutoff: an absurd `SKY_LIVE_TTL` (u64 near 2^63) would make a bare
+        // `now_secs() - (ttl as i64)` debug-panic / wrap-to-negative (caller-controlled
+        // arithmetic). `try_from` → i64::MAX on overflow, then saturating_sub clamps,
+        // so an oversized TTL degrades to "never expire" instead of faulting. For all
+        // realistic TTLs this is byte-identical to the old expression.
+        let cutoff = now_secs().saturating_sub(i64::try_from(self.ttl.as_secs()).unwrap_or(i64::MAX));
         let _ = sqlx::query("DELETE FROM sky_sessions WHERE last_seen < ?")
             .bind(cutoff).execute(&self.pool).await;
         // Bound the in-RAM handle cache by idle-TTL too. Without this, every
@@ -263,7 +268,12 @@ where
             .bind(sid).execute(&self.pool).await;
     }
     async fn sweep(&self) {
-        let cutoff = now_secs() - self.ttl.as_secs() as i64;
+        // Total cutoff: an absurd `SKY_LIVE_TTL` (u64 near 2^63) would make a bare
+        // `now_secs() - (ttl as i64)` debug-panic / wrap-to-negative (caller-controlled
+        // arithmetic). `try_from` → i64::MAX on overflow, then saturating_sub clamps,
+        // so an oversized TTL degrades to "never expire" instead of faulting. For all
+        // realistic TTLs this is byte-identical to the old expression.
+        let cutoff = now_secs().saturating_sub(i64::try_from(self.ttl.as_secs()).unwrap_or(i64::MAX));
         let _ = sqlx::query("DELETE FROM sky_sessions WHERE last_seen < $1")
             .bind(cutoff).execute(&self.pool).await;
         // Bound the in-RAM handle cache by idle-TTL too (see SqliteStore::sweep)

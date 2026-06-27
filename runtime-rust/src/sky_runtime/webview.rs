@@ -95,9 +95,14 @@ mod imp {
 (function(){
   function send(skyId, ev, args){ try{ window.ipc.postMessage(JSON.stringify({skyId:skyId, event:ev, args:args})); }catch(e){} }
   function idOf(el){ return el && el.getAttribute ? el.getAttribute('sky-id') : null; }
+  // Match the wire-event arg table the HandlerIndex consumes: a checkbox/radio
+  // reports its toggle STATE (OnBool reads "true"/"false"), not its static
+  // `value` attribute (default "on"); everything else reports `value`
+  // (OnString) — number/range deliver the numeric value as its string form.
+  function valOf(t){ return (t && (t.type==='checkbox'||t.type==='radio')) ? String(!!t.checked) : ((t && t.value)||''); }
   document.addEventListener('click', function(e){ var id=idOf(e.target.closest('[sky-id]')); if(id) send(id,'click',[]); });
-  document.addEventListener('input', function(e){ var id=idOf(e.target.closest('[sky-id]')); if(id) send(id,'input',[e.target.value||'']); }, true);
-  document.addEventListener('change', function(e){ var id=idOf(e.target.closest('[sky-id]')); if(id) send(id,'change',[e.target.value||'']); }, true);
+  document.addEventListener('input', function(e){ var id=idOf(e.target.closest('[sky-id]')); if(id) send(id,'input',[valOf(e.target)]); }, true);
+  document.addEventListener('change', function(e){ var id=idOf(e.target.closest('[sky-id]')); if(id) send(id,'change',[valOf(e.target)]); }, true);
   // INVARIANT: `html` is produced by `render_html` (the shared Sky.Live renderer),
   // which HTML-escapes every text + attribute node — so this innerHTML assignment
   // is not an XSS sink for user data. Any future RAW-html node added to the

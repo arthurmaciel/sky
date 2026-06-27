@@ -35,7 +35,14 @@ pub fn decode_form_or_warn<T: serde::de::DeserializeOwned>(fd: FormData) -> Opti
     match decode_form::<T>(fd) {
         Ok(t) => Some(t),
         Err(e) => {
-            eprintln!("[sky.live] form decode failed, dispatching no Msg: {e}");
+            // `e` is a serde error that embeds the attacker-supplied form value
+            // (e.g. "unknown variant `<value>`" for an enum field). Escape it
+            // before logging so embedded CR/LF/control bytes can't forge log
+            // lines or inject terminal output.
+            eprintln!(
+                "[sky.live] form decode failed, dispatching no Msg: {}",
+                crate::sky_runtime::telemetry::json_escape(&e)
+            );
             None
         }
     }

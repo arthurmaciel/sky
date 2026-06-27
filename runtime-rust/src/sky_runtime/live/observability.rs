@@ -196,8 +196,15 @@ fn sanitise_path(path: &str) -> String {
 /// endpoints (operator polling noise).
 /// True when this process runs as a sub-app (mounted behind a parent's proxy,
 /// `SKY_LIVE_BASE_PATH` non-empty) — e.g. the bundled console child.
+/// `SKY_LIVE_BASE_PATH` is fixed for the process lifetime (set once at spawn by
+/// the parent's `MountSubApp`), so the env read is memoized: `track` runs this on
+/// every user-facing request, and `env::var` both locks the process-global env
+/// mutex and heap-allocates a `String` per call.
 fn is_sub_app() -> bool {
-    std::env::var("SKY_LIVE_BASE_PATH").map(|v| !v.is_empty()).unwrap_or(false)
+    static SUB_APP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUB_APP.get_or_init(|| {
+        std::env::var("SKY_LIVE_BASE_PATH").map(|v| !v.is_empty()).unwrap_or(false)
+    })
 }
 
 fn is_internal_path(path: &str) -> bool {

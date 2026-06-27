@@ -9526,8 +9526,17 @@ fn sky_of_typeref(tr: &TypeRef, tyvars: &[String], self_sky: &str) -> String {
     match tr {
         TypeRef::Param(i) => tyvars.get(*i).cloned().unwrap_or_else(|| "a".to_string()),
         TypeRef::Prim(p) => match p.as_str() {
-            "i64" => "Int".to_string(),
-            "f64" => "Float".to_string(),
+            // [#95] Map EVERY numeric width to its Sky carrier — the SKY-FACING
+            // type is always `Int`/`Float`, never a foreign width. #95 made the
+            // call-AST `TypeRef` PRESERVE the foreign width (`usize`/`u32`/`f32`)
+            // so the Haskell codegen can coerce it; but this renderer builds the
+            // `.skyi` Sky surface type, which must stay `Int`/`Float` (a leaked
+            // `u32`/`usize` would be an undefined Sky type — wrong in `sky doc`
+            // and against any importer's `Int` annotation). Codegen reads the
+            // call-AST TypeRef directly (Haskell `renderTypeRef`), NOT this fn.
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => "Int".to_string(),
+            "f32" | "f64" => "Float".to_string(),
             "bool" => "Bool".to_string(),
             "char" => "Char".to_string(),
             "String" => "String".to_string(),

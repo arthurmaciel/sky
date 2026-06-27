@@ -434,8 +434,8 @@ pub fn resolve_edges(s: &Store, repo: &str) -> Result<()> {
     // materialised into `to_update` BEFORE any write below, so no prepared
     // statement is live on `conn` during the UPDATEs. Do NOT reorder to stream
     // rows from a live statement into the writes — that would alias `conn`.
-    let in_txn = s.conn.is_autocommit();
-    if in_txn {
+    let is_autocommit = s.conn.is_autocommit();
+    if is_autocommit {
         // Not in a transaction — wrap in one for efficiency.
         let tx = s.conn.unchecked_transaction()?;
         for (rowid, src, dst, _kind) in to_update {

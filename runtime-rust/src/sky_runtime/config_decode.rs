@@ -71,20 +71,46 @@ pub fn config_load_from_file<E: From<String> + Send + 'static, T: Send + 'static
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|n| *n > 0)
             .unwrap_or(16 * 1024 * 1024);
-        if let Ok(meta) = std::fs::metadata(&path) {
-            if meta.len() > cap {
-                return SkyResult::Err(str_err(&format!(
-                    "config file {:?} is {} bytes, over the {} byte cap (SKY_CONFIG_MAX_BYTES)",
-                    path,
-                    meta.len(),
-                    cap
-                )));
-            }
-        }
-        let contents = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
+        // Open first, then enforce the cap THROUGH a capped reader rather than
+        // trusting a metadata-only precheck: std::fs::metadata reports len()==0
+        // for non-regular files (FIFO, /dev/zero, char devices), so a metadata
+        // gate would pass and the subsequent slurp would read unbounded bytes.
+        // Reject non-regular files outright, then bound the read at cap+1 bytes.
+        use std::io::Read;
+        let file = match std::fs::File::open(&path) {
+            Ok(f) => f,
             Err(e) => return SkyResult::Err(str_err(&format!("{}", e))),
         };
+        match file.metadata() {
+            Ok(meta) => {
+                if !meta.file_type().is_file() {
+                    return SkyResult::Err(str_err(&format!(
+                        "config file {:?} is not a regular file", path
+                    )));
+                }
+                if meta.len() > cap {
+                    return SkyResult::Err(str_err(&format!(
+                        "config file {:?} is {} bytes, over the {} byte cap (SKY_CONFIG_MAX_BYTES)",
+                        path,
+                        meta.len(),
+                        cap
+                    )));
+                }
+            }
+            Err(e) => return SkyResult::Err(str_err(&format!("{}", e))),
+        }
+        let mut contents = String::new();
+        // take(cap+1): if the file grew between the metadata check and the read,
+        // or reports a misleading size, the read still can't exceed cap+1 bytes.
+        if let Err(e) = file.take(cap.saturating_add(1)).read_to_string(&mut contents) {
+            return SkyResult::Err(str_err(&format!("{}", e)));
+        }
+        if contents.len() as u64 > cap {
+            return SkyResult::Err(str_err(&format!(
+                "config file {:?} exceeds the {} byte cap (SKY_CONFIG_MAX_BYTES)",
+                path, cap
+            )));
+        }
         let lower = path.to_ascii_lowercase();
         if lower.ends_with(".toml") {
             config_decode_toml(contents, decoder)

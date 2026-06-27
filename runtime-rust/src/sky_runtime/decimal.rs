@@ -32,7 +32,10 @@ pub fn decimal_from_minor(places: i64, minor: i64) -> Decimal {
     // rust_decimal's MAX_SCALE is 28; `RD::new` PANICS above it. Clamp the
     // user-supplied scale and use the checked constructor so a well-typed Sky
     // call (`Std.Decimal.fromMinor 30 1`) can never abort.
-    let scale = (places.max(0) as u32).min(RD::MAX_SCALE);
+    // Clamp on i64 FIRST, then narrow: `as u32` on an i64 >= 2^32 truncates
+    // (wraps) BEFORE any u32-domain `.min`, so a huge scale could alias to a
+    // small wrong value. Clamping in i64 makes the narrowing monotonic.
+    let scale = places.clamp(0, RD::MAX_SCALE as i64) as u32;
     Decimal(RD::try_new(minor, scale).unwrap_or(RD::ZERO))
 }
 pub fn decimal_zero() -> Decimal { Decimal(RD::ZERO) }
@@ -46,16 +49,20 @@ pub fn decimal_to_string_fixed(places: i64, d: Decimal) -> String {
     // Clamp to MAX_SCALE: digits beyond the decimal's max scale are all zeros,
     // so a huge `places` (e.g. 1e9) would only force a multi-GB allocation for
     // trailing zeros. Cap the format width to keep the kernel bounded.
-    let p = (places.max(0) as u32).min(RD::MAX_SCALE);
+    let p = places.clamp(0, RD::MAX_SCALE as i64) as u32;
     let r = d.0.round_dp_with_strategy(p, RoundingStrategy::MidpointNearestEven);
     format!("{:.*}", p as usize, r)
 }
 pub fn decimal_to_float(d: Decimal) -> f64 { d.0.to_f64().unwrap_or(0.0) }
 pub fn decimal_to_int(d: Decimal) -> i64 {
-    d.0.trunc().to_i64().unwrap_or(0)
+    // Saturate at the i64 boundary on out-of-range: `to_i64` returns None for a
+    // magnitude beyond ±i64, so `unwrap_or(0)` would map a huge value to 0.
+    d.0.trunc().to_i64().unwrap_or(if d.0.is_sign_negative() { i64::MIN } else { i64::MAX })
 }
 pub fn decimal_to_minor(scale: i64, d: Decimal) -> i64 {
-    let p = scale.max(0) as u32;
+    // Clamp on i64 FIRST, then narrow (see decimal_from_minor): a bare
+    // `as u32` truncates an i64 >= 2^32 before any clamp.
+    let p = scale.clamp(0, RD::MAX_SCALE as i64) as u32;
     // `10_i64.pow(19)` overflows i64 → panic (debug) / wrap (release). Use
     // checked_pow with a saturating fallback so the kernel stays total.
     let factor = 10_i64.checked_pow(p).unwrap_or(i64::MAX);
@@ -63,7 +70,10 @@ pub fn decimal_to_minor(scale: i64, d: Decimal) -> i64 {
     // normal monetary values, but guards the extreme edge without panicking).
     let sat = if d.0.is_sign_negative() { RD::MIN } else { RD::MAX };
     let scaled = d.0.checked_mul(RD::from(factor)).unwrap_or(sat);
-    scaled.trunc().to_i64().unwrap_or(0)
+    // `scaled` may be RD::MAX/MIN (mul-overflow) or otherwise exceed ±i64, both
+    // of which make `to_i64` return None — saturate to the signed i64 extreme
+    // matching the value's sign rather than collapsing to 0.
+    scaled.trunc().to_i64().unwrap_or(if scaled.is_sign_negative() { i64::MIN } else { i64::MAX })
 }
 
 // Arithmetic
@@ -116,15 +126,17 @@ pub fn decimal_abs(d: Decimal) -> Decimal { Decimal(d.0.abs()) }
 // Rounding / truncation
 
 pub fn decimal_round(places: i64, d: Decimal) -> Decimal {
-    let p = places.max(0) as u32;
+    // Clamp on i64 first, then narrow: a bare `as u32` truncates an i64 >= 2^32
+    // to a small wrong value. round_dp beyond MAX_SCALE is a no-op anyway.
+    let p = places.clamp(0, RD::MAX_SCALE as i64) as u32;
     Decimal(d.0.round_dp_with_strategy(p, RoundingStrategy::MidpointNearestEven))
 }
 pub fn decimal_round_half_up(places: i64, d: Decimal) -> Decimal {
-    let p = places.max(0) as u32;
+    let p = places.clamp(0, RD::MAX_SCALE as i64) as u32;
     Decimal(d.0.round_dp_with_strategy(p, RoundingStrategy::MidpointAwayFromZero))
 }
 pub fn decimal_truncate(places: i64, d: Decimal) -> Decimal {
-    let p = places.max(0) as u32;
+    let p = places.clamp(0, RD::MAX_SCALE as i64) as u32;
     Decimal(d.0.round_dp_with_strategy(p, RoundingStrategy::ToZero))
 }
 pub fn decimal_floor(d: Decimal) -> Decimal { Decimal(d.0.floor()) }
@@ -187,7 +199,7 @@ pub fn decimal_format_with(grp_sep: String, dec_sep: String, places: i64, d: Dec
     // Clamp to MAX_SCALE: digits past the decimal's max scale are zeros anyway,
     // so a huge `places` only inflates the format-width allocation (DoS) without
     // adding precision.
-    let p = (places.max(0) as u32).min(RD::MAX_SCALE);
+    let p = places.clamp(0, RD::MAX_SCALE as i64) as u32;
     let rounded = if p > 0 {
         d.0.round_dp_with_strategy(p, RoundingStrategy::MidpointNearestEven)
     } else {

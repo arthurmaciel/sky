@@ -114,11 +114,11 @@ pub fn http_stream_open<E: From<String> + Send + 'static>(req: HttpRequest) -> S
         }
         let resp = match rb.send().await {
             Ok(r) => r,
-            Err(e) => {
-                return SkyResult::Err(
-                    format!("http.stream.open: request to {} failed: {}", req.url, e).into(),
-                )
-            }
+            // [B8] The reqwest error `Debug`/`Display` (and `req.url`) can echo the
+            // target URL / request headers / bearer / API key. Route through the
+            // correlation-id redaction helper: raw detail → server log under a ref
+            // id; Sky sees only a fixed generic message.
+            Err(e) => return SkyResult::Err(sky_error_from_foreign(e)),
         };
         // HTTP error statuses (4xx/5xx) still surface as a stream — the body may
         // carry the error payload the caller wants to read. Mirrors Http.get
@@ -176,7 +176,8 @@ where
                         SkyResult::Err(e) => break SkyResult::Err(e),
                     }
                 }
-                Some(Err(e)) => break SkyResult::Err(format!("http.stream read: {}", e).into()),
+                // [B8] redact the foreign reqwest read error (see open above).
+                Some(Err(e)) => break SkyResult::Err(sky_error_from_foreign(e)),
                 None => break SkyResult::Ok(()),
             }
         }
@@ -238,9 +239,8 @@ where
                             emit(to_msg(ChunkEvent::Chunk(chunk)));
                         }
                         Some(Err(e)) => {
-                            emit(to_msg(ChunkEvent::Errored(
-                                format!("http.stream read: {}", e).into(),
-                            )));
+                            // [B8] redact the foreign reqwest read error (see open above).
+                            emit(to_msg(ChunkEvent::Errored(sky_error_from_foreign(e))));
                             break;
                         }
                         None => {

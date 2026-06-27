@@ -1,6 +1,6 @@
 use crate::model::{lang_of, role_of, Lang, Role};
 use anyhow::{bail, Result};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024; // 2 MB cap (anti-OOM)
 
@@ -22,6 +22,23 @@ fn is_indexable(path: &str) -> bool {
     !path.split('/').any(|seg| SKIP_SEGMENTS.contains(&seg))
 }
 
+/// A pre-configured `git -C <repo>` invocation shared by every git plumbing
+/// call below. Centralising it lets us harden all call sites at once:
+///   * `core.quotePath=false` — emit non-ASCII paths literally (UTF-8) instead
+///     of C-quoting them (`"src/\303\251.rs"`), which the line/tab parsers would
+///     otherwise read verbatim as the wrong path.
+///   * `GIT_TERMINAL_PROMPT=0` + a null stdin — a credential helper / askpass /
+///     pager that tries to prompt would otherwise block on stdin forever and
+///     wedge the indexer; both make any such prompt fail fast instead.
+fn git_command(repo: &str) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-c").arg("core.quotePath=false")
+        .arg("-C").arg(repo)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null());
+    cmd
+}
+
 pub fn parse_tracked(ls_output: &str) -> Vec<Tracked> {
     ls_output.lines().filter(|l| !l.is_empty())
         .filter(|p| is_indexable(p))
@@ -40,8 +57,7 @@ pub fn parse_tracked(ls_output: &str) -> Vec<Tracked> {
 /// two outputs concatenate without dedup.
 pub fn tracked(repo: &str) -> Result<Vec<Tracked>> {
     let run = |extra: &[&str]| -> Result<String> {
-        let out = Command::new("git").arg("-C").arg(repo)
-            .arg("ls-files").args(extra).output()?;
+        let out = git_command(repo).arg("ls-files").args(extra).output()?;
         // Distinguish a real empty index from a git failure (non-repo, corrupt
         // state): a failed `ls-files` yields empty stdout and would otherwise be
         // read as "0 files" silently.
@@ -57,8 +73,26 @@ pub fn tracked(repo: &str) -> Result<Vec<Tracked>> {
 
 /// Changed/added + deleted paths between `since` sha and HEAD (for incremental update).
 pub fn changed(repo: &str, since: &str) -> Result<(Vec<Tracked>, Vec<String>)> {
-    let out = Command::new("git").arg("-C").arg(repo)
-        .args(["diff", "--name-status", &format!("{since}..HEAD")]).output()?;
+    // `since` is interpolated into a positional commit-range token
+    // (`{since}..HEAD`). Reject anything that git could parse as an option
+    // (leading '-', e.g. `--output=…`) or that carries path/shell-hostile
+    // bytes, so a crafted ref can't smuggle options or write arbitrary files.
+    if since.is_empty()
+        || since.starts_with('-')
+        || !since
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'))
+    {
+        bail!("refusing unsafe git since-ref: {since:?}");
+    }
+    // `--no-renames` decomposes renames into a `D oldpath` + `A newpath` pair so
+    // the loop below upserts the new path and deletes the old one; without it,
+    // git emits a 3-field `R100\told\tnew` line whose first two fields we'd
+    // misread as `status=R100, path=old`, dropping the new path and indexing a
+    // deleted one.
+    let out = git_command(repo)
+        .args(["diff", "--no-renames", "--name-status", &format!("{since}..HEAD")])
+        .output()?;
     if !out.status.success() {
         bail!("git diff failed in {repo}: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -76,7 +110,7 @@ pub fn changed(repo: &str, since: &str) -> Result<(Vec<Tracked>, Vec<String>)> {
 }
 
 pub fn head_sha(repo: &str) -> Result<String> {
-    let out = Command::new("git").arg("-C").arg(repo).args(["rev-parse","HEAD"]).output()?;
+    let out = git_command(repo).args(["rev-parse", "HEAD"]).output()?;
     if !out.status.success() {
         bail!("git rev-parse HEAD failed in {repo}: {}", String::from_utf8_lossy(&out.stderr).trim());
     }

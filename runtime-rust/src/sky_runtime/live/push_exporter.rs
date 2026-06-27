@@ -34,6 +34,11 @@ const DEFAULT_QUEUE_CAP: usize = 1024;
 const DEFAULT_INTERVAL_MS: u64 = 2000;
 /// Floor on the flush interval so a typo can't spin a hot loop.
 const MIN_INTERVAL_MS: u64 = 100;
+/// Hard cap on the in-batcher accumulator so a high log/span rate over a long
+/// flush interval can't grow `buf` without bound (the mpsc channel is bounded,
+/// but the batcher drains it continuously into `buf`). Reaching the cap forces
+/// an early flush instead of waiting for the tick.
+const MAX_BATCH: usize = 8192;
 
 /// One telemetry record queued for the exporter.
 enum Entry {
@@ -103,7 +108,14 @@ async fn batcher(
     token: Option<String>,
     interval_ms: u64,
 ) {
-    let client = reqwest::Client::new();
+    // Explicit timeouts so a parent that accepts the TCP connection but never
+    // responds (slow/hung/half-dead) can't wedge the batcher task (and, through
+    // it, `flush_now`'s pre-exit drain) forever. Total fallback — never panics.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(2))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let mut buf: Vec<Entry> = Vec::new();
     let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
     // The first tick fires immediately; skip it so we don't flush an empty batch.
@@ -119,7 +131,15 @@ async fn batcher(
                     // Best-effort ack — ignore send errors (caller may have timed out).
                     let _ = ack.send(());
                 }
-                Some(e) => buf.push(e),
+                Some(e) => {
+                    buf.push(e);
+                    // Bound the accumulator: flush early at the cap rather than
+                    // letting it grow until the next tick.
+                    if buf.len() >= MAX_BATCH {
+                        flush(&client, &ingest_url, token.as_deref(), &buf).await;
+                        buf.clear();
+                    }
+                }
                 None => {
                     if !buf.is_empty() {
                         flush(&client, &ingest_url, token.as_deref(), &buf).await;

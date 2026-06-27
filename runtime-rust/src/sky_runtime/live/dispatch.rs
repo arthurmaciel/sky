@@ -1,13 +1,17 @@
 use crate::sky_runtime::live::html::*;
 use std::collections::HashMap;
 
-/// Per-session handler index: maps `(sky-id, event-name)` to the cloneable
-/// `Event` that owns the handler closure (via `Arc`).
+/// Per-session handler index: maps `sky-id` → (`event-name` → the cloneable
+/// `Event` that owns the handler closure, via `Arc`).
 ///
 /// Built once per `view` commit via [`build_index`]; thrown away and rebuilt
 /// on every update cycle (the view function is the single source of truth).
+///
+/// The two-level shape lets [`Self::resolve`] / [`Self::resolve_form`] look up
+/// by `&str` (`HashMap<String, _>: get(&str)` via `Borrow<str>`) without
+/// heap-allocating throwaway key Strings on the wire-event hot path.
 pub struct HandlerIndex<M> {
-    map: HashMap<(String, String), Event<M>>,
+    map: HashMap<String, HashMap<String, Event<M>>>,
 }
 
 impl<M: Clone> HandlerIndex<M> {
@@ -21,7 +25,7 @@ impl<M: Clone> HandlerIndex<M> {
     /// Returns `None` when the sky-id is unknown or the event name doesn't
     /// match any registered handler.
     pub fn resolve(&self, sky_id: &str, event: &str, args: &[String]) -> Option<M> {
-        match self.map.get(&(sky_id.to_string(), event.to_string()))? {
+        match self.map.get(sky_id)?.get(event)? {
             Event::OnMsg(_, m) => Some(m.clone()),
             Event::OnString(_, f) => Some(f(args.first().cloned().unwrap_or_default())),
             Event::OnBool(_, f) => {
@@ -36,7 +40,7 @@ impl<M: Clone> HandlerIndex<M> {
     /// the `FormData` map arrives via the form-submission wire path, not the
     /// positional `args` slice.
     pub fn resolve_form(&self, sky_id: &str, event: &str, fd: FormData) -> Option<M> {
-        match self.map.get(&(sky_id.to_string(), event.to_string()))? {
+        match self.map.get(sky_id)?.get(event)? {
             Event::OnForm(_, f) => f(fd),   // f already returns Option<M> (None on decode failure)
             _ => None,
         }
@@ -56,24 +60,35 @@ pub fn build_index<M: Clone>(root: &Html<M>) -> HandlerIndex<M> {
     HandlerIndex { map }
 }
 
-fn walk<M: Clone>(n: &Html<M>, map: &mut HashMap<(String, String), Event<M>>) {
-    if let Html::HElement(_, attrs, kids) = n {
-        let id = attrs
-            .iter()
-            .find_map(|a| match a {
-                Attribute::Attr(k, v) if k == "sky-id" => Some(v.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
+/// Walk the view tree iteratively with an explicit heap work-stack.
+///
+/// Native recursion here would overflow the (uncatchable) thread stack on a
+/// deeply nested view — e.g. a comment/thread tree whose nesting depth scales
+/// with attacker-influenced data. An explicit `Vec` work-list keeps
+/// index-building O(nodes) in heap memory, bounded only by allocation.
+fn walk<M: Clone>(root: &Html<M>, map: &mut HashMap<String, HashMap<String, Event<M>>>) {
+    let mut stack: Vec<&Html<M>> = vec![root];
+    while let Some(n) = stack.pop() {
+        if let Html::HElement(_, attrs, kids) = n {
+            let id = attrs
+                .iter()
+                .find_map(|a| match a {
+                    Attribute::Attr(k, v) if k == "sky-id" => Some(v.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
 
-        for a in attrs {
-            if let Attribute::EventAttr(e) = a {
-                map.insert((id.clone(), e.name().to_string()), e.clone());
+            for a in attrs {
+                if let Attribute::EventAttr(e) = a {
+                    map.entry(id.clone())
+                        .or_default()
+                        .insert(e.name().to_string(), e.clone());
+                }
             }
-        }
 
-        for c in kids {
-            walk(c, map);
+            for c in kids {
+                stack.push(c);
+            }
         }
     }
 }

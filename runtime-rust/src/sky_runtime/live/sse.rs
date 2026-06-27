@@ -31,8 +31,27 @@ pub fn channel() -> (SseTx, SseRx) {
 }
 
 /// SSE event framing: `event: <name>\ndata: <payload>\n\n`.
+///
+/// Self-defending against SSE injection: event names are single-line per the
+/// spec, so any CR/LF is stripped (a crafted name otherwise injects fields or
+/// terminates the event early); `data` is emitted as one `data: ` field per
+/// line so a raw newline cannot inject extra fields or end the message —
+/// independent of caller-side JSON escaping. For the common single-line JSON
+/// payload the output is byte-identical to `event: <name>\ndata: <payload>\n\n`.
 pub fn frame(event: &str, data: &str) -> String {
-    format!("event: {event}\ndata: {data}\n\n")
+    let event = event.replace(['\r', '\n'], "");
+    let mut out = String::with_capacity(event.len() + data.len() + 16);
+    out.push_str("event: ");
+    out.push_str(&event);
+    out.push('\n');
+    for line in data.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        out.push_str("data: ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+    out
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────────

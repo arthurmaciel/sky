@@ -91,6 +91,13 @@ pub fn random_int<E: Send + 'static>(lo: i64, hi: i64) -> SkyTask<E, i64> {
             return ok_res(lo);
         }
         let span = (hi.wrapping_sub(lo)) as u64;
+        // Full-width span (hi==i64::MAX && lo==i64::MIN): span == u64::MAX, so
+        // `span + 1` wraps to 0 and the modulo path would degenerate to a
+        // constant `lo`. Draw uniformly over all 2^64 values instead — each maps
+        // 1:1 into the inclusive [lo, hi] range.
+        if span == u64::MAX {
+            return ok_res(lo.wrapping_add(lcg_next() as i64));
+        }
         let range = span.wrapping_add(1).max(1);
         let v = lo.wrapping_add((lcg_next() % range) as i64);
         ok_res(v)

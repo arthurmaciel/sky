@@ -28,7 +28,11 @@ pub fn live_req(
     let mut hdrs: SkyDict<String> = SkyDict::new();
     for (k, v) in headers.iter() {
         if let Ok(val) = v.to_str() {
-            hdrs.insert(canonical_header(k.as_str()), val.to_string());
+            // First-value-wins on duplicate header keys, matching Go's
+            // `headersToDict` (`vs[0]`). axum yields multi-valued headers in
+            // arrival order, so the first `iter()` entry is the first value.
+            hdrs.entry(canonical_header(k.as_str()))
+                .or_insert_with(|| val.to_string());
         }
     }
     let mut cookies: SkyDict<String> = SkyDict::new();

@@ -149,7 +149,7 @@ async fn write_entry(pool: &SqlitePool, svc: &str, entry: SpillEntry) -> Result<
         }
         SpillEntry::Span { ts_ms, name, dur_us, ok } => {
             let start = rfc3339(ts_ms);
-            let end = rfc3339(ts_ms + dur_us / 1000);
+            let end = rfc3339(ts_ms.saturating_add(dur_us / 1000));
             // Hand-built (no serde_json): the `db` feature doesn't pull serde_json,
             // and a db-without-json program (e.g. a Db CLI) must still compile this
             // always-`db`-gated module. The status value is a fixed literal.

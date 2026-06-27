@@ -63,6 +63,23 @@ fn json_str(s: &str) -> String {
     format!("\"{}\"", super::telemetry::json_escape(s))
 }
 
+/// Total line-write helpers: Rust's `println!`/`eprintln!` call `std::io::_print`,
+/// which PANICS ("failed printing to stdout") when the underlying write errors.
+/// Because Rust ignores SIGPIPE by default, a closed downstream pipe surfaces as
+/// an `EPIPE` write error rather than process termination — so a piped consumer
+/// hanging up (`sky-app | head`) would panic from a well-typed `Log.*` call.
+/// These helpers perform the write fallibly and intentionally drop the `Result`,
+/// turning a broken pipe into a silently-skipped line instead of an abort.
+fn write_stdout_line(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stdout().lock(), "{line}");
+}
+
+fn write_stderr_line(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{line}");
+}
+
 /// Strip ASCII control characters from a log message for the plain-text path,
 /// matching the safety guarantee the JSON path already gets via `json_escape`.
 /// Keeps all printable ASCII, spaces (0x20), and multi-byte UTF-8 sequences
@@ -112,9 +129,9 @@ fn log_emit(level: i32, level_name: &str, msg: &str) {
             json_str(&rfc3339_nano_now()),
         );
         if to_stderr {
-            eprintln!("{line}");
+            write_stderr_line(&line);
         } else {
-            println!("{line}");
+            write_stdout_line(&line);
         }
         return;
     }
@@ -123,9 +140,9 @@ fn log_emit(level: i32, level_name: &str, msg: &str) {
     let safe_msg = sanitise_log_msg(msg);
     let line = format!("{} {} {}", rfc3339_nano_now(), level_name.to_ascii_uppercase(), safe_msg);
     if to_stderr {
-        eprintln!("{line}");
+        write_stderr_line(&line);
     } else {
-        println!("{line}");
+        write_stdout_line(&line);
     }
 }
 
@@ -135,7 +152,7 @@ fn log_emit(level: i32, level_name: &str, msg: &str) {
 pub fn log_println<E: Send + 'static>(msg: String) -> SkyTask<E, ()> {
     Box::pin(async move {
         super::telemetry::record_log("info", &msg);
-        println!("{msg}");
+        write_stdout_line(&msg);
         ok_res(())
     })
 }

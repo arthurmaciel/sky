@@ -85,9 +85,54 @@ pub fn math_mod(x: f64, y: f64) -> f64 { x % y }
 /// IEEE 754 balanced remainder — equivalent to Go's `math.Remainder(x, y)`.
 /// The result satisfies `x = n*y + remainder` where `n` is the nearest integer
 /// to `x/y` (rounded half-to-even), so `|remainder| <= |y|/2`.
+///
+/// Uses fmod-based argument reduction (a direct port of Go's
+/// `math.Remainder`) so it stays exact for large-magnitude operands. A naive
+/// `x - (x / y).round_ties_even() * y` loses precision once `|x/y|` exceeds
+/// 2^53 (the quotient rounds away the low integer bits), diverging from the
+/// true IEEE 754 remainder — this reduction avoids that.
 pub fn math_remainder(x: f64, y: f64) -> f64 {
-    // IEEE 754 remainder: x - round(x/y)*y  where round is half-to-even.
-    x - (x / y).round_ties_even() * y
+    // Twice the smallest positive normal double (0x0020000000000000).
+    const TINY: f64 = f64::MIN_POSITIVE * 2.0;
+    let half_max = f64::MAX / 2.0;
+
+    if x.is_nan() || y.is_nan() || x.is_infinite() || y == 0.0 {
+        return f64::NAN;
+    }
+    if y.is_infinite() {
+        return x;
+    }
+
+    let sign = x < 0.0;
+    let mut x = x.abs();
+    let y = y.abs();
+
+    if x == y {
+        return if sign { -0.0 } else { 0.0 };
+    }
+    if y <= half_max {
+        x %= y + y; // fmod; now x < 2y
+    }
+    if y < TINY {
+        if x + x > y {
+            x -= y;
+            if x + x >= y {
+                x -= y;
+            }
+        }
+    } else {
+        let y_half = 0.5 * y;
+        if x > y_half {
+            x -= y;
+            if x >= y_half {
+                x -= y;
+            }
+        }
+    }
+    if sign {
+        x = -x;
+    }
+    x
 }
 
 #[cfg(test)]

@@ -51,6 +51,15 @@ impl<T: Clone + Send + 'static> Broker<T> {
     /// Register a subscriber on `topic`, creating the channel if needed.
     pub(crate) fn subscribe(&self, topic: &str) -> broadcast::Receiver<Event<T>> {
         let mut g = self.lock();
+        // Opportunistically reclaim abandoned topics: a topic whose subscribers
+        // all dropped but was never published-to again is never seen by the
+        // publish-path prune, so it would leak forever. Cheap to sweep here —
+        // `receiver_count()` is an atomic load. Pruning a zero-receiver Sender
+        // is safe: a concurrent publish to it would deliver to nobody anyway,
+        // and the requested topic (if stale) is rebuilt below — a fresh
+        // broadcast channel is equivalent, since a subscriber only ever sees
+        // messages sent after it subscribed.
+        g.retain(|_, tx| tx.receiver_count() > 0);
         let tx = g
             .entry(topic.to_string())
             .or_insert_with(|| broadcast::channel(TOPIC_CAP).0);

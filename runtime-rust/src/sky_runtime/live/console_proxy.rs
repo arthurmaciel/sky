@@ -270,6 +270,16 @@ async fn forward(
         if is_hop_by_hop(name) {
             continue;
         }
+        // The child performs NO auth (spawned with SKY_CONSOLE_EMBED=off). The
+        // parent admin credential — validated by `console::gate_blocked` in the
+        // `Authorization` header BEFORE this handler runs — is pure liability
+        // downstream: the child can't act on it and would record it verbatim in
+        // its telemetry store (request-header capture). Strip it so the gate
+        // secret never crosses into the child. (`proxy-authorization` is already
+        // dropped as hop-by-hop above.)
+        if name.as_str() == "authorization" {
+            continue;
+        }
         rb = rb.header(name, value);
     }
     // Pass the buffered `Bytes` straight to reqwest (which impls `From<Bytes>`)
@@ -440,9 +450,21 @@ pub async fn ensure_console_proxy() -> bool {
     if !parent_writes {
         super::push_exporter::enable_to_console(port).await;
     }
+    // Bound the upstream hop so a wedged child can't accumulate in-flight
+    // requests without limit. `connect_timeout` caps the TCP handshake; a
+    // `read_timeout` (per-read inactivity, NOT a total `.timeout`) caps a child
+    // that accepts the connection then stalls — set well above the Sky.Live SSE
+    // heartbeat (~15 s) + TTL (~35 s) so long-lived `/_sky/sse` streams are not
+    // severed. `.build()` only fails on a TLS-backend init error (we use none
+    // for loopback http); fall back to the default client rather than panic.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .read_timeout(Duration::from_secs(60))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     if PROXY
         .set(ProxyState {
-            client: reqwest::Client::new(),
+            client,
             upstream: format!("http://127.0.0.1:{port}"),
         })
         .is_err()

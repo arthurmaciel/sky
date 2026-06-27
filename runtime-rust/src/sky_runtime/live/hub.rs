@@ -33,6 +33,7 @@ use serde_json::{json, Value};
 use sqlx::{Row, SqlitePool};
 use sqlx::sqlite::SqliteConnectOptions;
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// Default per-table read cap (Go `hub/bridge.go` uses 200 for logs/metrics).
 const LOG_LIMIT: i64 = 200;
@@ -90,9 +91,19 @@ fn pick_single_level(f: &HubLogFilter) -> Option<&'static str> {
     }
 }
 
-/// Parse the `attrs` JSON column into a string→string map; any non-object /
-/// parse failure → empty map (graceful, total).
+/// Cap on the `attrs` JSON byte length parsed per row. A telemetry writer
+/// controls this cell (a SQLite cell is bounded only by the ~1 GB row limit);
+/// parsing an oversized blob across up to `STATS_ROW_CAP` rows would amplify
+/// into a memory-exhaustion vector, so anything beyond the cap degrades to an
+/// empty map — the same total fallback as a parse failure.
+const ATTRS_MAX_BYTES: usize = 64 * 1024;
+
+/// Parse the `attrs` JSON column into a string→string map; an oversized blob,
+/// non-object value, or parse failure → empty map (graceful, total).
 fn parse_attrs(raw: &str) -> HashMap<String, String> {
+    if raw.len() > ATTRS_MAX_BYTES {
+        return HashMap::new();
+    }
     serde_json::from_str(raw).unwrap_or_default()
 }
 
@@ -708,6 +719,15 @@ where
     }
 }
 
+/// Replace ASCII control characters (notably CR/LF) with spaces so a
+/// Sky-controlled value interpolated into a diagnostic line can't forge
+/// additional log entries (log injection). Total — never panics.
+fn sanitize_log(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 /// Open the telemetry spill read-only. `None` (never an error) when the path is
 /// empty or the file can't be opened — callers map that to an empty result so a
 /// fresh/absent DB renders as "no telemetry yet", exactly like the Go bridge.
@@ -727,11 +747,21 @@ async fn open_spill(db_path: &str) -> Option<SqlitePool> {
     // connection string.
     let opts = SqliteConnectOptions::new()
         .filename(db_path)
-        .create_if_missing(false);
+        .create_if_missing(false)
+        // Wait briefly on a WAL writer's lock instead of returning SQLITE_BUSY
+        // immediately (which degrades a transient lock into a spurious empty
+        // result). Bounded so a wedged writer can't block the task indefinitely.
+        .busy_timeout(Duration::from_secs(5));
     match SqlitePool::connect_with(opts).await {
         Ok(pool) => Some(pool),
         Err(e) => {
-            eprintln!("[sky.hub] open_spill {db_path}: {e}");
+            // `db_path` is Sky-controlled (and the error may echo it); strip
+            // control chars so neither can forge extra log lines.
+            eprintln!(
+                "[sky.hub] open_spill {}: {}",
+                sanitize_log(db_path),
+                sanitize_log(&e.to_string())
+            );
             None
         }
     }
@@ -747,10 +777,13 @@ pub fn hub_list_services<E: Send + From<String> + 'static>(
         let Some(pool) = open_spill(&db_path).await else {
             return ok_res(Vec::new());
         };
+        // LIMIT 200 mirrors hub_read_service_stats' distinct-services query and
+        // bounds result allocation — service_name is writer-controlled, so an
+        // unbounded UNION is a memory-amplification vector.
         let sql = "SELECT service_name FROM telemetry_log \
                    UNION SELECT service_name FROM telemetry_metric \
                    UNION SELECT service_name FROM telemetry_span \
-                   ORDER BY service_name";
+                   ORDER BY service_name LIMIT 200";
         match sqlx::query(sql).fetch_all(&pool).await {
             Ok(rows) => {
                 let mut out = Vec::with_capacity(rows.len());

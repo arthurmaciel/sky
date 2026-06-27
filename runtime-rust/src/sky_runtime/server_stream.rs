@@ -211,5 +211,20 @@ pub fn serve_streaming_sentinel(r: &ServerResponse) -> Option<axum::response::Re
     for (k, v) in &r.headers {
         builder = builder.header(k.as_str(), v.as_str());
     }
-    builder.body(axum::body::Body::from_stream(body_stream)).ok()
+    // On builder failure — an invalid Sky-supplied content-type / header name or
+    // value makes `body()` return Err — DO NOT fall through to `None`: the
+    // caller's None-fallback serves the raw `__sky_stream:<nonce>:<token>`
+    // sentinel verbatim to the client (leaking the per-process nonce + emitting
+    // garbage). The handler is already popped and its task already spawned, so the
+    // only correct outcome is a real streaming response. Emit a 500 with an empty
+    // body instead of leaking the sentinel.
+    match builder.body(axum::body::Body::from_stream(body_stream)) {
+        Ok(resp) => Some(resp),
+        Err(_) => Some(
+            axum::http::Response::builder()
+                .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(axum::body::Body::empty())
+                .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty())),
+        ),
+    }
 }

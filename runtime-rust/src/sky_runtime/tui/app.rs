@@ -17,7 +17,7 @@ use super::focus::{
     clamp_focus, edit_input, ensure_focus_visible, extract_click_msg, extract_input_msg,
     extract_msg_named, hit_test, parse_mouse, Focusable, InputRegistry,
 };
-use super::key::decode_key;
+use super::key::{decode_key, TuiKey};
 use super::layout::render_with_focus;
 use std::io::{Read, Write};
 
@@ -144,6 +144,97 @@ fn term_size() -> (usize, usize) {
     }
 }
 
+/// Longest key sequence `decode_key` recognises (`ESC [ 1 ; <mod> <final>` = 6
+/// bytes); padded to 8 so any tail at least this long is decoded, never carried.
+const MAX_KEY_SEQ: usize = 8;
+
+/// Bytes a UTF-8 lead byte announces (1 for ASCII / continuation / invalid lead).
+fn utf8_seq_len(lead: u8) -> usize {
+    match lead {
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf7 => 4,
+        _ => 1,
+    }
+}
+
+/// Whether `tail` — the bytes left at the end of a COMPLETELY FILLED read — might
+/// be the truncated prefix of a longer key sequence and so should be carried into
+/// the next read rather than decoded now. ESC sequences are variable-length; a
+/// multibyte UTF-8 char needs all its continuation bytes. Carrying a tail that is
+/// in fact already complete is harmless — it is decoded on the next read with the
+/// following bytes prepended (one-read latency, never a drop or mis-decode).
+fn tail_maybe_truncated(tail: &[u8]) -> bool {
+    match tail.first() {
+        Some(&0x1b) => tail.len() < MAX_KEY_SEQ,
+        Some(&b) if b >= 0x80 => tail.len() < utf8_seq_len(b),
+        _ => false,
+    }
+}
+
+/// Blocking raw-key reader: decodes stdin bytes into `CliEvent::Key(kind, value)`
+/// events via `decode_key`, then a final `Eof`. Reassembles escape / UTF-8 key
+/// sequences that straddle the fixed 64-byte read boundary by carrying the
+/// unconsumed tail into the next read — a fixed-buffer decode would otherwise
+/// mis-decode or corrupt a split sequence (e.g. a multibyte char inside a paste
+/// larger than 64 bytes). `map_kind` turns the decoded `TuiKey` into the wire
+/// `(kind, value)` pair (`tui_app_ui` folds the ctrl modifier into the kind for
+/// the input editor's word-jumps; `tui_app` passes it through). Runs on its own
+/// blocking thread so `on_key` stays off it.
+fn read_keys_loop<Msg, FMap>(
+    tx: &tokio::sync::mpsc::UnboundedSender<CliEvent<Msg>>,
+    map_kind: FMap,
+) where
+    FMap: Fn(TuiKey) -> (String, String),
+{
+    let mut stdin = std::io::stdin();
+    let mut buf = [0u8; 64];
+    let mut carry: Vec<u8> = Vec::new();
+    loop {
+        let n = match stdin.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let mut data = std::mem::take(&mut carry);
+        data.extend_from_slice(buf.get(..n).unwrap_or(&[]));
+        // A completely filled read signals more bytes are likely queued, so a
+        // trailing partial sequence should wait for them; a short read is taken
+        // as the full input (so a solo Escape stays responsive).
+        let filled = n == buf.len();
+        let mut i = 0;
+        while i < data.len() {
+            let rest = data.get(i..).unwrap_or(&[]);
+            if filled && tail_maybe_truncated(rest) {
+                break;
+            }
+            let (k, consumed) = decode_key(rest);
+            if consumed == 0 {
+                break;
+            }
+            i += consumed;
+            let (kind, value) = map_kind(k);
+            if tx.send(CliEvent::Key(kind, value)).is_err() {
+                return;
+            }
+        }
+        carry = data.get(i..).map(|tail| tail.to_vec()).unwrap_or_default();
+    }
+    // Drain any carried tail before EOF (decode greedily — no more bytes coming).
+    let mut i = 0;
+    while i < carry.len() {
+        let (k, consumed) = decode_key(carry.get(i..).unwrap_or(&[]));
+        if consumed == 0 {
+            break;
+        }
+        i += consumed;
+        let (kind, value) = map_kind(k);
+        if tx.send(CliEvent::Key(kind, value)).is_err() {
+            return;
+        }
+    }
+    let _ = tx.send(CliEvent::Eof);
+}
+
 /// Shared terminal TEA driver. `render_frame` turns the current model into the
 /// ANSI frame painted each tick — `tui_app` passes the user's `String` view
 /// straight through; `tui_app_ui` renders the `Std.Ui` Element tree via
@@ -182,26 +273,7 @@ where
         // applied in the main task (keeps it off the blocking thread).
         let key_tx = tx.clone();
         std::thread::spawn(move || {
-            let mut buf = [0u8; 64];
-            let mut stdin = std::io::stdin();
-            loop {
-                let n = match stdin.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
-                };
-                let mut i = 0;
-                while i < n {
-                    let (k, consumed) = decode_key(buf.get(i..n).unwrap_or(&[]));
-                    if consumed == 0 {
-                        break;
-                    }
-                    i += consumed;
-                    if key_tx.send(CliEvent::Key(k.kind, k.value)).is_err() {
-                        return;
-                    }
-                }
-            }
-            let _ = key_tx.send(CliEvent::Eof);
+            read_keys_loop(&key_tx, |k| (k.kind, k.value));
         });
 
         let (mut model, cmd0) = init(());
@@ -318,34 +390,17 @@ where
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CliEvent<Msg>>();
         let key_tx = tx.clone();
         std::thread::spawn(move || {
-            let mut buf = [0u8; 64];
-            let mut stdin = std::io::stdin();
-            loop {
-                let n = match stdin.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
+            read_keys_loop(&key_tx, |k| {
+                // The (kind, value) channel is flat, so fold the ctrl modifier on
+                // Left/Right into the kind (`ctrlleft`/`ctrlright`) for the input
+                // editor's word-jumps.
+                let kind = if k.ctrl && (k.kind == "left" || k.kind == "right") {
+                    format!("ctrl{}", k.kind)
+                } else {
+                    k.kind
                 };
-                let mut i = 0;
-                while i < n {
-                    let (k, consumed) = decode_key(buf.get(i..n).unwrap_or(&[]));
-                    if consumed == 0 {
-                        break;
-                    }
-                    i += consumed;
-                    // The (kind, value) channel is flat, so fold the ctrl modifier
-                    // on Left/Right into the kind (`ctrlleft`/`ctrlright`) for the
-                    // input editor's word-jumps.
-                    let kind = if k.ctrl && (k.kind == "left" || k.kind == "right") {
-                        format!("ctrl{}", k.kind)
-                    } else {
-                        k.kind
-                    };
-                    if key_tx.send(CliEvent::Key(kind, k.value)).is_err() {
-                        return;
-                    }
-                }
-            }
-            let _ = key_tx.send(CliEvent::Eof);
+                (kind, k.value)
+            });
         });
 
         let (mut model, cmd0) = init(());

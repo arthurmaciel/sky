@@ -110,14 +110,43 @@ impl SkyStringify for i64 {
 }
 
 impl SkyStringify for f64 {
-    // Go's `%v` on a float uses the shortest round-trippable form; Rust's
-    // `f64::to_string` matches for the values Sky produces (42.5 -> "42.5",
-    // 1.0 -> "1"). Go prints `1` for a whole float too.
+    // Go's `%v` on a float64 is `strconv.FormatFloat(f, 'g', -1, 64)`: the
+    // shortest round-trippable digits, formatted with `%e` when the decimal
+    // exponent is < -4 or >= 21 and `%f` otherwise, with `+Inf`/`-Inf`/`NaN`
+    // for the non-finite values. Rust's `f64::to_string` matches Go's `%f`
+    // branch exactly (42.5 -> "42.5", 1.0 -> "1", 0.0001 -> "0.0001"), but
+    // diverges on infinities (`inf`/`-inf`) and never emits exponent form
+    // (1e21 -> "1000000000000000000000" instead of Go's "1e+21"). Bridge the
+    // gap totally: handle the non-finite cases, then reformat Rust's shortest
+    // scientific output to Go's `%g`-`%e` shape only when Go would use it.
     fn sky_show(&self) -> String {
-        // Go renders a whole-valued float64 without a trailing `.0` under `%v`
-        // (e.g. `fmt.Sprintf("%v", 1.0)` is `1`). Rust's `to_string` gives `1`
-        // for `1.0f64` as well, so a plain `to_string` matches.
-        self.to_string()
+        let f = *self;
+        if f.is_nan() {
+            return "NaN".to_string();
+        }
+        if f.is_infinite() {
+            return if f > 0.0 { "+Inf" } else { "-Inf" }.to_string();
+        }
+        // `{:e}` gives the shortest mantissa + decimal exponent, lowercase `e`,
+        // no `+` and no zero-padding on the exponent (e.g. "1e21", "1.5e-5").
+        let sci = format!("{f:e}");
+        match sci.split_once('e') {
+            // Go uses exponent form iff exp < -4 || exp >= 21 (shortest `%g`).
+            Some((mantissa, exp_str)) => match exp_str.parse::<i32>() {
+                Ok(exp) if !(-4..21).contains(&exp) => {
+                    // Go's `%e` exponent: explicit sign, minimum two digits.
+                    // i64 widen so `-exp` can't overflow for any i32.
+                    let (sign, mag) = if exp < 0 {
+                        ('-', -(exp as i64))
+                    } else {
+                        ('+', exp as i64)
+                    };
+                    format!("{mantissa}e{sign}{mag:02}")
+                }
+                _ => f.to_string(),
+            },
+            None => f.to_string(),
+        }
     }
 }
 

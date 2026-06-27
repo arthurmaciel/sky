@@ -40,11 +40,19 @@ pub const CSRF_HEADER: &str = "x-sky-csrf";
 
 /// CSRF protection is ON by default; `SKY_CSRF=off|0|false` disables it
 /// (Go parity: the `SKY_CSRF` env switch / sky.toml `[security] csrf`).
+///
+/// Snapshotted once into a `OnceLock` on first call (env is stable at process
+/// start; same rationale as `cookies_secure()` — eliminates a per-request
+/// `getenv` + global env-lock acquisition on every mutating request).
 pub fn csrf_enabled() -> bool {
-    !matches!(
-        std::env::var("SKY_CSRF").ok().as_deref(),
-        Some("off") | Some("0") | Some("false")
-    )
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("SKY_CSRF").ok().as_deref(),
+            Some("off") | Some("0") | Some("false")
+        )
+    })
 }
 
 // `frame_ancestors` + `security_headers` were relocated to the always-compiled
@@ -147,7 +155,14 @@ pub fn is_exempt_path(path: &str) -> bool {
 /// frame-ancestors mode (cross-origin embedding is intentional there). Returns
 /// `true` when the request should be REJECTED.
 fn origin_mismatch(headers: &HeaderMap) -> bool {
-    if std::env::var("SKY_LIVE_CSRF_ORIGIN_CHECK").as_deref() != Ok("on") {
+    // Snapshotted once (env is stable at process start; same rationale as
+    // `cookies_secure()` — no per-request global env-lock acquisition).
+    fn origin_check_enabled() -> bool {
+        use std::sync::OnceLock;
+        static CHECK: OnceLock<bool> = OnceLock::new();
+        *CHECK.get_or_init(|| std::env::var("SKY_LIVE_CSRF_ORIGIN_CHECK").as_deref() == Ok("on"))
+    }
+    if !origin_check_enabled() {
         return false;
     }
     if frame_ancestors().is_some() {

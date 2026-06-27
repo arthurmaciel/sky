@@ -145,8 +145,11 @@ pub fn decode_list<E: From<String> + 'static, T: 'static + Send>(decoder: impl F
         Box::new(move |v| match v.as_array() {
             Some(arr) => {
                 let mut out = Vec::with_capacity(arr.len());
+                // `Decoder::run` is a `Fn` — a single decoder instance decodes
+                // every element. Build it ONCE outside the loop (was O(N) Box
+                // allocations: one fresh Decoder + boxed closure per element).
+                let d = decoder();
                 for item in arr {
-                    let d = decoder();
                     match (d.run)(item) {
                         SkyResult::Ok(t) => out.push(t),
                         // Surface the REAL inner-element error rather than
@@ -425,8 +428,8 @@ pub fn decode_pipeline_required<E: From<String> + 'static, T: 'static, F: 'stati
     let n = name; let d = decoder; let nd = next_decoder;
     Decoder::new(
         Box::new(move |v| {
-            let field_val = match v.get(&n) { Some(f) => match (d.run)(f) { SkyResult::Ok(t) => t, _ => return decode_err_str("required decode error".into()) }, None => return decode_err_str(format!("missing required: {}", n)) };
-            match (nd.run)(v) { SkyResult::Ok(f) => ok_res(f(field_val)), _ => decode_err_str("next decode error".into()) }
+            let field_val = match v.get(&n) { Some(f) => match (d.run)(f) { SkyResult::Ok(t) => t, SkyResult::Err(e) => return SkyResult::Err(e) }, None => return decode_err_str(format!("missing required: {}", n)) };
+            match (nd.run)(v) { SkyResult::Ok(f) => ok_res(f(field_val)), SkyResult::Err(e) => SkyResult::Err(e) }
         }),
         fields,
     )
@@ -438,7 +441,7 @@ pub fn decode_pipeline_optional<E: From<String> + 'static, T: Clone + 'static + 
     Decoder::new(
         Box::new(move |v| {
             let field_val = match v.get(&n) { Some(val) => match (d.run)(val) { SkyResult::Ok(t) => t, _ => def.clone() }, None => def.clone() };
-            match (nd.run)(v) { SkyResult::Ok(f) => SkyResult::Ok(f(field_val)), _ => decode_err_str("opt next error".into()) }
+            match (nd.run)(v) { SkyResult::Ok(f) => SkyResult::Ok(f(field_val)), SkyResult::Err(e) => SkyResult::Err(e) }
         }),
         fields,
     )
@@ -471,12 +474,12 @@ pub fn decode_pipeline_required_at<E: From<String> + 'static, T: 'static, F: 'st
             // Decode the target value.
             let field_val = match (d.run)(cur) {
                 SkyResult::Ok(t) => t,
-                SkyResult::Err(_) => return decode_err_str(format!("requiredAt: decode failed at path {:?}", p)),
+                SkyResult::Err(e) => return SkyResult::Err(e),
             };
             // Apply the accumulator function from the pipeline.
             match (nd.run)(v) {
                 SkyResult::Ok(f) => ok_res(f(field_val)),
-                SkyResult::Err(_) => decode_err_str("requiredAt: next decode error".into()),
+                SkyResult::Err(e) => SkyResult::Err(e),
             }
         }),
         fields,
@@ -492,8 +495,8 @@ pub fn decode_pipeline_custom<E: From<String> + 'static, T: 'static, F: 'static>
     let d = decoder; let nd = next_decoder;
     Decoder::new(
         Box::new(move |v| {
-            let t = match (d.run)(v) { SkyResult::Ok(t) => t, _ => return decode_err_str("custom decode error".into()) };
-            match (nd.run)(v) { SkyResult::Ok(f) => SkyResult::Ok(f(t)), _ => decode_err_str("custom next error".into()) }
+            let t = match (d.run)(v) { SkyResult::Ok(t) => t, SkyResult::Err(e) => return SkyResult::Err(e) };
+            match (nd.run)(v) { SkyResult::Ok(f) => SkyResult::Ok(f(t)), SkyResult::Err(e) => SkyResult::Err(e) }
         }),
         fields,
     )
