@@ -17,6 +17,40 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 00:40 — #95 codegen half: SATURATING numeric coercion on the projected/UFCS path
+
+**What.** The projected/UFCS generic-wrapper emitter (`synthesiseGenericWrapper` +
+`FfiCall.renderCall`/`renderArgTypeAt`) coerced neither numeric PARAMS nor RETURNS — so a
+projected method with a non-i64-numeric param/return cargo-fails if bound (the inspector
+fail-closed-drops them today). This adds the SATURATING coercion — the LAST emit path
+(argCall #82, setValExpr/ctorArgOwned #94 already done):
+
+- **C1 (leaf extraction):** new self-contained `Sky.Build.Rust.NumCoerce` holds `numSaturate`
+  + a scalar `numWidenScalar` + `numCarrier` + `isNumericRust`. `FfiCall`/`FfiInstance` are
+  BELOW `Ffi` in the import graph, so importing `Ffi` for `numSaturate` would be a cycle. `Ffi`
+  re-exports `numSaturate` and `translateRustRet`'s scalar arms now delegate to `numWidenScalar`
+  (one source of the scalar widening). Byte-identical (137/0).
+- **PARAM:** a numeric `TRPrim` param travels as its Sky carrier (i64/f64); the call site
+  narrows to the foreign width via the saturating `numSaturate`. A residual `T` is `TRParam`
+  (different ctor) → never mis-coerced. i64/f64 byte-identical.
+- **RETURN:** a non-carrier numeric `TRPrim` OK return widens via `numWidenScalar`; the
+  infallible-sync arm binds `let __ret = bodyR` first (C5: i128 double-evals; bodyR is the
+  foreign call). i64/f64 byte-identical.
+- **B8 (security):** the sync projected fallible Err arm now routes through
+  `sky_error_from_foreign` (redacts foreign Debug) instead of raw `{:?}`, parity with async.
+
+**Status.** Codegen DONE + guardian design + final CLEAN. These arms are exercised by a
+`synthesiseGenericWrapper` unit test today; they become production-reachable after the
+**remaining #95 follow-up**: the INSPECTOR-RELAX (admit a top-level scalar numeric param/return
+on the projected path — keep nested/Vec/Option/Self-receiver numeric DROPPED per C6) + a
+positive synthetic fixture (UFCS trait method `widen(usize,u32,f32)->usize`) + a negative
+inspector fixture.
+
+**Affected.** `src/Sky/Build/Rust/NumCoerce.hs` (new), `src/Sky/Build/Rust/{Ffi,FfiCall,FfiInstance}.hs`,
+`test/Sky/Build/Rust/FfiInstanceSpec.hs`, `sky-compiler.cabal`. Commit `a583ce57`.
+
+---
+
 ## 2026-06-26 23:55 — #94: SATURATING Vec<numeric> element coercion (field-setter + enum-ctor)
 
 **What.** The two `Vec<numeric>` element emit sites — `setValExpr` (field setter) and
