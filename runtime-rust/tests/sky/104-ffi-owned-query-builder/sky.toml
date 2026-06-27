@@ -1,0 +1,14 @@
+[project]
+name = "104-ffi-owned-query-builder"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local ownedquery104crate — WALL 6 (#68): the firestore OWNED query path. Proves
+# the capability the borrowing fluent API (`db.fluent()…`) provides is reachable
+# via an OWNED params-builder chain + an async-trait query method returning an
+# OWNED Vec — with ZERO unsafe. The borrowing fluent entry (`Db::fluent`) is the
+# NEGATIVE: it drops fail-closed (reason=lifetime). Staged via setup.sh; file://
+# git dep.
+["rust.dependencies"]
+ownedquery104crate = { git = "file:///home/arthur/.cache/sky/104-ffi-owned-query-builder-crate", branch = "master" }

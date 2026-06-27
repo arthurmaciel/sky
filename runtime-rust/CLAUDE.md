@@ -524,6 +524,28 @@ log** — hold it to the same bar as a code review:
   `(Decimal,String)`; codegen emits a `decode_map` building the Money ctor), or
   codegen destructures the ADT into a runtime-friendly form BEFORE the kernel
   call. This is a recurring class (money / Db.insertFields / SqlValue params).
+- **A borrowed/lifetime-tied builder (`fn fluent(&self) -> B<'_>`) is a SOUND drop,
+  AND its capability is usually reachable via an OWNED sibling API — bind THAT, not
+  the borrow.** Real firestore 0.49: the fluent chain `db.fluent().select()…query()`
+  (drops `reason=lifetime`) is pure sugar over owned `FirestoreQueryParams::new |>
+  with_*` + `db.query_obj(params)` (async-trait, owned in/out — all bind). So the
+  sound circumvention of "borrowed types can't be owned Sky values" is to bind the
+  owned API the builder is sugar over. Before treating a lifetime drop as a gap,
+  check for the owned params-struct path. Proof: fixture `104-ffi-owned-query-builder`.
+  (#68, guardian-gated 2026-06-27; spec `…/specs/2026-06-27-rust-ffi-wall6-selfref-builder-design.md`.)
+- **Auto-EMITTING a self-referential bundle to bind a borrowing builder is NOT
+  sound at codegen — three MIRI-verified preconditions block it.** A bundle (owned
+  receiver + lifetime-laundered builder) CAN be sound (proven 3/3 under Stacked +
+  Tree Borrows: `runtime-rust/tests/selfref-builder-proof/`), but only if: (1) the
+  foreign `B<'a>` is COVARIANT in `'a` — unverifiable from rustdoc (no
+  `--document-private-items`; a covariance compile-probe failure breaks the
+  `sky build ⇒ cargo build` floor); (2) the owner is an ALIASABLE box, not `Box`
+  (a `Box` move = unique retag → invalidates the dependent → UB); (3) the owner is
+  freed OUT-OF-FRAME (a by-value arg strongly-protects the dependent's borrow, so
+  freeing in-frame — even `std::mem::drop(bundle)` — is UB; hand the owner back /
+  drop via scope-glue). Guardian ruling: REJECT-FOR-NOW until covariance is
+  verifiable. Don't reach for `transmute`-based self-ref codegen on the lifetime-drop
+  class; the owned-API bind above is the answer.
 
 ### Pitfalls
 - **`Clone` ≠ `Send` — async FFI gates must use a TIGHTER predicate than sync FFI

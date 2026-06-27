@@ -17,6 +17,60 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 17:30 — #68 RESOLVED — firestore fully usable via the OWNED path (locked) + the borrow-binding circumvention designed, MIRI-proven, gated (guardian)
+
+User-authorized a LOCAL real-crate investigation of #68 (overrode no-local-sweeps
+for this item) and asked to *innovatively circumvent* the borrowed/lifetime-tied
+limitation, guardian-designed + reviewed, 6 principles tight. Built firestore
+0.49 rustdoc JSON + ran the inspector `--audit`. Two findings, both shipped:
+
+**Finding A — the owned path is capability-complete + already bound.** Real audit:
+`bound 1139`. `FirestoreQueryParams::new` + 13 `with_*` owned builders (pure),
+`query_obj`/`aggregated_query_obj`/`list_doc` (effectful), all CRUD — BOUND. So
+`db.query_obj(FirestoreQueryParams.new c |> with_limit n |> with_filter f)` is a
+complete idiomatic Sky pipeline. The fluent `db.fluent().select()…query()` chain
+(72 `reason=lifetime` drops — `FirestoreSelectDocBuilder<'a,D>` etc.) is pure sugar
+over exactly this. **Dropping the borrowing fluent builders costs ZERO capability.**
+
+**Finding B — the borrow-binding circumvention (the innovation).** Designed a
+self-referential owned bundle (boxed-aliasable owner + lifetime-laundered builder)
+to bind a self-borrowing builder chain as an owned Sky value. **Guardian design
+gate: REJECT-FOR-NOW on AUTO-EMISSION** — binding a foreign `B<'a>` soundly needs
+its COVARIANCE proven, which is unverifiable at codegen (a covariance compile-probe
+failure breaks the `sky build ⇒ cargo build` floor; rustdoc runs without
+`--document-private-items`). Zero capability gain over Finding A. The owned path IS
+the sound circumvention.
+
+**Shipped (guardian-final APPROVED + 1 hardening it applied):**
+- **D1** `runtime-rust/tests/sky/104-ffi-owned-query-builder/` — owned
+  `QueryParams::new |> with_*` chain feeding `#[async_trait] run_query(QueryParams)
+  -> Task Error (List String)`; builds + runs `[ALL OK]`; borrowing `fluent() ->
+  Builder<'_>` DROPS (asserted absent). Harness runner `run_owned_query_builder`
+  (guardian hardened the negative lock: `^fluent ` was vacuous — the method binds
+  `fluent_from_db` — now `rg -i 'fluent|querybuilder'`).
+- **D2** `runtime-rust/tests/selfref-builder-proof/` — standalone MIRI proof the
+  mechanism IS sound for a covariant builder: **3/3 GREEN under BOTH Stacked AND
+  Tree Borrows**. MIRI forced out two invariants the design spec MISSED: (5) a
+  plain `Box` owner is UB (move = unique retag invalidates the dependent → needs an
+  *aliasable* owner) and (6) the terminal must free the owner OUT-OF-FRAME (a
+  by-value arg keeps the dependent's borrow strongly-protected; even
+  `std::mem::drop(bundle)` is UB → scope-end glue / hand-owner-back only). NOT wired
+  into codegen. Adversarially re-verified by the guardian (injecting each missing
+  invariant → MIRI RED with the predicted UB). Run on demand:
+  `ffi-fixtures-test.sh selfref-builder-proof` (guarded skip if no nightly miri).
+- Spec: `runtime-rust/docs/superpowers/specs/2026-06-27-rust-ffi-wall6-selfref-builder-design.md`.
+
+**Net for #68:** RESOLVED. firestore is usable from Sky shim-free TODAY via the
+owned API; the fluent layer is sound-dropped sugar; the borrow-binding mechanism is
+designed + MIRI-proven sound + gated behind covariance verification. Filed: the
+covariance-verification research item (auto-emit gate) + generic-T/D, closure-filter,
+BoxStream-terminal dimensions.
+
+**Affected.** `runtime-rust/tests/sky/104-ffi-owned-query-builder/*` (new),
+`runtime-rust/tests/selfref-builder-proof/*` (new),
+`runtime-rust/scripts/ffi-fixtures-test.sh` (2 runners + dispatch + hardened lock),
+`runtime-rust/docs/superpowers/specs/2026-06-27-rust-ffi-wall6-selfref-builder-design.md` (new).
+
 ## 2026-06-27 16:10 — #71 Phase-4 coverage measured (5 complex crates) — ~90% bound, ALL drops sound, ZERO new walls; #70 stripe subsumed
 
 Ran the inspector's `--audit` drop-histogram on 5 complex crates NOT in the

@@ -1,0 +1,67 @@
+module Main exposing (main)
+
+-- 104-ffi-owned-query-builder: WALL 6 (#68) — the firestore OWNED query path.
+--
+-- The borrowing fluent API (`db.fluent().select()…query()`) drops fail-closed
+-- (reason=lifetime — every builder borrows `&'a db`). The guardian ruled
+-- (2026-06-27 WALL-6 gate) that auto-binding the borrow is NOT sound (foreign
+-- covariance unverifiable at codegen) AND unnecessary: the fluent layer is pure
+-- sugar over an OWNED params-struct API that auto-FFI already binds. THIS fixture
+-- locks that owned path — the sound circumvention of the borrow limitation.
+--
+-- POSITIVE (bind + run end-to-end):
+--   new_from_db          : () -> Result Error Db                inherent ctor
+--   new_from_collection  : String -> Result Error Collection    owned ctor
+--   new_from_queryParams : Collection -> Result Error QueryParams  owned ctor (Collection arg)
+--   with_name_prefix_from_queryParams : QueryParams -> String -> Result Error QueryParams
+--   with_limit_from_queryParams       : QueryParams -> Int    -> Result Error QueryParams
+--   run_query            : Db -> QueryParams -> Task Error (List String)  -- #[async_trait], bare name
+--
+-- NEGATIVE (WALL 6 — must be ABSENT; crate still compiles):
+--   fluent_from_db  -- Db -> QueryBuilder<'_>  borrowing entry → DROP (reason=lifetime)
+--   limit/run on QueryBuilder<'a>             every method carries 'a → DROP
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Ownedquery104crate as Q
+import Std.Log exposing (println)
+
+
+-- The owned query pipeline, mirroring the real firestore:
+--   db.query_obj(FirestoreQueryParams::new(collection)
+--                    .with_name_prefix("a").with_limit(2))
+-- rows = [alice, amy, bob, carol]; prefix "a" → [alice, amy]; limit 2 → [alice, amy].
+checkOwnedQuery : Task Error ()
+checkOwnedQuery =
+    Task.fromResult (Q.new_from_db ())
+        |> Task.andThen
+               (\db ->
+                   Task.fromResult (Q.new_from_collection "users")
+                       |> Task.andThen
+                              (\col ->
+                                  Task.fromResult (Q.new_from_queryParams col))
+                       |> Task.andThen
+                              (\p0 ->
+                                  Task.fromResult
+                                      (Q.with_name_prefix_from_queryParams p0 "a"))
+                       |> Task.andThen
+                              (\p1 ->
+                                  Task.fromResult
+                                      (Q.with_limit_from_queryParams p1 2))
+                       |> Task.andThen (\params -> Q.run_query db params)
+                       |> Task.andThen
+                              (\rows ->
+                                  if List.length rows == 2 then
+                                      println "owned-query=2"
+
+                                  else
+                                      Task.fail
+                                          (Error.unexpected
+                                              ("owned-query=UNEXPECTED count "
+                                                  ++ String.fromInt
+                                                         (List.length rows)))))
+
+
+main : Task Error ()
+main =
+    checkOwnedQuery |> Task.andThen (\_ -> println "[ALL OK]")

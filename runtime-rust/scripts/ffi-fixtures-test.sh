@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain 94-ffi-inherent-self-output 95-ffi-inherent-self-output-async 96-ffi-external-trait-xcrate 97-ffi-numeric-param-coerce 98-ffi-projected-numeric 99-ffi-nested-numeric-drop 100-ffi-asref-return 101-task-rethunk 102-task-rethunk-free-tvar 103-task-rethunk-discard)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain 94-ffi-inherent-self-output 95-ffi-inherent-self-output-async 96-ffi-external-trait-xcrate 97-ffi-numeric-param-coerce 98-ffi-projected-numeric 99-ffi-nested-numeric-drop 100-ffi-asref-return 101-task-rethunk 102-task-rethunk-free-tvar 103-task-rethunk-discard 104-ffi-owned-query-builder)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -1221,6 +1221,93 @@ run_numeric_param_coerce() {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 104-ffi-owned-query-builder — WALL 6 (#68): the firestore OWNED query path.
+# POSITIVE: the owned params-builder chain (QueryParams::new |> with_*) feeding an
+#   #[async_trait] query method returning an OWNED Vec BINDS + runs ([ALL OK]).
+# NEGATIVE: the borrowing fluent entry (Db::fluent -> QueryBuilder<'_>) DROPS
+#   fail-closed (reason=lifetime) — ABSENT from the .skyi; crate still compiles.
+# Locks the SOUND circumvention of the borrowed-builder limitation (guardian
+# WALL-6 ruling 2026-06-27): bind the owned API the fluent layer is sugar over,
+# NOT the borrow (whose foreign covariance is unverifiable at codegen).
+# ─────────────────────────────────────────────────────────────────────────────
+run_owned_query_builder() {
+  local base=104-ffi-owned-query-builder
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+
+  local wd; wd="$(stage_workdir "$src")" || { _fail "$base (stage failed)"; return; }
+  local bin; bin="$(build_fixture "$wd")" || { _fail "$base (build failed)"; rm -rf "$wd"; return; }
+  local skyi="$wd/.skycache/ffi/rust/ownedquery104crate.skyi"
+
+  # NEGATIVE (WALL 6): the borrowing fluent entry AND every QueryBuilder<'a> method
+  # must be ABSENT (lifetime fail-closed drop). The inherent `Db::fluent` binds as
+  # `fluent_from_db` under the `_from_<recv>` UFCS naming (NOT bare `fluent` — cf the
+  # `with_limit_from_queryParams` positive below), and the builder methods as
+  # `limit_from_queryBuilder`/`run_from_queryBuilder`; a leak also surfaces the type
+  # `QueryBuilder` in a signature. So the net matches the crate-source identifiers
+  # `fluent` / `QueryBuilder` (case-insensitive), which appear in ANY binding of the
+  # borrowing path however it is named. The .skyi has no comments (just `module …`
+  # + `name : sig` lines) and the owned positives (new_from_*/with_*_from_queryParams/
+  # run_query + Db/Collection/QueryParams) contain neither substring, so this trips
+  # only on a real leak. (A bare `^fluent ` would vacuously miss `fluent_from_db`.)
+  if [ -f "$skyi" ] && rg -qi 'fluent|querybuilder' "$skyi"; then
+    _fail "$base: borrowing fluent/QueryBuilder leaked into bindings (lifetime drop violated): $(rg -i 'fluent|querybuilder' "$skyi" | tr '\n' ';')"; rm -rf "$wd"; return
+  fi
+  # POSITIVE: the owned query path must BIND (async-trait method + owned builder).
+  if ! rg -q 'run_query : Db -> QueryParams -> Task Error \(List String\)' "$skyi" 2>/dev/null; then
+    _fail "$base: owned run_query did NOT bind (got: $(rg 'run_query' "$skyi" 2>/dev/null))"; rm -rf "$wd"; return
+  fi
+  if ! rg -q 'with_limit_from_queryParams : QueryParams -> Int -> Result Error QueryParams' "$skyi" 2>/dev/null; then
+    _fail "$base: owned with_limit builder did NOT bind"; rm -rf "$wd"; return
+  fi
+
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (owned QueryParams builder chain + async-trait run_query bind+run · borrowing fluent dropped · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# selfref-builder-proof — WALL 6 (#68): MIRI soundness proof of the self-referential
+# borrowing-builder bundle mechanism (guardian-gated; NOT wired into codegen). Run
+# ON DEMAND (`ffi-fixtures-test.sh selfref-builder-proof`); NOT in ALL_FIXTURES, so
+# the default sweep is unaffected and machines without nightly+miri are unburdened.
+# Guarded: skip-with-note if `cargo +nightly miri` is unavailable. Asserts the proof
+# is UB-free under BOTH Stacked AND Tree Borrows (the documented soundness claim) —
+# keeps the unsafe mechanism's invariants from rotting.
+# ─────────────────────────────────────────────────────────────────────────────
+run_selfref_miri_proof() {
+  local base=selfref-builder-proof
+  # Sibling of $FIXROOT (a standalone proof crate, not a sky fixture).
+  local dir="$FIXROOT/../$base"
+  [ -f "$dir/src/lib.rs" ] || { _fail "$base (no such proof crate at $dir)"; return; }
+  if ! cargo +nightly miri --version >/dev/null 2>&1; then
+    _ok "$base  (SKIPPED — nightly miri unavailable: rustup +nightly component add miri)"
+    return
+  fi
+  local mt="${CARGO_TARGET_DIR:-$HOME/.cache/sky-rust-target}/miri-selfref"
+  local sb=/tmp/ffi-$base-sb.log tb=/tmp/ffi-$base-tb.log
+  ( cd "$dir" && env -u RUSTC_WRAPPER CARGO_TARGET_DIR="$mt" MIRIFLAGS="" \
+      cargo +nightly miri test ) >"$sb" 2>&1
+  local rc_sb=$?
+  ( cd "$dir" && env -u RUSTC_WRAPPER CARGO_TARGET_DIR="$mt" MIRIFLAGS="-Zmiri-tree-borrows" \
+      cargo +nightly miri test ) >"$tb" 2>&1
+  local rc_tb=$?
+  if [ $rc_sb -eq 0 ] && [ $rc_tb -eq 0 ]; then
+    _ok "$base  (self-ref bundle UB-free under Stacked + Tree Borrows · 3/3 each)"
+  else
+    _fail "$base (MIRI UB — SB rc=$rc_sb TB rc=$rc_tb; see $sb / $tb)"
+  fi
+}
+
+
 # ── Drive ────────────────────────────────────────────────────────────────────
 FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -1247,6 +1334,8 @@ for n in "${FIXTURES[@]}"; do
     95-ffi-inherent-self-output-async) run_inherent_self_output_async ;;
     96-ffi-external-trait-xcrate) run_external_trait_xcrate ;;
     97-ffi-numeric-param-coerce) run_numeric_param_coerce ;;
+    104-ffi-owned-query-builder) run_owned_query_builder ;;
+    selfref-builder-proof)    run_selfref_miri_proof ;;
     *)                        run_basic "$n" ;;
   esac
 done
