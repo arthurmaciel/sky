@@ -565,8 +565,20 @@ pub struct WsServerCfg<E> {
 
 enum WsOut { Text(String), Binary(Vec<u8>), Close }
 
-fn ws_registry() -> &'static Mutex<HashMap<i64, tokio::sync::mpsc::UnboundedSender<WsOut>>> {
-    static R: OnceLock<Mutex<HashMap<i64, tokio::sync::mpsc::UnboundedSender<WsOut>>>> = OnceLock::new();
+/// Per-peer outbound queue depth. A slow/idle WebSocket consumer must NOT let the
+/// server buffer unboundedly (OOM) — the channel is bounded and a full queue drops
+/// the message (the send kernel returns Err), giving real backpressure. Override
+/// via SKY_WS_SEND_BUFFER; default 256 frames.
+fn ws_send_buffer() -> usize {
+    std::env::var("SKY_WS_SEND_BUFFER")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(256)
+}
+
+fn ws_registry() -> &'static Mutex<HashMap<i64, tokio::sync::mpsc::Sender<WsOut>>> {
+    static R: OnceLock<Mutex<HashMap<i64, tokio::sync::mpsc::Sender<WsOut>>>> = OnceLock::new();
     R.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -592,7 +604,7 @@ async fn ws_loop<E: From<String> + Send + 'static>(mut socket: axum::extract::ws
     // axum 0.7 does not expose WebSocketUpgrade::max_message_size() / max_frame_size()
     // builder methods (those landed in axum 0.8+). The in-loop size checks below
     // (Text/Binary arms) are the framing-layer enforcement for this version.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsOut>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WsOut>(ws_send_buffer());
     ws_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
     let _ = (cfg.onConnect)(WsHandle::WebSocketServer(id)).await;
     loop {
@@ -727,8 +739,10 @@ pub fn server_web_socket_upgrade<E: From<String> + Send + 'static>(req: ServerRe
 }
 
 fn ws_send_raw(id: i64, out: WsOut) -> bool {
+    // try_send (non-blocking): a full per-peer queue (slow consumer) drops the
+    // frame and returns false rather than buffering unboundedly — bounded memory.
     match ws_registry().lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
-        Some(tx) => tx.send(out).is_ok(),
+        Some(tx) => tx.try_send(out).is_ok(),
         None => false,
     }
 }
@@ -757,7 +771,7 @@ pub fn server_web_socket_broadcast<E: From<String> + Send + 'static>(ids: Vec<i6
             let reg = ws_registry().lock().unwrap_or_else(|e| e.into_inner());
             for id in &ids {
                 if let Some(tx) = reg.get(id) {
-                    if tx.send(WsOut::Text(msg.clone())).is_ok() { any_ok = true; }
+                    if tx.try_send(WsOut::Text(msg.clone())).is_ok() { any_ok = true; }
                 }
             }
         }
@@ -918,12 +932,17 @@ pub fn rate_limit_allow(name: String, key: String, capacity: i64, refill_per_sec
     let now = unix_secs_f64();
     let refill = refill_per_sec.max(0) as f64;
     let mut m = B.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
-    // Evict buckets that have refilled back to full capacity: a fully-refilled
-    // idle bucket is indistinguishable from a fresh one, so dropping it preserves
-    // the allow/deny decision while bounding the map against unbounded (key, IP)
-    // growth (memory-DoS). The current (name, key) entry is re-created below if it
-    // was swept.
-    m.retain(|_, bk| (bk.tokens + (now - bk.last) * refill).min(cap) < cap);
+    // Evict an entry if EITHER it has refilled back to full (indistinguishable
+    // from a fresh bucket) OR it has been idle longer than RL_IDLE_TTL. The
+    // idle bound is refill-INDEPENDENT: with refill_per_sec == 0 a partially-drained
+    // bucket never refills to full, so the refill-only predicate would retain it
+    // forever and the map grows unbounded across distinct (name, key) pairs
+    // (memory-DoS). Either way the current entry is re-created below if swept.
+    const RL_IDLE_TTL: f64 = 3600.0; // 1 h with no access → reclaim
+    m.retain(|_, bk| {
+        let refilled = (bk.tokens + (now - bk.last) * refill).min(cap);
+        refilled < cap && (now - bk.last) < RL_IDLE_TTL
+    });
     let b = m.entry((name, key)).or_insert(Bucket { tokens: cap, last: now });
     b.tokens = (b.tokens + (now - b.last) * refill).min(cap);
     b.last = now;
