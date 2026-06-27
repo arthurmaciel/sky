@@ -91,8 +91,21 @@ guardian for code; bash -n / py_compile for scripts) then commits.
 **Status: every runtime `.rs`, doc, and script has been swept — all HIGH + MED + actionable LOW fixed or dispositioned-with-reason.** Three swarms (43 + 184 + 42 = 269 fixes, ~105 dispositions) + ~30 serial fixes, all guardian/gate-verified.
 
 **The genuine delicate remainder (orchestrator-owned — NOT swarm-safe; need cabal/example/design-review):**
-1. **codegen `.hs`** (≈7 MED + LOW; each needs `cabal build exe:sky` + per-shape example verify): ExprEmitter int `/`//`%` div-by-zero → checked kernel; Pattern.hs `unreachable!()`→classified runtime helper + tuple-arg binding drop; ModuleEmitter nullary-Task memoization predicate (freezes Time/Random) + std_ui_on_submit `unreachable!()`→real impl; Emitter.hs db_format_sql `?`-in-string-literal + Cargo.toml version validation; Naming/TypeEmitter/TypeRenderer LOW.
-2. **2 delicate rt-core** (design reviews): db_with_transaction cancel-leak (ROLLBACK-on-drop vs task-local routing); ssrf/http_client per-hop DNS-pin resolver.
+### 2026-06-27 — delicate tier resolved (guardian design-reviewed + verified)
+
+| Commit | Item | Verdict |
+|---|---|:-:|
+| `256062a0` | **codegen** integer `//`/`%` div-by-zero → total `sky_int_div`/`sky_int_rem` kernels (Elm `5//0==0`, wrapping covers MIN/-1) | ✅ cabal + run-verified (10//0=0, no panic) |
+| `4ac93951` | **delicate** db_with_transaction cancel-leak → sqlx `Transaction` (Drop rolls back) + typed commit/rollback | ✅ guardian design+ cancellation regression test |
+| `01ee67c4` | **delicate** ssrf per-hop DNS-rebinding → fail-closed `DenyPrivateResolver` (reqwest::dns::Resolve) vets every hop | ✅ guardian **CLOSED** |
+
+**Dispositioned (➖ no-defect, analysed):** ModuleEmitter nullary-Task memoization "freezes Time/Random" — this is CORRECT CAF semantics (a top-level `x = <task>` is a value evaluated once per Sky/Elm referential transparency; NOT memoizing would yield different values per reference, violating RT). Not a defect.
+
+**Remaining codegen `.hs` tail (LOW + 1 MED; each needs cabal + per-shape example verify):**
+- Pattern.hs tuple-arg-with-non-trivial-sub-pattern binding drop (MED correctness, delicate pattern-lowering); `unreachable!()` for refutable arg patterns (dead-in-practice — all real uses peepholed; contained by recover if reached).
+- ModuleEmitter std_ui_on_submit `unreachable!()` (dead-in-practice — applied uses peepholed).
+- Emitter.hs db_format_sql `?`-inside-string-literal (LOW); Cargo.toml version validation (LOW); Naming `user_` collision, TypeEmitter bare-`any`, TypeRenderer generic-order (LOW).
+- Guardian follow-ups: extend html `MAX_HTML_DEPTH` to style_inject/HtmlToVNode/diffTrees; server.rs `Vary` insert can clobber a handler-set Vary.
 3. **CROSS-BACKEND / OUT-OF-RUST-BOUNDARY (signalled to user — a Rust-only change breaks Go≡Rust parity AND half-fixes):** register email-existence enumeration (Go has the same path); email case-normalization; Pattern.hs HIGH front-end exhaustiveness. **email SES/SendGrid attachments** (completeness feature). **CSV formula-injection** (policy: no lossless mitigation — orchestrator/user must choose sanitize policy). rsa Marvin (no upstream fix).
 
 **Guardian follow-ups (filed):** extend html `MAX_HTML_DEPTH` to style_inject/HtmlToVNode/diffTrees passes; jwt.rs new ≥32-byte HS256 floor is a behavior change (a short-secret `Jwt.*` caller now Errs — RFC 7518-correct, surfaced); server.rs `Vary` insert can clobber a handler-set Vary.
