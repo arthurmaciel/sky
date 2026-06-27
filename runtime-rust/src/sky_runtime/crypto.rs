@@ -149,7 +149,17 @@ pub fn crypto_rsa_sha256_sign<E: From<String>>(key_pem: String, msg: String) -> 
         return SkyResult::Err("Crypto.rsaSha256Sign: could not parse the private key".to_string().into());
     };
     let signing_key = SigningKey::<Sha256>::new(priv_key);
-    let signature = signing_key.sign(msg.as_bytes());
+    // try_sign (not sign): `Signer::sign` PANICS on an internal signing failure
+    // (e.g. a key too small for the digest) — a Sky-reachable abort inside a
+    // Result-returning crypto fn. Route the failure to Err instead.
+    let signature = match signing_key.try_sign(msg.as_bytes()) {
+        Ok(s) => s,
+        Err(e) => {
+            return SkyResult::Err(
+                format!("Crypto.rsaSha256Sign: signing failed: {}", e).into(),
+            )
+        }
+    };
     // Go returns base64.StdEncoding (standard base64, with padding) — match exactly.
     SkyResult::Ok(STANDARD.encode(signature.to_bytes()))
 }

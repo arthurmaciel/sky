@@ -97,20 +97,33 @@ pub fn list_all<T0>(f: impl Fn(T0) -> bool + Clone, list: Vec<T0>) -> bool {
 // (`total_cmp` via `cmp_total`), so a NaN key never trips the `Ord` contract the
 // way a naive `partial_cmp().unwrap()` would.
 
-/// Total ordering for any `PartialOrd` element. `partial_cmp` only returns `None`
-/// for incomparable values (e.g. floating-point NaN); we map that to `Equal` so the
-/// sort comparator stays a valid total order and never panics. For Sky's
-/// `comparable` (Int / Float / Char / String / and tuples/lists thereof) the only
-/// `None` case is NaN, which Sky code can't construct from a literal anyway.
+/// Best-effort total ordering for any `PartialOrd` element. `partial_cmp` returns
+/// `None` only for incomparable values (floating-point NaN); we map that to
+/// `Equal`. NOTE: with MORE THAN ONE NaN present this is NOT transitive (NaN≈1.0
+/// and NaN≈2.0 yet 1.0<2.0), and since Rust 1.81 `slice::sort_by` PANICS on a
+/// comparator that violates a strict weak ordering. NaN IS reachable at runtime
+/// (`0.0 / 0.0`, `sqrt(-1)`, an FFI float) even though no Sky literal spells it —
+/// so the callers below wrap the sort in `catch_unwind` to stay total.
 fn cmp_total<T: PartialOrd>(a: &T, b: &T) -> std::cmp::Ordering {
     a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Run `sort_by` but never panic: a non-strict-weak-ordering comparator (e.g.
+/// `cmp_total` over a multi-NaN float list) panics std's sort since Rust 1.81;
+/// catch it and leave the slice in its safe, element-complete (unspecified-order)
+/// state. Shared by `list_sort`/`list_sort_by` (and mirrors `list_sort_with`).
+fn sort_by_total<T, F: Fn(&T, &T) -> std::cmp::Ordering>(result: &mut [T], cmp: F) {
+    let order = std::panic::AssertUnwindSafe(|| result.sort_by(&cmp));
+    if std::panic::catch_unwind(order).is_err() {
+        eprintln!("[sky.list] sort: comparator is not a consistent total order (NaN?); unspecified order");
+    }
 }
 
 /// `Sky.Core.List.sort : List comparable -> List comparable` — stable ascending
 /// sort by the element's natural order. Total (no panic on NaN).
 pub fn list_sort<T: PartialOrd>(list: Vec<T>) -> Vec<T> {
     let mut result = list;
-    result.sort_by(cmp_total);
+    sort_by_total(&mut result, cmp_total);
     result
 }
 
@@ -125,8 +138,9 @@ pub fn list_sort_by<A: Clone, B: PartialOrd>(key_fn: impl Fn(A) -> B, list: Vec<
     // and keep the original to emit after the sort.
     let mut decorated: Vec<(B, A)> =
         list.into_iter().map(|x| (key_fn(x.clone()), x)).collect();
-    // Stable sort on the key only (so equal keys preserve input order).
-    decorated.sort_by(|a, b| cmp_total(&a.0, &b.0));
+    // Stable sort on the key only (so equal keys preserve input order). Via the
+    // panic-safe wrapper: a multi-NaN key set makes cmp_total non-transitive.
+    sort_by_total(&mut decorated, |a, b| cmp_total(&a.0, &b.0));
     // Undecorate.
     decorated.into_iter().map(|(_, x)| x).collect()
 }
@@ -167,6 +181,18 @@ mod tests {
     // weak ordering makes std's sort panic since Rust 1.81. A well-typed Sky
     // `List.sortWith` can supply one, so the kernel must NOT panic — it returns
     // the elements in unspecified (but safe, complete) order instead.
+    // SOUNDNESS regression: a multi-NaN float list makes cmp_total non-transitive,
+    // which panics std sort since Rust 1.81. list_sort / list_sort_by must stay total.
+    #[test]
+    fn sort_multi_nan_does_not_panic() {
+        let nan = f64::NAN;
+        let xs: Vec<f64> = vec![3.0, nan, 1.0, nan, 2.0, nan, 0.5];
+        let out = list_sort(xs.clone());
+        assert_eq!(out.len(), xs.len(), "no elements lost");
+        let keyed = list_sort_by(|x: f64| x, xs.clone());
+        assert_eq!(keyed.len(), xs.len());
+    }
+
     #[test]
     fn sort_with_inconsistent_comparator_does_not_panic() {
         let xs: Vec<i64> = (0..64).collect();

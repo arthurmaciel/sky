@@ -145,8 +145,19 @@ pub fn time_add_months(months: i64, ms: i64) -> i64 {
         None => return ms,
     };
     let y = utc.year() as i64;
-    let m = utc.month() as i64 - 1 + months;
-    let new_y = (y + m.div_euclid(12)) as i32;
+    // `months` is caller-controlled (Sky `Std.Time.addMonths`): saturating_add
+    // avoids the i64 overflow (debug panic / release silent-wrap) on an extreme
+    // value. A saturated `m` makes `new_y as i32` truncate → from_ymd_opt below
+    // returns None → the function returns `ms` unchanged (total, no panic).
+    let m = (utc.month() as i64 - 1).saturating_add(months);
+    // Parse the target year into chrono's i32 domain (don't truncate): a lossy
+    // `as i32` on a large-but-non-saturating result would wrap a far-future/past
+    // year back into a valid band → a WRONG in-range date. try_from → out-of-range
+    // returns `ms` unchanged (the intended total fallthrough).
+    let new_y = match i32::try_from(y.saturating_add(m.div_euclid(12))) {
+        Ok(v) => v,
+        Err(_) => return ms,
+    };
     let new_m = (m.rem_euclid(12) + 1) as u32;
     // Clamp day to month end
     let first = NaiveDate::from_ymd_opt(new_y, new_m, 1);
@@ -223,12 +234,19 @@ pub fn time_is_leap_year(y: i64) -> bool {
 }
 
 pub fn time_days_in_month(year: i64, month: i64) -> i64 {
-    let y = year as i32;
+    // Parse year into chrono's i32 domain rather than truncating: a lossy cast on
+    // a large caller Int would wrap to a valid band → wrong day count. Out-of-range → 0.
+    let y = match i32::try_from(year) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
     let m = month as u32;
     if !(1..=12).contains(&m) {
         return 0;
     }
-    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    // saturating_add: `year` is caller-controlled; y+1 at i32::MAX would panic
+    // (debug) / wrap (release). A saturated year makes from_ymd_opt return None → 0.
+    let (ny, nm) = if m == 12 { (y.saturating_add(1), 1) } else { (y, m + 1) };
     match (NaiveDate::from_ymd_opt(ny, nm, 1), NaiveDate::from_ymd_opt(y, m, 1)) {
         (Some(next), Some(this)) => next.signed_duration_since(this).num_days(),
         _ => 0,
