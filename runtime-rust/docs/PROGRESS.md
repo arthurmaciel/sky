@@ -17,6 +17,31 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 03:35 — #33 GUARDIAN-RULED sound-drop (DEFER): dyn-Fn closure params stay dropped
+
+**What.** Reproduced #33 (probe: a non-generic `Box<dyn Fn(i64)->i64>` param drops the whole method,
+while the generic `F: Fn` sibling binds via the #28 seam). The MANDATORY security-soundness guardian
+design gate ruled **RECOMMEND-DEFER-AS-SOUND-DROP**: the status-quo drop is sound by construction (no
+Sky code can reach a dropped method → no panic/cargo-fail); the coverage is ≈0-demand (#27 study) and
+not worth touching the most security-sensitive seam (the #28 catch_unwind boundary + capture-Clone
+oracle); and it would build on top of the **still-open #44 async arg-side Send hole** (a `Box<dyn Fn>`
+without `+ Send` captured into `tokio::spawn` = E0277). Disciplined call: keep the drop, document it,
+revisit only when (a) a real consumer needs it AND (b) #44 arg-side Send is fixed.
+
+**Constraints for a future IMPLEMENT (guardian C1–C6, recorded so it's actionable):**
+C1 — `Box<dyn Fn>` desugars to `+ 'static`; the wrapper's `Fj` type-param must gain a `+ 'static` bound
+(the generic seam omits it → E0310). Satisfiable (Sky captures are owned `'static`). C2 — recognizer
+runs BEFORE the #26 dyn-trait DROP; divert ONLY Fn/FnMut/FnOnce principals. C3 — arg+return types in
+the closed Sky set; reject borrowed-ref args/returns, HRTB, extra non-auto trait bounds → default-drop.
+C4 — keep #28's B2 catch_unwind (a boxed Sky closure can still panic). C5 — async methods with a
+dyn-Fn param HARD-DROP until #44 arg-side Send lands. C6 — `&dyn Fn` → `&Fj` sound only for a sync call
+whose return doesn't carry the param lifetime (existing owned-return gate covers it).
+
+**Affected.** docs only (probe removed). #33 stays open as a documented sound-drop (blocked on #44 +
+real demand).
+
+---
+
 ## 2026-06-27 03:05 — #73 CLASS 1 CLOSED: fail-closed-drop AsRef/Borrow impl-trait returns
 
 **What.** `bound_to_concrete` now returns `None` for an `AsRef`/`Borrow` bound in RETURN position →
