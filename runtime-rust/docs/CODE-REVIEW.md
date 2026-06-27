@@ -75,6 +75,30 @@ Consolidated guardian sweep (`a34e39e4...`) re-verified the mechanical batches (
 
 Each remaining batch: guardian-reviewed (design review for delicate) + build-gated + committed by component.
 
+### 2026-06-27 — parallel fix-swarms (disjoint files, orchestrator-gated)
+
+The user asked to parallelize the long MED/LOW tail. Ran the autonomous-swarm
+anti-race protocol: one agent per **disjoint** file (author-only, no builds);
+the orchestrator serializes the quality gate (build + clippy -D + tests +
+guardian for code; bash -n / py_compile for scripts) then commits.
+
+| Swarm | Scope | Result | Gate |
+|---|---|---|---|
+| code-1 (`224cbc03`) | 31 non-delicate runtime `.rs` (LOW+MED) | **43 fixed**, 21 dispositioned | build+clippy+557 tests + guardian **SHIP** (no rework); 3 agent-introduced clippy lints fixed by orchestrator |
+| docs+scripts (`1cd6039a`) | 77 `.md`/`.sh`/`.py` | **184 fixed**, 13 dispositioned | bash -n + py_compile all green; docs verified vs source; pre-existing WIP excluded |
+| code-2 (`w5t58b7lp`, running) | 21 swarm-1-excluded `.rs` — REMAINING LOW/MED (verify-against-current, skip already-fixed, disposition delicate) | pending | build+clippy+tests+guardian on completion |
+
+Also fixed serially this session: console `--target rust`→`--backend rust`
+(`243465ff`, console pre-build was broken); rt-live security (console auth-gate
+fail-closed + hub_exporter loopback-parse, `38d0c522`); codegen Live.route OOB
+(`68a24273`) + rustfmt locale-crash (`dfc10608`).
+
+**Final remaining (orchestrator-owned, focused sessions — NOT swarm-safe):**
+1. **codegen `.hs` MEDs** (need cabal + per-shape example verify): ExprEmitter int `/`//`%` div-by-zero → checked kernel; Pattern.hs `unreachable!()`→classified + tuple-arg binding drop; ModuleEmitter nullary-Task memoization predicate (freezes Time/Random) + std_ui_on_submit `unreachable!()`→real impl; Emitter.hs db_format_sql `?`-in-string-literal + Cargo.toml version validation.
+2. **2 delicate rt-core MED** (design reviews): db_with_transaction cancel-leak; ssrf/http_client per-hop DNS-pin.
+3. **email SES/SendGrid attachments** (completeness feature, not a vuln).
+4. Pattern.hs HIGH — front-end exhaustiveness, **out of Rust boundary** (signalled to user). rsa Marvin — no upstream fix.
+
 ### Deterministic tier (supply-chain + secgrep)
 
 - **secgrep timing-oracle: CLEAN** — no `==`/`!=` on secrets; `subtle::ct_eq` used in crypto.rs, live/csrf.rs:205, live/console.rs:103/111/297, server.rs:861.
