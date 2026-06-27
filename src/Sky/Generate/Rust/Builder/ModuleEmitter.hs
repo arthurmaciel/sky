@@ -783,12 +783,16 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
                 | Just (kMod, kFn) <- Map.lookup (ModuleName._name m, kn) (ecKernelAliases ctx)
                   -> kernelToRust kMod kFn `elem` ["uuid_v4", "uuid_v7"]
             _ -> False
-        -- Std.Ui.onSubmit's `a -> Attribute b` body (a constant-`a` closure into
-        -- a `b` form slot) is not expressible in Rust's static types — but every
-        -- applied call site is peepholed to an inline form-decode, so the body is
-        -- dead. Emit `unreachable!()`; the signature stays for any value-use.
+        -- Std.Ui.onSubmit's `a -> Attribute b` body (a constant-`a` closure into a
+        -- `b` form slot) is not expressible in Rust's static types — every APPLIED
+        -- call site is peepholed to an inline form-decode, so this body is dead in
+        -- practice. The only way to reach it is a VALUE-use of `onSubmit` that
+        -- escapes the peephole; emit a CLASSIFIED panic (accurate message, not a
+        -- raw `unreachable!()`), contained by the runtime recover boundaries — same
+        -- treatment as Pattern.hs's refutable-arg case.
         tdWrapped
-            | ecCurrentModule ctx == "Std.Ui" && name == "onSubmit" = "unreachable!()"
+            | ecCurrentModule ctx == "Std.Ui" && name == "onSubmit" =
+                "panic!(\"Std.Ui.onSubmit used as a value is not supported on the Rust backend; apply it directly (onSubmit handler)\")"
             | "SkyTask<" `isPrefixOf` ret && isRustPureGoTaskKernel
                     = "task_succeed({ " ++ tdBody ++ " })"
             | otherwise = tdBody
