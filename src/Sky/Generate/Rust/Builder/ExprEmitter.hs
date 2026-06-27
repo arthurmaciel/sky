@@ -666,6 +666,13 @@ isTaskProducingCall (Ann.At _ e) = case e of
 -- Conservative-by-default: an UNRECOGNISED head returns False (the binder keeps
 -- the existing clone path), so this never widens the move set beyond provable
 -- task values.
+-- | #96 R1: is `e` a bare reference to a re-thunked Task binding
+-- (`ecThunkVars`)? Such a read renders `name()` (a freshly-built SkyTask), so a
+-- DISCARD of it must be `task_run`-forced, not bound-and-dropped.
+isThunkVarRef :: EmitCtx -> Can.Expr -> Bool
+isThunkVarRef ctx (Ann.At _ (Can.VarLocal n)) = n `Set.member` ecThunkVars ctx
+isThunkVarRef _ _ = False
+
 isTaskValuedExpr :: Map.Map String Can.Type -> Can.Expr -> Bool
 isTaskValuedExpr solved e =
     not (null (taskExprInnerType solved e)) || rootedAtTaskKernel e
@@ -2234,6 +2241,22 @@ exprToRustInner ctx e = case e of
             -- stays bind/drop and is NEVER run — the Sky/Test.sky summary-only
             -- contract (a discarded `List (Task ())` produces no output). Mirrors
             -- the Can.LetDestruct arm below.
+            -- #96 R1: a DISCARD of a re-thunked Task var (`let _ = cleanup` where
+            -- `cleanup ∈ ecThunkVars`). The thunk read renders `cleanup()` — a
+            -- freshly-built SkyTask — so a bare `let _ = cleanup()` would
+            -- CONSTRUCT-and-drop the future without awaiting, silently skipping
+            -- the effect (Go auto-forces a discarded Task). `isTaskProducingCall`
+            -- has no VarLocal arm, so the arms below don't catch it. RUN it via
+            -- `task_run` to preserve Go's auto-force semantics. Gated tightly on a
+            -- thunk-var reference (disjoint from every other discard shape).
+            Can.DestructDef (Ann.At _ Can.PAnything) expr
+                | isThunkVarRef ctx expr ->
+                    "{ task_run::<SkyError, _>(" ++ exprToRustString ctx expr
+                        ++ "); " ++ exprToRustString ctx body ++ " }"
+            Can.Def (Ann.At _ "_") [] expr
+                | isThunkVarRef ctx expr ->
+                    "{ task_run::<SkyError, _>(" ++ exprToRustString ctx expr
+                        ++ "); " ++ exprToRustString ctx body ++ " }"
             Can.DestructDef (Ann.At _ Can.PAnything) expr
                 | isTaskProducingCall expr
                 , not (null (taskExprInnerType (ecSolvedTypes ctx) expr)) ->

@@ -1,0 +1,55 @@
+module Main exposing (main)
+
+-- #96 R1 / #98 regression — self-verifying. A re-thunked Task binding (`tick`) is
+-- used TWICE in mixed position: a DISCARD (`let _ = tick`) AND a non-discard
+-- (`tick |> Task.map`). Mixed use → the re-thunk arm fires (a move-only SkyTask
+-- can't be bound-once-used-twice). Each use of a re-thunked var renders `tick()`
+-- (a freshly-built future); the DISCARD must be `task_run`-forced, not
+-- construct-and-dropped, so its effect actually fires (Go auto-forces a discarded
+-- Task). Both refs run → the marker file gets TWO bytes.
+--
+-- Self-verifying: `tick` appends one byte to `marker.txt`; after `withRes`
+-- completes we read it back and only emit `[ALL OK]` when the count is exactly 2
+-- (proving BOTH the discard AND the non-discard ran). Pre-#98 the discard
+-- construct-and-dropped → count 1 → "FAIL".
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.File as File
+import Std.Log exposing (println)
+
+
+marker : String
+marker =
+    "marker.txt"
+
+
+withRes : Task Error a -> Task Error a
+withRes action =
+    let
+        tick =
+            File.append marker "x"
+                |> Task.onError (\_ -> Task.succeed ())
+    in
+        action
+            |> Task.andThen
+                (\result ->
+                    let
+                        _ = tick
+                    in
+                        tick |> Task.map (\_ -> result)
+                )
+
+
+main : Task Error ()
+main =
+    File.writeFile marker ""
+        |> Task.andThen (\_ -> withRes (Task.succeed "x"))
+        |> Task.andThen (\_ -> File.readFile marker)
+        |> Task.andThen
+            (\contents ->
+                if String.length contents == 2 then
+                    println "discard-ran + nondiscard-ran [ALL OK]"
+                else
+                    println ("FAIL: tick ran " ++ String.fromInt (String.length contents) ++ " time(s)")
+            )

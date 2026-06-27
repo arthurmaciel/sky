@@ -17,6 +17,35 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 14:10 — #98 CLOSED — re-thunked Task discard now runs (Go auto-force parity)
+
+**What.** Closed the R1 residual the guardian flagged in the #96 final review. After
+the #96 re-thunk, a DISCARD of a re-thunked Task var (`let _ = cleanup`, cleanup ∈
+ecThunkVars) rendered `let _ = cleanup()` — construct-and-drop a fresh future
+without awaiting → effect silently skipped, diverging from Go's auto-force of a
+discarded Task. `isTaskProducingCall` has no `VarLocal` arm, so the existing
+task_run discard arms never caught it; it fell to the default bind/drop.
+
+**Fix.** New `isThunkVarRef` predicate + two `Can.Let` discard arms (placed before
+the `isTaskProducingCall` arms) that emit `task_run::<SkyError,_>(cleanup());` for a
+thunk-var discard — `block_on`-running the freshly-built future, mirroring the
+established auto-force discard pattern. Guarded tightly on `ecThunkVars` membership
+(a set non-empty only inside a re-thunk Let body), so it's provably disjoint from
+every other discard shape — it intercepts ONLY what previously hit the
+construct-and-drop default. Guardian APPROVE (disjointness proven from
+`ecThunkVars` provenance; run-semantics identical to the sibling arms; no new
+panic/soundness surface).
+
+**Verify.** /tmp/e98 mixed-use repro (tick discarded once + non-discard once) now
+runs the effect TWICE (both refs → Go re-runnable-thunk parity; pre-fix the discard
+ran 0×). New self-verifying fixture `runtime-rust/tests/sky/103-task-rethunk-discard`
+(file-counter: emits `[ALL OK]` only when tick ran exactly 2×) passes; 101/102/103
+all green (48→49 fixtures · 0 fail). cabal build clean.
+
+**Affected.** `src/Sky/Generate/Rust/Builder/ExprEmitter.hs` (isThunkVarRef + 2
+discard arms) · `runtime-rust/tests/sky/103-task-rethunk-discard/` (new) ·
+`runtime-rust/scripts/ffi-fixtures-test.sh` (ALL_FIXTURES).
+
 ## 2026-06-27 13:40 — #66 (WALL-5 hardening) — alias see-through depth-bound + provenance verified
 
 **What.** Defense-in-depth on the crate-local alias see-through (`rustdoc_type_to_sky`
