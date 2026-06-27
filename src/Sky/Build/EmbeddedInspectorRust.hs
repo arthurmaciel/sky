@@ -45,7 +45,7 @@ import qualified Sky.Build.EmbedDirTH as EmbedDir
 
 
 -- | Try to embed the pre-built release binary; fall back to source tree.
--- The TH splice runs at compile time. (#95: re-embed — skyi width-map fix.)
+-- The TH splice runs at compile time. (#90: re-embed — container Sky-name fix.)
 embeddedInspectorRustBytes :: [(FilePath, ByteString)]
 embeddedInspectorRustBytes = $(do
     -- Paths are inlined string literals (not module-level CAFs) because

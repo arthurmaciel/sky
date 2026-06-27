@@ -9629,7 +9629,26 @@ fn sky_of_typeref(tr: &TypeRef, tyvars: &[String], self_sky: &str) -> String {
                         if s.contains(' ') { format!("({s})") } else { s }
                     })
                     .collect();
-                format!("{head} {}", parts.join(" "))
+                // [#90] Map the known-container HEAD to its Sky SEMANTIC name so the
+                // projected/UFCS `.skyi` surface AGREES with the inherent path
+                // (`resolve_path_to_sky`): a producer's `List t` must unify with a
+                // consumer's `List t` receiver — pre-#90 this path emitted the RAW
+                // Rust head (`Vec t` / `Option t` / `Dict`'s `HashMap k v`), an
+                // undefined Sky type that also broke cross-path HM unification.
+                // Bounded to the three unambiguous containers the divergence names;
+                // `Dict` drops the key arg (Sky Dict is always String-keyed, exactly
+                // as `resolve_path_to_sky`). Surface-only — codegen reads the
+                // call-AST TypeRef, never this string (the #95 invariant).
+                match last {
+                    // `unwrap_or_else(|| "String")` fallback matches `resolve_path_to_sky`
+                    // exactly (degenerate/malformed-arity input only — well-formed
+                    // rustdoc always supplies the args).
+                    "Vec" => format!("List {}", parts.first().cloned().unwrap_or_else(|| "String".into())),
+                    "Option" => format!("Maybe {}", parts.first().cloned().unwrap_or_else(|| "String".into())),
+                    "HashMap" | "BTreeMap" | "IndexMap" | "AHashMap" =>
+                        format!("Dict String {}", parts.get(1).cloned().unwrap_or_else(|| "String".into())),
+                    _ => format!("{head} {}", parts.join(" ")),
+                }
             }
         }
         // A closure argType renders as a Sky function type. `byRef` is invisible
@@ -11778,6 +11797,45 @@ mod tests {
         assert_eq!(
             external_type_public_path("alloc::collections::TryReserveError"),
             Some("std::collections::TryReserveError".to_string())
+        );
+    }
+
+    #[test]
+    fn wall90_sky_of_typeref_container_heads_use_sky_names() {
+        // [#90] The projected/UFCS renderer must agree with the inherent path
+        // (`resolve_path_to_sky`): Vec→List, Option→Maybe, HashMap-family→
+        // `Dict String <v>` (key arg dropped). Pre-#90 it emitted raw `Vec t` /
+        // `Option t` / `HashMap k v` — undefined Sky types that broke cross-path
+        // HM unification.
+        let tv = vec!["t".to_string()];
+        assert_eq!(
+            sky_of_typeref(&TypeRef::Ctor("Vec".into(), vec![TypeRef::Param(0)]), &tv, ""),
+            "List t"
+        );
+        assert_eq!(
+            sky_of_typeref(&TypeRef::Ctor("Option".into(), vec![TypeRef::Prim("i64".into())]), &[], ""),
+            "Maybe Int"
+        );
+        // HashMap<String, i64> → Dict String Int (key dropped).
+        assert_eq!(
+            sky_of_typeref(
+                &TypeRef::Ctor(
+                    "HashMap".into(),
+                    vec![TypeRef::Prim("String".into()), TypeRef::Prim("i64".into())]
+                ),
+                &[],
+                ""
+            ),
+            "Dict String Int"
+        );
+        // Full `::`-qualified head still maps (last segment keyed).
+        assert_eq!(
+            sky_of_typeref(
+                &TypeRef::Ctor("std::collections::HashMap".into(),
+                    vec![TypeRef::Prim("String".into()), TypeRef::Prim("f64".into())]),
+                &[], ""
+            ),
+            "Dict String Float"
         );
     }
 
