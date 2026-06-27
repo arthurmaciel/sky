@@ -76,7 +76,7 @@ distinct deps.
 
 ### Step 5 — Resolve `src/Sky/Build/Compile.hs`
 
-This is the one inherent conflict: our `case Toml._target of {...}` dispatch
+This is the one inherent conflict: our `case Toml._backend config of {...}` dispatch
 wraps upstream's Go-codegen block, which upstream churns every release. Resolve
 by keeping **upstream's** version of the codegen and re-wrapping our dispatch:
 
@@ -85,21 +85,21 @@ by keeping **upstream's** version of the codegen and re-wrapping our dispatch:
    region types). They're pure, so they can sit before the dispatch.
 2. Then our dispatch:
    ```haskell
-                   case Toml._target config of
-                       Toml.TargetRust -> do
+                   case Toml._backend config of
+                       Toml.BackendRust -> do
                            rawAliases <- readIORef globalKernelAlias
                            RustProject.generateRustProject config (canMod : map snd validDeps)
                                entrySrcMod typesWithDeps rawAliases outDir srcHash
-                       Toml.TargetGo ->
+                       Toml.BackendGo ->
                            <upstream's IO block — the `if not (null …) then … else …`>
    ```
-3. The `TargetGo ->` arm is upstream's IO block (everything after the pure
+3. The `BackendGo ->` arm is upstream's IO block (everything after the pure
    bindings), **re-indented** to nest under the arm. For a large block, do this
    with a script rather than by hand (read the conflict line ranges, reindent
    the IO half by +N spaces, splice). Confirm `grep -nE '^(<<<<<<<|=======|>>>>>>>)'`
    reports nothing.
 
-The HEAD-side `TargetGo` body is our *older* copy of the Go codegen — discard it;
+The HEAD-side `BackendGo` body is our *older* copy of the Go codegen — discard it;
 upstream's is newer.
 
 ### Step 6 — Adapt the Rust backend to shared-type changes

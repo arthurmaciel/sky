@@ -1,6 +1,6 @@
 # Rust FFI typed-surface parity with Go (task #14) — plan
 
-Status: SCOPED (slice 1 starting). Guardian design review: pending (pre-write).
+Status: SHIPPED (corrected 2026-06-27 by principles-audit). Slices S1–S4 are implemented with fixtures — the inspector emits `is_field: true` / `is_field_set: true` (`tools/sky-ffi-inspect-rs/src/main.rs:1950/2021`) and `Rust/Ffi.hs` has `isField` handling. The original plan + 'Confirmed gaps' section below are RETAINED FOR CONTEXT ONLY and are STALE: gaps #1–#3 are closed; the cited `main.rs:1103/1524/1552` line numbers no longer hold.
 Boundary: `tools/sky-ffi-inspect-rs/`, `src/Sky/Build/Rust/`, `src/Sky/Generate/Rust/`,
 `runtime-rust/`. NEVER `runtime-go/`, `sky-stdlib/`, the shared Go `FfiGen` Go-glue, or
 author `examples/` (except `examples/rust/`).
