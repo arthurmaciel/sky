@@ -2220,13 +2220,21 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
 /// the rustdoc index (i.e. it originates from a dependency, not the crate
 /// itself).  We resolve the crate name from `doc["external_crates"]` keyed by
 /// that numeric crate_id.
+///
+/// #53: the STRUCTURAL facade tell is the external glob re-export
+/// (`pub use ext_crate::*`) — a pattern normal crates virtually never use (they
+/// re-export specific items, not a whole external crate's namespace). The bound
+/// function COUNT is NOT the signal: a facade can ship many GLUE fns
+/// (async-stripe's `Client`/`ClientBuilder` = 20 fns) yet re-export its real API
+/// from sub-crates. So we no longer suppress on `fn_count`; instead the note
+/// FIRES whenever an external glob re-export exists, and the WORDING adapts:
+/// below `FACADE_FN_THRESHOLD` own fns it reads as a pure facade ("re-exports its
+/// API from"), at/above it reads as supplementary ("also re-exports items from")
+/// so it stays accurate for a crate that has both a real own API and an
+/// incidental external glob re-export.
 const FACADE_FN_THRESHOLD: usize = 3;
 
 fn facade_guidance(crate_name: &str, fn_count: usize, doc: &serde_json::Value) -> Vec<String> {
-    if fn_count >= FACADE_FN_THRESHOLD {
-        return vec![];
-    }
-
     let index = match doc["index"].as_object() {
         Some(i) => i,
         None => return vec![],
@@ -2293,10 +2301,21 @@ fn facade_guidance(crate_name: &str, fn_count: usize, doc: &serde_json::Value) -
     let crate_list = names.join(", ");
     let add_cmds: Vec<String> = names.iter().map(|n| format!("sky add {}", n)).collect();
     let add_hint = add_cmds.join(" / ");
-    vec![format!(
-        "note: '{}' re-exports its API from: {}. Run '{}' to bind them.",
-        crate_name, crate_list, add_hint
-    )]
+    // Strong wording for a near-empty own surface (a pure facade); supplementary
+    // wording when the crate ALSO ships a real own API (≥ threshold fns) so the
+    // hint stays accurate rather than implying the whole API lives elsewhere.
+    if fn_count < FACADE_FN_THRESHOLD {
+        vec![format!(
+            "note: '{}' re-exports its API from: {}. Run '{}' to bind them.",
+            crate_name, crate_list, add_hint
+        )]
+    } else {
+        vec![format!(
+            "note: '{}' also re-exports items from: {}. If the API you need is \
+             missing, run '{}' to bind them.",
+            crate_name, crate_list, add_hint
+        )]
+    }
 }
 
 /// Collect the `::`-joined paths of every PUBLIC module defined in this crate
@@ -15637,10 +15656,13 @@ mod tests {
             "note must suggest the sky add command: {}", note);
     }
 
-    /// Normal crate (≥3 fns) → no guidance even if there are re-exports.
+    /// #53: a crate with a real own API (≥3 fns) AND an external glob re-export
+    /// gets the SUPPLEMENTARY ("also re-exports") note — naming the sub-crate is
+    /// helpful even when some own API bound. (Pre-#53 this suppressed on
+    /// fn_count, hiding the hint for glue-heavy facades like async-stripe.)
     #[test]
-    fn test_facade_guidance_absent_for_normal_crate() {
-        // Same doc structure but fn_count = 5 → threshold not triggered.
+    fn test_facade_guidance_supplementary_for_reexporting_crate() {
+        // Same doc structure but fn_count = 5 → supplementary wording.
         let doc = serde_json::json!({
             "index": {
                 "1": {
@@ -15677,8 +15699,13 @@ mod tests {
         });
 
         let notes = facade_guidance("normal_crate", 5, &doc);
-        assert!(notes.is_empty(),
-            "normal crate (5 fns) must NOT produce facade guidance: {:?}", notes);
+        assert_eq!(notes.len(), 1,
+            "a crate with an external glob re-export must produce a note even at 5 fns: {:?}", notes);
+        let note = &notes[0];
+        assert!(note.contains("also re-exports items from:"),
+            "≥-threshold fn_count must use the supplementary wording: {}", note);
+        assert!(note.contains("other_crate") && note.contains("sky add other_crate"),
+            "supplementary note must still name the sub-crate + add command: {}", note);
     }
 
     /// Facade with 0 fns but NO external glob re-exports → no guidance.

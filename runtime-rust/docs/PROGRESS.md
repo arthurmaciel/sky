@@ -17,6 +17,30 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 13:10 — #53 CLOSED — facade-guidance fires on the structural tell, not fn_count
+
+**What.** `sky add` of a re-export facade now prints the sub-crate guidance even
+when the facade ships many GLUE fns. Before, `facade_guidance` early-returned when
+`fn_count >= 3`, so async-stripe (20 `Client`/`ClientBuilder` fns that re-export
+the real API via `pub use stripe_*::*`) never got the note — the user was left
+with only glue. The bound-function COUNT was the wrong signal; the STRUCTURAL
+facade tell is the external glob re-export (`pub use ext_crate::*`), a pattern
+normal crates virtually never use (they re-export specific items, not a whole
+external namespace) — and the code already detected it (`ext_ids`).
+
+**Fix (inspector-only).** Dropped the `fn_count` suppression; the note now FIRES
+whenever an external glob re-export exists, with WORDING that adapts: `< 3` own
+fns → "re-exports its API from …" (pure facade); `>= 3` → "also re-exports items
+from … If the API you need is missing, run …" (supplementary — accurate for a
+crate with both a real own API and an incidental external glob re-export). No
+noise risk: gated on the rare `pub use external::*` shape, and the note is
+informational (no fixture asserts on its absence). Low-stakes diagnostic string —
+no codegen/security/soundness surface, so no guardian-final (219 inspector unit
+tests green incl. the 4 facade tests; the conflicting `..._absent_for_normal_crate`
+test re-pointed to assert the supplementary note as `..._supplementary_for_reexporting_crate`).
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (`facade_guidance` + tests).
+
 ## 2026-06-27 12:30 — #96 / E-001 CLOSED — generic, Task-reusing fn now builds on Rust (re-thunk + generic closure-param annotation)
 
 **What.** Closed FOUND-ERRORS **E-001** (found exercising `sky-playground`'s
