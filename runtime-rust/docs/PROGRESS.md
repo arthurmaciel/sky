@@ -17,7 +17,34 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
-## 2026-06-27 15:10 — #68 (WALL 6 firestore fluent) RE-SCOPED via minimal stubs — shape (a) already works; real blocker is the lifetime-BORROWING builder
+## 2026-06-27 15:35 — #68 CORRECTION — both general shapes already work; earlier "cargo-fails" were STALE-GIT-DEP-CACHE artifacts
+
+**Correction to the 15:10 entry below.** Re-tested the lifetime-borrowing builder
+with a PRISTINE crate name (`lifecrate`, never built before) to defeat all caches:
+`fn fluent(&self) -> Sel<'_>` where `Sel<'a> { db: &'a str }` → the inspector
+correctly FAIL-CLOSED-DROPS `fluent` / `run` / the field accessors (only `type_id`
++ `new_from_db` bind) and the build is **GREEN**. So the E0521 / E0106 / E0616
+cargo-fails reported in the 15:10 entry were NOT real bugs — they were stale
+`kernel.json` / generated-bindings carried over from mutating the SAME git-dep
+crate (`fluentcrate`, `branch=master`) in place across iterations. `rm -rf
+sky-out .skycache .skydeps` in the consuming project does NOT defeat this: cargo's
+git checkout + the accumulated bindings from a prior commit's surface leak in.
+
+**Net for #68:** both GENERAL shapes are already handled correctly — shape (a)
+(private-module type publicly re-exported → binds via public path; locked by
+`wall6_private_module_named_reexport_resolves_public_path`) AND shape (b)
+(lifetime-borrowing builder → sound fail-closed drop, green). So #68's REAL blocker
+is a firestore-SPECIFIC shape neither minimal stub reproduces — characterizing it
+needs the REAL firestore crate (its full dep tree), which is CI/heavy territory
+under no-local-sweeps, NOT a minimal-stub-closeable wall. The wall6 unit test
+stands as a valid regression-lock; the lifetime-drop inspector change proposed at
+15:10 is WITHDRAWN (no bug to fix — the drop already happens).
+
+**LESSON (also added to CLAUDE.md):** when reproducing an inspector bug with a
+local git-dep stub, mutating the same crate name+branch across iterations yields
+phantom cargo-fails from stale bindings. Use a FRESH crate name per shape.
+
+## 2026-06-27 15:10 — #68 (WALL 6 firestore fluent) RE-SCOPED via minimal stubs — shape (a) already works; real blocker is the lifetime-BORROWING builder [SUPERSEDED — see 15:35 correction above; the cargo-fails were stale-cache]
 
 Reproduced #68 with minimal stub crates (no real firestore needed — the WALL code
 fixes never need the real crate, only the real-crate PROOF does). Findings:

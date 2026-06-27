@@ -775,6 +775,21 @@ log** — hold it to the same bar as a code review:
   value. Guardian-confirmed; no tightening needed. Both gaps were Go-parity bugs
   (Go built the program); regression fixtures `101-task-rethunk` +
   `102-task-rethunk-free-tvar`.
+- **Reproducing an FFI-inspector bug with a local git-dep stub: use a FRESH crate
+  name per shape — mutating one in place yields PHANTOM cargo-fails.** When you
+  iterate a stub crate (`mycrate`, `branch=master`) by editing its `lib.rs` +
+  re-committing, the consuming project's `rm -rf sky-out .skycache .skydeps` does
+  NOT fully reset: cargo's git checkout (`~/.cargo/git`) + the previously-generated
+  `<crate>_bindings.rs` / `kernel.json` surface from the PRIOR commit leak in, so a
+  binding that was correct for commit N appears against source commit N+1 and
+  cargo-fails (E0616 private-field-accessor, E0521 borrow-escapes, E0106 missing-
+  lifetime — all phantom). Cost ~1h chasing a non-bug "#68 lifetime-borrowing
+  builder" that a PRISTINE crate name (`lifecrate`) immediately showed is already
+  fail-closed-dropped + green. Rule: one fresh crate name per shape under test; or
+  assert against `collect_reachable_paths`-style PURE unit tests (hand-built JSON,
+  no cache) which are authoritative. Corollary: a minimal stub that builds green
+  does NOT prove the real crate works — the real wall may be a crate-specific shape
+  the stub doesn't capture (→ real-crate/CI characterization, not stub-closeable).
 - Known unfixed codegen/runtime gaps:
   `2026-06-15-skyshop-rs-codegen-gaps.md` (unconstrained-`Result`→`i64`;
   `Dict.union`/`List.sortBy` absences).
