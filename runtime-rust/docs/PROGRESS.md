@@ -17,6 +17,32 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 02:40 — #73 REPRODUCED + root-caused (return-position AsRef<str>): scoped, fix deferred to a focused effort
+
+**Repro.** `runtime-rust/tests/sky/100-ffi-asref-return` (probe, NOT gate-wired — RED pre-fix): a pure
+inherent method `fn tag(&self) -> impl AsRef<str>` binds BROKEN — the wrapper emits
+`pub fn ..tag_from_doc(..) -> SkyResult<SkyError, str>` + `ok_res(arg0.tag())` → E0277 (`str` unsized)
++ E0308. The `.skyi` correctly advertises `tag_from_doc : Doc -> Result Error String`. (The sibling
+`&str` return `borrowed_name` works: `translateRustRet` has a `&`-prefix arm → `String` + `.to_string()`.)
+
+**Root cause (pinned).** `tag` is a PURE NON-GENERIC method — `impl Trait` in return is an anonymous
+existential, NOT a named generic param — so the generics substitution pipeline
+(`resolve_generics`/`subst_generic_json`/`bound_to_concrete`, where `bound_to_concrete(AsRef<str>)` →
+`string_node()` line 6793) NEVER RUNS on it. The return is rendered raw by the shared
+`rustdoc_type_to_rust_str` (6074), whose impl_trait arm yields the AsRef inner `str`. Bound broken.
+
+**Fix plan (2-component, needs guardian design + careful verification — `rustdoc_type_to_rust_str` is a
+CORE renderer used by every binding):** (1) inspector: render an AsRef-string-family impl-trait RETURN
+(`impl AsRef<str>`/`AsRef<Path>`/`AsRef<OsStr>`) as a stable sentinel (e.g. `"impl AsRef<str>"`) instead
+of bare `str`; (2) Haskell `translateRustRet`: add an arm `"impl AsRef<str>" -> ("String", \e ->
+"(" ++ e ++ ").as_ref().to_string()")`. Narrow to the AsRef-string family so other impl-trait returns
+(impl Iterator etc.) are unaffected. Alternative sound-but-lossy bridge: fail-closed-DROP pure-method
+impl-trait returns (closes the cargo-fail; loses coverage). This is one of #73's two residual classes
+(the other = generic-result-hole wrappers).
+
+**Affected (this entry, docs-only).** `runtime-rust/docs/PROGRESS.md`; probe at
+`runtime-rust/tests/sky/100-ffi-asref-return` (untracked).
+
 ## 2026-06-27 02:05 — #90: projected sky_of_typeref renders Sky container names (Vec→List / Option→Maybe / HashMap→Dict)
 
 **What.** `sky_of_typeref` (projected/UFCS `.skyi` renderer) emitted RAW Rust container heads
