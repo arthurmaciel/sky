@@ -1,0 +1,50 @@
+module Main exposing (main)
+
+-- Shim-free proof: the real crates.io `semver` crate bound DIRECTLY by auto-FFI
+-- (NO wrapper crate — just `semver = "1"` in sky.toml). Exercises Version parse +
+-- field accessors + VersionReq semver-matching end-to-end.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Semver as Semver
+import Std.Log exposing (println)
+
+
+check : Task Error ()
+check =
+    case ( Semver.parse_from_version "1.2.3"
+         , Semver.parse_from_versionReq "^1.0.0"
+         ) of
+
+        ( Ok v, Ok req ) ->
+            let
+                maj = Semver.major_field_from_version v
+                minr = Semver.minor_field_from_version v
+                pat = Semver.patch_field_from_version v
+            in
+                case Semver.matches_from_versionReq req v of
+
+                    Ok matches ->
+                        if maj == 1 && minr == 2 && pat == 3 && matches then
+                            Task.succeed ()
+
+                        else
+                            Task.fail
+                                (Error.unexpected
+                                    ("semver UNEXPECTED maj="
+                                        ++ String.fromInt maj
+                                        ++ " min="
+                                        ++ String.fromInt minr
+                                        ++ " pat="
+                                        ++ String.fromInt pat))
+
+                    Err e ->
+                        Task.fail e
+
+        _ ->
+            Task.fail (Error.unexpected "semver parse failed")
+
+
+main : Task Error ()
+main =
+    check |> Task.andThen (\_ -> println "[ALL OK]")

@@ -1,0 +1,11 @@
+[project]
+name = "107-ffi-shimfree-semver"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# SHIM-FREE: a real crates.io complex crate bound DIRECTLY by auto-FFI — NO wrapper
+# crate, NO setup.sh. Proves `sky add semver` → Version/VersionReq parse + field
+# accessors + semver-matching are callable from Sky and the build is cargo-clean.
+["rust.dependencies"]
+semver = "1"

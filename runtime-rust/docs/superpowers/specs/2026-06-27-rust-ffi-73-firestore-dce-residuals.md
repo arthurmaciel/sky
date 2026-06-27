@@ -104,16 +104,21 @@ type whose canonical path runs through a private module" gate, the ~line-2493
 Display — fixtures 46/96), so the private-module gate must drop ONLY genuinely-private
 trait refs. Needs guardian review + verify 46/96 + firestore CRUD UFCS still bind.
 
-### A2 — `firestore_bindings.rs` (parse_fn_item path), 6 errors — FLATTEN-or-DROP
+### A2 — 6 E0308, mostly UFCS path (`sky_ffi_generics.rs`) — 3 sub-classes
 
-| site (firestore_bindings.rs) | shape | fix |
+| site | shape | fix |
 |---|---|---|
-| `:4328` `ok_res(arg0.parent_path(arg1.as_ref(), &arg2))` | method returns `Result<ParentPathBuilder, FirestoreError>` but is wrapped in `ok_res` (double-wrap) | flatten (`match … Ok(v)=>ok_res(v) Err=>err`) OR drop |
-| `:5489` `ok_res(FirestoreSerializationError::from_message(&arg0))` | method returns an ERROR struct, declared-return String | DROP (binding an error-ctor is not useful) |
-| 4 more E0308 (read /tmp/fs73-partA.log :141/:164/:189/:214) | characterise each | flatten/owned/drop |
+| `generics:238` `<FirestoreTransactionData as FirestoreTransactionOps>::get_documents_path(&arg0) -> &String` | UFCS return-borrow, `ok_res` wants owned | **owned-copy** `.to_string()` (COVERAGE WIN — the #22 owned-copy treatment, not applied on the UFCS path) OR drop |
+| `generics:246` `<ParentPathBuilder as AsRef<str>>::as_ref(&arg0) -> &str` | UFCS return-borrow | owned-copy `.to_string()` OR drop |
+| `generics:270` `<FirestoreCacheName as rvstruct::ValueStruct>::value(&arg0) -> &String` | UFCS return-borrow | owned-copy `.to_string()` OR drop |
+| `generics:230` `<FirestoreListenerTarget as TryInto<i32>>::try_into(arg0) -> Result<i32>` | declared return `Result<i64>` (Sky Int) but method gives `Result<i32>` — UFCS Result-INNER numeric width not saturated (#95 on the Result-Ok position) | saturate Result-inner numeric (`.map(\|v\| v as i64)`) OR drop |
+| `bindings:4328` `ok_res(arg0.parent_path(…))` | `parent_path -> Result<ParentPathBuilder, FirestoreError>` double-wrapped in `ok_res` | flatten (`match`) OR drop |
+| `bindings:5489` `ok_res(FirestoreSerializationError::from_message(&arg0))` | method returns an ERROR struct, declared String | DROP (error-ctor not useful) |
 
-All fail-closed (conservative). A2's flatten is the same Result-returning-method
-handling the main path already does elsewhere — verify why these slip past it.
+The 3 return-borrow ones are the strongest fix (owned-copy = bind, coverage win) —
+the inherent path already does this (#22); the UFCS/external-trait path doesn't.
+`:230` is the #95 saturating coercion not reaching the Result-Ok inner type on the
+UFCS path. `:4328`/`:5489` are conservative flatten/drop. All fail-closed.
 
 ### Plan (next pass)
 1. A1 first (cleanest, general): add the UFCS private-module + undeclared-lifetime
