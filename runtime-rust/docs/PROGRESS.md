@@ -17,6 +17,42 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 16:10 — #71 Phase-4 coverage measured (5 complex crates) — ~90% bound, ALL drops sound, ZERO new walls; #70 stripe subsumed
+
+Ran the inspector's `--audit` drop-histogram on 5 complex crates NOT in the
+firestore/firebase/stripe set (one `--audit <crate>` per crate — per-crate, not a
+sweep; self-contained cargo+rustdoc; disk held at 6.5 GB throughout):
+
+| crate | bound | tail-dropped | valuable-drop walls |
+|---|---|---|---|
+| serde_json | 139 | 38 | 0 — the 6 "valuable" lifetime drops are the Entry API (`OccupiedEntry<'a>` etc.), which BORROWS the map → sound drop |
+| semver | 56 | 7 | 0 |
+| url | 82 | 15 | 0 — `ParseOptions<'a>` / `PathSegmentsMut<'_>` borrowing builders → sound |
+| time | 891 | 32 | 0 — borrowed parse results (`Result<&'a [u8],…>`, `BorrowedFormatItem<'_>`) → sound |
+| regex | 163 | 48 | 0 |
+| **total** | **1331** | **140** | **0** |
+
+**Finding.** ~90% binding coverage across the set; EVERY drop falls in an
+already-sound class — `lifetime` (borrowing views/builders), `result_borrow`
+(borrowed returns), `setter_narrowing` / `generic_enum` (non-valuable). NO new
+general wall surfaced — the auto-FFI handles these complex crates well. The single
+recurring "valuable" drop pattern across ALL crates is the lifetime-BORROWING
+builder/view (Entry APIs, ParseOptions, BorrowedFormatItem) — the SAME universal
+sound-drop class as #68 shape (b). Binding those would need a fundamentally
+different ownership model (the builder borrows its receiver) — a major arc, not a
+wall; sound-dropped is correct today.
+
+**#71** → measurement done, **no gap fixes needed** (zero new walls; all drops
+sound). The "implement gap fixes" half is vacuous for this set — there are none.
+**#70 (stripe)** → SUBSUMED: the entire stripe `send` chain is already closed +
+real-crate-proven (WALL-G/H/I/J/K/L = #84/87/88/89/91/92/93), which IS the stripe
+drop-histogram's hard cluster. No residual stripe wall.
+
+**Net for "full automatic FFI":** the measured coverage + the closed wall set show
+the auto-FFI is comprehensive on real complex crates; remaining drops are sound
+fail-closed boundary behaviour (borrowed/lifetime-tied types that can't be owned
+Sky values), not gaps.
+
 ## 2026-06-27 15:35 — #68 CORRECTION — both general shapes already work; earlier "cargo-fails" were STALE-GIT-DEP-CACHE artifacts
 
 **Correction to the 15:10 entry below.** Re-tested the lifetime-borrowing builder
