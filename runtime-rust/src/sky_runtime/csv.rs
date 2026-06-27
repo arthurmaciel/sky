@@ -58,7 +58,14 @@ fn parse_delim<E: From<String>>(text: &str, delim: u8) -> SkyResult<E, CsvDoc> {
 }
 
 fn encode_delim(doc: &CsvDoc, delim: u8) -> String {
-    let mut wtr = ::csv::WriterBuilder::new().delimiter(delim).from_writer(vec![]);
+    // flexible(true): a parsed-then-encoded doc may carry ragged rows (row width ≠
+    // header width) since the reader is flexible. Without this the writer errors on
+    // the first mismatch and the swallowed error silently DROPS that row — breaking
+    // lossless round-trip. Flexible emits every row verbatim.
+    let mut wtr = ::csv::WriterBuilder::new()
+        .delimiter(delim)
+        .flexible(true)
+        .from_writer(vec![]);
     let _ = wtr.write_record(&doc.header);
     for row in &doc.rows {
         let _ = wtr.write_record(row);
@@ -111,9 +118,20 @@ pub fn csv_parse_stream_from_file<E: From<String> + Send + 'static>(path: String
             .has_headers(false)
             .flexible(true)
             .from_reader(std::io::BufReader::new(file));
+        // Row cap: although rows stream in, they all accumulate in `out`, so an
+        // untrusted huge file is still an unbounded allocation. Bound it
+        // (SKY_CSV_MAX_ROWS, default 10M) → Err rather than OOM.
+        let max_rows: usize = std::env::var("SKY_CSV_MAX_ROWS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(10_000_000);
         let mut out = Vec::new();
         for rec in rdr.records() {
             let r = rec.map_err(|e| e.to_string())?;
+            if out.len() >= max_rows {
+                return Err(format!("exceeds row cap of {} (raise SKY_CSV_MAX_ROWS)", max_rows));
+            }
             out.push(r.iter().map(|s| s.to_string()).collect());
         }
         Ok(out)

@@ -145,6 +145,16 @@ async fn email_post_json<E: From<String>>(
         Err(e) => return Err(format!("email: request failed: {}", e).into()),
     };
     let status = resp.status().as_u16();
+    // Bound the provider response so a misbehaving/compromised endpoint can't make
+    // us buffer an arbitrarily large body. Provider id-JSON responses are tiny; a
+    // declared length over 1 MiB is rejected. (Residual: a provider that omits
+    // Content-Length AND streams unboundedly isn't caught here — providers are
+    // operator-configured/trusted, so this length check is the proportionate bound.)
+    if let Some(len) = resp.content_length() {
+        if len > 1024 * 1024 {
+            return Err(format!("email: provider response too large ({} bytes)", len).into());
+        }
+    }
     let body = resp.text().await.unwrap_or_default();
     if status >= 400 {
         return Err(format!("email: status {}: {}", status, body).into());
