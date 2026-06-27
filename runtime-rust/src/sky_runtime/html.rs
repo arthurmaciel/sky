@@ -300,12 +300,15 @@ fn render_into_ctx<M>(node: &Html<M>, s: &mut String, select_value: Option<&str>
             pairs.sort_by(|a, b| a.0.cmp(b.0));
             for (k, v) in &pairs {
                 // Attr KEY is emitted unescaped; an unsafe key (`x onload=…`)
-                // injects a new attribute. Skip it (the value is still escaped).
-                if !is_safe_html_name(k) {
-                    continue;
-                }
+                // injects a new attribute, and a script-bearing key (`onerror`,
+                // `srcdoc`) executes regardless of value-escaping. `SafeAttrName`
+                // enforces both policies in one place; a key that fails is dropped.
+                let safe_key = match SafeAttrName::parse(k) {
+                    Some(n) => n,
+                    None => continue,
+                };
                 s.push(' ');
-                s.push_str(k);
+                s.push_str(safe_key.as_str());
                 s.push_str("=\"");
                 s.push_str(&escape_attr(sanitise_url_attr(k, v)));
                 s.push('"');
@@ -418,6 +421,42 @@ fn is_safe_html_name(name: &str) -> bool {
         && name.bytes().all(|b| {
             b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.')
         })
+}
+
+/// Attribute NAMES that execute script (or embed a scripting context) regardless
+/// of how the VALUE is escaped — entity-escaping the value is useless when the
+/// value IS script (event handlers like `onerror`/`onclick`) or markup
+/// (`srcdoc`). `Html.attribute` takes the name as a String that can be
+/// attacker-derived, and `is_safe_html_name` permits these (all valid HTML-name
+/// chars), so this denylist is the gate that stops them. Case-insensitive; no
+/// legitimate HTML element or non-event attribute name begins with `on`.
+fn is_dangerous_attr_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("on") || lower == "srcdoc"
+}
+
+/// A validated HTML **attribute** name (parse-don't-validate). The ONLY way to
+/// build one runs the full attribute-name policy — `is_safe_html_name` (charset:
+/// no structural-breakout bytes) AND `!is_dangerous_attr_name` (no script-bearing
+/// names) — exactly once. Every emit sink consumes a `SafeAttrName` instead of a
+/// raw `&str`, so a sink CANNOT forget a check: the divergence that left
+/// `htmlAttrToString` exposed (guardian, 2026-06-27) becomes unrepresentable.
+/// NB: element tag names and event-marker names are NOT attribute names — they
+/// keep the plain `is_safe_html_name` gate.
+struct SafeAttrName<'a>(&'a str);
+
+impl<'a> SafeAttrName<'a> {
+    fn parse(name: &'a str) -> Option<Self> {
+        if is_safe_html_name(name) && !is_dangerous_attr_name(name) {
+            Some(SafeAttrName(name))
+        } else {
+            None
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        self.0
+    }
 }
 
 /// URL-bearing attributes whose VALUE is fetched/navigated as a URL — a
@@ -633,17 +672,19 @@ pub fn html_escape_attr_(s: String) -> String {
 
 /// `Ffi.callPure "htmlAttrToString"` — serialise a single Attribute to its key="value" form.
 pub fn html_attr_to_string_<M>(attr: Attribute<M>) -> String {
-    // Gate the attribute KEY / event name with is_safe_html_name — same as the
-    // render_into path. The key is emitted UNESCAPED, so a hostile key such as
-    // `x onload=alert(1)` (reachable via Std.Html.Attributes.attribute) would
-    // inject markup; the value is entity-escaped. An unsafe name drops the whole
-    // attribute, mirroring render_into's `events.retain(is_safe_html_name)`.
+    // Gate the attribute KEY through `SafeAttrName` — the SAME single policy the
+    // render_into sink uses (charset + no script-bearing names). The key is
+    // emitted UNESCAPED, so a hostile key such as `x onload=alert(1)` or a live
+    // `onerror`/`srcdoc` (reachable via Std.Html.Attributes.attribute →
+    // Std.Html.attrToString) would inject markup or execute script that
+    // value-escaping cannot stop. An unvetted name drops the whole attribute.
+    // Event-marker names are not attribute names → keep `is_safe_html_name`.
     match attr {
-        Attribute::Attr(k, v) if is_safe_html_name(&k) => {
+        Attribute::Attr(k, v) if SafeAttrName::parse(&k).is_some() => {
             let v = sanitise_url_attr(&k, &v).to_string();
             format!("{}=\"{}\"", k, html_escape_attr_(v))
         }
-        Attribute::BoolAttr(k, true) if is_safe_html_name(&k) => k,
+        Attribute::BoolAttr(k, true) if SafeAttrName::parse(&k).is_some() => k,
         Attribute::EventAttr(e) if is_safe_html_name(e.name()) => {
             format!("data-sky-on=\"{}\"", e.name())
         }
@@ -698,6 +739,55 @@ mod tests {
         assert!(s.contains("1 &lt; 2"));
         assert!(s.contains("<b>ok</b>"));
         assert!(s.contains("</div>"));
+    }
+
+    // SECURITY regression: event-handler + srcdoc attribute NAMES execute script
+    // regardless of value-escaping. `Html.attribute` names can be attacker-derived,
+    // so the render sink must DROP them (is_safe_html_name alone permits them).
+    #[test]
+    fn render_drops_event_handler_and_srcdoc_attrs() {
+        let t: Html<()> = Html::HElement(
+            "img".into(),
+            vec![
+                Attribute::Attr("onerror".into(), "alert(1)".into()),
+                Attribute::Attr("OnClick".into(), "x".into()),
+                Attribute::Attr("srcdoc".into(), "<script>1</script>".into()),
+                Attribute::Attr("alt".into(), "ok".into()),
+            ],
+            vec![],
+        );
+        let mut t = t;
+        assign_sky_ids(&mut t, "r");
+        let s = render_html(&t);
+        let low = s.to_ascii_lowercase();
+        assert!(!low.contains("onerror"), "{s}");
+        assert!(!low.contains("onclick"), "{s}");
+        assert!(!low.contains("srcdoc"), "{s}");
+        assert!(s.contains(r#"alt="ok""#), "{s}");
+        assert!(is_dangerous_attr_name("onmouseover") && is_dangerous_attr_name("SRCDOC"));
+        // Conservative by design: any name starting with `on` is dropped (no
+        // legitimate non-event HTML attribute begins with `on`; custom data goes
+        // through `data-*`).
+        assert!(is_dangerous_attr_name("onfoo"));
+        assert!(!is_dangerous_attr_name("class") && !is_dangerous_attr_name("href"));
+        // SafeAttrName is the single policy both sinks share.
+        assert!(SafeAttrName::parse("class").is_some());
+        assert!(SafeAttrName::parse("onload").is_none() && SafeAttrName::parse("srcdoc").is_none());
+    }
+
+    // SECURITY regression (guardian 2026-06-27): the sibling sink
+    // `Std.Html.attrToString` must drop the SAME script-bearing names as
+    // render_into — both now route through SafeAttrName.
+    #[test]
+    fn attr_to_string_drops_event_handler_and_srcdoc() {
+        let onload: String = html_attr_to_string_(Attribute::<()>::Attr("onload".into(), "alert(1)".into()));
+        let srcdoc: String = html_attr_to_string_(Attribute::<()>::Attr("srcdoc".into(), "<script>1</script>".into()));
+        let onbool: String = html_attr_to_string_(Attribute::<()>::BoolAttr("onclick".into(), true));
+        let ok: String = html_attr_to_string_(Attribute::<()>::Attr("alt".into(), "x".into()));
+        assert_eq!(onload, "");
+        assert_eq!(srcdoc, "");
+        assert_eq!(onbool, "");
+        assert_eq!(ok, r#"alt="x""#);
     }
 
     #[test]

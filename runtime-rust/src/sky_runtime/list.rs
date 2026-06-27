@@ -139,16 +139,44 @@ pub fn list_sort_by<A: Clone, B: PartialOrd>(key_fn: impl Fn(A) -> B, list: Vec<
 /// exactly one of Less / Equal / Greater.
 pub fn list_sort_with<A: Clone>(cmp: impl Fn(A, A) -> i64, list: Vec<A>) -> Vec<A> {
     let mut result = list;
-    result.sort_by(|a, b| {
-        let ord = cmp(a.clone(), b.clone());
-        ord.cmp(&0)
-    });
+    // Soundness (no-panic thesis): the comparator is arbitrary user Sky code.
+    // Since Rust 1.81 the standard sort PANICS when a comparator violates a
+    // strict weak ordering (e.g. `cmp a b` and `cmp b a` both return a positive
+    // Int). A well-typed Sky `List.sortWith` could supply exactly that, so the
+    // bare `sort_by` is a Sky-reachable panic. Catch the unwind and return the
+    // list in its (safe, unspecified-order) post-sort state — std guarantees the
+    // elements are all still present and no UB on a panicking comparator.
+    let order = &mut result;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        order.sort_by(|a, b| cmp(a.clone(), b.clone()).cmp(&0));
+    }));
+    if outcome.is_err() {
+        eprintln!(
+            "[sky.list] List.sortWith: comparator is not a consistent total order; \
+             returning input in unspecified order"
+        );
+    }
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // SOUNDNESS regression (no-panic thesis): a comparator that is NOT a strict
+    // weak ordering makes std's sort panic since Rust 1.81. A well-typed Sky
+    // `List.sortWith` can supply one, so the kernel must NOT panic — it returns
+    // the elements in unspecified (but safe, complete) order instead.
+    #[test]
+    fn sort_with_inconsistent_comparator_does_not_panic() {
+        let xs: Vec<i64> = (0..64).collect();
+        // Always-greater: cmp a b = 1 AND cmp b a = 1 — violates antisymmetry.
+        let out = list_sort_with(|_a, _b| 1, xs.clone());
+        // No panic; every element preserved (multiset equal).
+        let mut got = out.clone();
+        got.sort();
+        assert_eq!(got, (0..64).collect::<Vec<i64>>());
+    }
 
     #[test]
     fn test_filter_map_doubles_evens() {

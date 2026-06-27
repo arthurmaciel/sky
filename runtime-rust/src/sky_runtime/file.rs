@@ -1,11 +1,45 @@
 // File kernel stubs — generic over E.
 use super::*;
 
+/// `Sky.Core.File.readFile : String -> Task Error String`. Reads the whole file,
+/// but bounded by a hard ceiling so an attacker-controlled path pointing at an
+/// unbounded source (`/dev/zero`, a named pipe, a multi-GiB file) cannot OOM the
+/// process — `read_to_string` on `/dev/zero` never returns. The ceiling defaults
+/// to 512 MiB and is overridable via `SKY_FILE_READ_MAX` (bytes). For a smaller
+/// explicit cap use `File.readFileLimit`; reading past the ceiling is an `Err`,
+/// never a silent truncation.
+fn file_read_ceiling() -> u64 {
+    std::env::var("SKY_FILE_READ_MAX")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(512 * 1024 * 1024)
+}
+
 pub fn file_read_file<E: Send + From<String> + 'static>(path: String) -> SkyTask<E, String> {
     Box::pin(async move {
-        match std::fs::read_to_string(&path) {
+        let cap = file_read_ceiling();
+        let run = || -> Result<String, String> {
+            use std::io::Read;
+            let f = std::fs::File::open(&path).map_err(|e| format!("{}", e))?;
+            // take(cap + 1): if the source yields more than `cap` bytes we still
+            // stop at a bounded read and report an error rather than OOM.
+            let mut buf = String::new();
+            let read = f
+                .take(cap.saturating_add(1))
+                .read_to_string(&mut buf)
+                .map_err(|e| format!("{}", e))?;
+            if read as u64 > cap {
+                return Err(format!(
+                    "file exceeds read ceiling of {} bytes (raise SKY_FILE_READ_MAX or use File.readFileLimit): {}",
+                    cap, path
+                ));
+            }
+            Ok(buf)
+        };
+        match run() {
             Ok(s) => ok_res(s),
-            Err(e) => SkyResult::Err(str_err(&format!("{}", e))),
+            Err(e) => SkyResult::Err(str_err(&e)),
         }
     })
 }
@@ -274,4 +308,42 @@ pub fn file_rename<E: Send + From<String> + 'static>(src: String, dst: String) -
             Err(e) => SkyResult::Err(str_err(&format!("{}", e))),
         }
     })
+}
+
+#[cfg(test)]
+mod read_ceiling_tests {
+    use super::*;
+
+    fn block<T>(fut: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    }
+
+    // SECURITY/DoS regression: readFile must refuse a source larger than the
+    // ceiling instead of allocating it unbounded.
+    #[test]
+    fn read_file_rejects_over_ceiling() {
+        let p = std::env::temp_dir().join(format!("sky_rc_over_{}.txt", std::process::id()));
+        std::fs::write(&p, vec![b'x'; 8192]).unwrap();
+        std::env::set_var("SKY_FILE_READ_MAX", "1024");
+        let res: SkyResult<String, String> = block(file_read_file(p.to_string_lossy().into_owned()));
+        std::env::remove_var("SKY_FILE_READ_MAX");
+        let _ = std::fs::remove_file(&p);
+        assert!(matches!(res, SkyResult::Err(_)), "8 KiB read under a 1 KiB ceiling must Err");
+    }
+
+    #[test]
+    fn read_file_under_ceiling_ok() {
+        let p = std::env::temp_dir().join(format!("sky_rc_ok_{}.txt", std::process::id()));
+        std::fs::write(&p, b"hello").unwrap();
+        let res: SkyResult<String, String> = block(file_read_file(p.to_string_lossy().into_owned()));
+        let _ = std::fs::remove_file(&p);
+        match res {
+            SkyResult::Ok(s) => assert_eq!(s, "hello"),
+            SkyResult::Err(e) => panic!("unexpected Err: {e}"),
+        }
+    }
 }

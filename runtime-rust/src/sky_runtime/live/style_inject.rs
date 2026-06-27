@@ -126,11 +126,32 @@ fn strip_markers<M>(attrs: &mut Vec<Attribute<M>>, markers: &[&str]) {
     attrs.retain(|a| !matches!(a, Attribute::Attr(k, _) if markers.contains(&k.as_str())));
 }
 
-/// Strip the style close-tag (Go's exact 7-char both-case strip) from a CSS
-/// fragment before it's spliced into a raw `<style>` body — prevents a tag
-/// breakout. Must run on every fragment.
+/// Strip the style close-tag from a CSS fragment before it's spliced into a raw
+/// `<style>` body — prevents a `</style>` breakout (stored XSS). This is the ONLY
+/// guard on the raw fragment, so it must be TOTAL:
+///   * case-insensitive — the HTML tokenizer ends a raw-text element on `</` +
+///     tag-name matched ASCII-case-insensitively, so `</StYle` breaks out just
+///     as `</style` does (a plain two-literal `replace` missed every mixed case);
+///   * fixpoint-iterated — `str::replace` removes only non-overlapping matches in
+///     ONE left-to-right pass and never re-scans the join seam, so a crafted
+///     `</sty</stylele` reconstructs `</style` after a single pass. Loop until a
+///     pass removes nothing.
+///
+/// Stronger-than-Go on purpose: security outranks byte-for-byte Go parity.
 fn strip_style_close(s: &str) -> String {
-    s.replace("</style", "").replace("</STYLE", "")
+    let mut out = s.to_string();
+    loop {
+        let lowered = out.to_ascii_lowercase();
+        match lowered.find("</style") {
+            None => return out,
+            Some(idx) => {
+                // `</style` is ASCII, so byte index `idx` and the 7-byte length
+                // are valid char boundaries in `out` (same byte layout as the
+                // lowercased copy).
+                out.replace_range(idx..idx + "</style".len(), "");
+            }
+        }
+    }
 }
 
 fn build_mq<M>(sky_id: &str, attrs: &[Attribute<M>]) -> String {
@@ -301,6 +322,22 @@ mod tests {
             }
             _ => 0,
         }
+    }
+
+    // SECURITY regression: the close-tag strip must be TOTAL — no spelling of
+    // `</style` survives, including mixed case and post-removal reconstruction.
+    #[test]
+    fn strip_style_close_is_total() {
+        // plain
+        assert!(!strip_style_close("a</style>b").to_ascii_lowercase().contains("</style"));
+        // mixed case (HTML end-tags are ASCII-case-insensitive)
+        assert!(!strip_style_close("a</StYle>b").to_ascii_lowercase().contains("</style"));
+        assert!(!strip_style_close("a</STYLE>b").to_ascii_lowercase().contains("</style"));
+        // reconstruction across the join seam after a single removal
+        assert!(!strip_style_close("</sty</stylele>").to_ascii_lowercase().contains("</style"));
+        assert!(!strip_style_close("</st</STYLEyle>").to_ascii_lowercase().contains("</style"));
+        // benign content is untouched
+        assert_eq!(strip_style_close("color: red;"), "color: red;");
     }
 
     // SECURITY regression: a `</style><script>` payload in any CSS fragment must
