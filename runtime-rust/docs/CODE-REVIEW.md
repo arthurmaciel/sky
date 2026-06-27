@@ -58,7 +58,22 @@ Filed follow-ups: ~40 process-internal `SKY_*` env reads via read_env_var; rende
 - `db.rs db_with_transaction` — open-transaction leak on future-cancellation (BEGIN issued, conn returned to pool without ROLLBACK if the body future is dropped). Fix touches transaction correctness + the task-local `TXN_CONN` routing types (sqlx `Transaction`-on-drop vs the held `PoolConnection`). MED.
 - `ssrf.rs`/`http_client.rs`/`ws_client.rs` — per-hop DNS rebinding on redirects: `check_host_not_private` validates then discards the vetted IP, leaving cross-host redirect connects unpinned (SSRF→metadata). Fix = a custom `reqwest::dns::Resolve` that pins vetted addrs (not a check-then-reconnect). MED (security).
 
-**Remaining: the 2 delicate above + rt-core (csv/email/http_stream caps), rt-live (~16), tui (depth-limit + others), codegen (~8), scripts (~10), docs (~44), LOW (~281). Continuing by component, each guardian-reviewed + build-gated.**
+| `e3a9cacf` | csv encode flexible (ragged-row round-trip) + parseStreamFromFile SKY_CSV_MAX_ROWS cap; email content-length 1 MiB cap |
+| `29c170c3` | Sky.Tui render_node/extract_text/html_text recursion depth guard (stack-overflow) — completes rt-tui |
+| `68a24273` | **codegen** Live.route closure raw `__p[i]` → `__p.get(i).cloned().unwrap_or_default()` (OOB panic) |
+
+Consolidated guardian sweep (`a34e39e4...`) re-verified the mechanical batches (ws/db/csv/email/tui) — all SOUND.
+
+**rt-core MED: DONE except 2 delicate + http_stream.** rt-tui MED: DONE.
+
+**Remaining worklist (tracked, continuing — codegen cabal-rebuild workflow proven on ghc-9.6.7):**
+- **2 delicate rt-core MED (need guardian DESIGN review):** db_with_transaction cancel-leak; ssrf/http_client/ws_client per-hop DNS-pin.
+- **rt-core MED:** http_stream detached-drain tracking. **completeness (not vuln):** email SES/SendGrid attachments.
+- **codegen MED (7 left — each needs cabal + per-shape example verify):** ExprEmitter int `/`//`%` div-by-zero (contained today, route via checked kernel for clean classification); Pattern.hs `unreachable!()`→classified helper (the in-boundary mitigation of the out-of-boundary HIGH) + tuple-arg sub-pattern binding drop; ModuleEmitter nullary-Task memoization freezes Time/Random/token (narrow predicate) + std_ui_on_submit `unreachable!()`→real impl; Project.hs rustfmt non-UTF-8-locale crash (ByteString).
+- **rt-live MED (~16), scripts (10 MED + 44 LOW), docs (44 MED + 101 LOW), LOW code (~110).** LOW tier triaged: fix real defects, disposition subjective/readability as ➖ no-defect (the vote phase that would refute false-positives was lost).
+- rsa Marvin: deferred (no upstream fix). Pattern.hs HIGH: out-of-boundary (front-end), signalled.
+
+Each remaining batch: guardian-reviewed (design review for delicate) + build-gated + committed by component.
 
 ### Deterministic tier (supply-chain + secgrep)
 
