@@ -152,7 +152,19 @@ pub fn money_set_rate<E: From<String>>(from: String, to: String, rate: Decimal) 
     }
     let from = from.trim().to_uppercase();
     let to = to.trim().to_uppercase();
+    // Reject absurd codes (real ISO-4217 / crypto tickers are ≤ ~5 chars; 16 is
+    // generous) so the registry key can't be a memory-amplification vector.
+    const MAX_CODE_LEN: usize = 16;
+    if from.len() > MAX_CODE_LEN || to.len() > MAX_CODE_LEN {
+        return SkyResult::Err("Money.setRate: currency code too long".to_string().into());
+    }
     let mut map = rates().lock().unwrap_or_else(|e| e.into_inner());
+    // Bound the registry: distinct (from,to) pairs would otherwise accumulate
+    // without limit (memory-DoS). Updating an existing pair is always allowed.
+    const MAX_RATES: usize = 4096;
+    if map.len() >= MAX_RATES && !map.contains_key(&(from.clone(), to.clone())) {
+        return SkyResult::Err("Money.setRate: rate registry is full".to_string().into());
+    }
     map.insert((from.clone(), to.clone()), rate.0);
     // Auto-inverse so consumers don't need both directions.
     // Use checked_div: the zero-guard above makes this impossible in normal
@@ -249,16 +261,23 @@ pub fn money_allocate(places: i64, parts: i64, amount: Decimal) -> Vec<Decimal> 
     // `parse::<i64>()` then REJECTS, silently dropping the remainder pennies and
     // mis-distributing the allocation. Convert via the numeric `to_i64()` (scale-
     // independent) instead of a string round-trip. (Audit 2026-06-19, correctness.)
-    let rem_int = remainder.trunc().to_i64().unwrap_or(0).max(0);
+    // Distribute the residue TOWARD ZERO by sign. The prior `.max(0)` dropped the
+    // residue entirely for a NEGATIVE total → the shares no longer summed to the
+    // input (correctness bug). For a negative remainder, |rem_int| early slots get
+    // `base - 1` (more negative); for positive, `base + 1` — either way the shares
+    // sum back to the exact input.
+    let rem_int = remainder.trunc().to_i64().unwrap_or(0);
+    let extra_slots = rem_int.unsigned_abs() as i64;
+    let step: i64 = if rem_int < 0 { -1 } else { 1 };
     let inv_scale = RD::from(factor);
     // Bound the share count: `parts` is caller-controlled; a huge value aborts the
     // process on Vec::with_capacity (and DoSes the loop). A >1e6-way split is a bug.
     if parts > 1_000_000 { return Vec::new(); }
     let mut out = Vec::with_capacity(parts as usize);
     for i in 0..parts {
-        // checked_add: base + 1 for early slots.
-        let share = if i < rem_int {
-            match base.checked_add(RD::from(1)) {
+        // base ± 1 (toward zero by sign) for the first |remainder| slots.
+        let share = if i < extra_slots {
+            match base.checked_add(RD::from(step)) {
                 Some(v) => v,
                 None => return Vec::new(),
             }
@@ -294,6 +313,18 @@ mod tests {
     fn rate_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn test_allocate_negative_total_shares_sum_to_input() {
+        // CORRECTNESS regression: a NEGATIVE total must still have its residue
+        // distributed (the old `.max(0)` dropped it → shares summed to -99.99).
+        let shares = money_allocate(2, 3, d("-100.00"));
+        assert_eq!(shares.len(), 3);
+        let sum: RD = shares.iter().fold(RD::from(0), |acc, s| acc + s.0);
+        assert_eq!(sum, RD::from_str("-100.00").unwrap(), "negative shares must sum to the input");
+        // Residue lands on the first slot, toward zero by sign (more negative).
+        assert_eq!(shares[0].0, RD::from_str("-33.34").unwrap());
     }
 
     #[test]
