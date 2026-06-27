@@ -17,6 +17,38 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 01:20 — #95 inspector half: foreign-width preservation activates the projected coercion (COMPLETE)
+
+**What.** The gating piece. The projected/UFCS call-AST builder (`try_parametric_stub`) recorded a
+method's param/return numeric types via `type_to_typeref`, which COLLAPSES every foreign width to the
+Sky carrier (`usize`/`u32`/`f32` → `i64`/`i64`/`f64`) before emitting `TypeRef::Prim`. So the #95
+codegen never saw the foreign width → `numSaturate`/`numWidenScalar` were no-ops → the wrapper passed
+raw i64 args to a foreign `widen(usize,u32,f32)` and wrapped the raw `usize` return as i64 → E0308.
+New `type_to_typeref_toplevel` preserves a DIRECT top-level numeric primitive width
+(i8..i64/isize/u8..u64/usize/f32/f64), applied at the two top-level positions in `try_parametric_stub`
+(param + return). C6: nested numerics (non-`{primitive}` nodes) delegate to the unchanged
+`type_to_typeref` (carrier-collapse kept); i128/u128 stay dropped; i64/f64 byte-identical (no regression).
+
+**End-to-end.** Fixture 98 (`runtime-rust/tests/sky/98-ffi-projected-numeric`): a TRAIT method
+`widen(&self, usize, u32, f32) -> usize` (projected/UFCS path) now emits the saturating wrapper
+(`usize::try_from` / `u32 clamp` / `f32 as` + the `numWidenScalar` return + C5 `__ret` bind) and runs
+`total=4294967308` — `w=5_000_000_000` saturates to `u32::MAX`, NOT the wrapping 705032717. Spot-checked
+88/92/97 still green. Guardian design + final CLEAN.
+
+**Local build note.** The inspector is TH-embedded into `sky`; a stale sccache release-binary mtime
+caused a source-vs-binary embed confusion (the runtime source-build collided with `CARGO_TARGET_DIR`).
+Resolved with a fresh `cargo build --release` of the inspector (no sccache) + a TH re-splice. CI builds
+the inspector from source; the committed artifact is the inspector SOURCE.
+
+**#95 COMPLETE** — numeric saturation now covers ALL FFI emit paths: argCall (#82), setValExpr/
+ctorArgOwned + Vec elements (#94), and the projected/UFCS generic wrapper (#95 codegen + inspector).
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs`, `src/Sky/Build/EmbeddedInspectorRust.hs` (comment),
+`runtime-rust/tests/sky/98-ffi-projected-numeric/*` (new), `runtime-rust/scripts/ffi-fixtures-test.sh`.
+Commit `479f461d` (codegen half `a583ce57`).
+
+---
+
 ## 2026-06-27 00:40 — #95 codegen half: SATURATING numeric coercion on the projected/UFCS path
 
 **What.** The projected/UFCS generic-wrapper emitter (`synthesiseGenericWrapper` +
