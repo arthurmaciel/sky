@@ -17,6 +17,36 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 04:30 — #73-c2 REPRODUCED + re-triaged GENERAL (not firestore-specific); leak narrowed
+
+**What.** #73's class 2 ("generic-result-hole wrappers") was assumed firestore-only. Reproduced it
+SYNTHETICALLY — it's a GENERAL inspector bug. Probe crate:
+```rust
+pub struct Store { n: i64 }
+impl Store {
+  pub fn new(n: i64) -> Store { Store { n } }
+  pub fn fetch<T>(&self) -> Result<T, String> { Err("nope".into()) }  // unconstrained return-only T
+}
+```
+`fetch<T>` (T unconstrained, return-only — a genuine HOLE) leaks a malformed binding instead of dropping:
+`_bindings.rs` emits `pub fn reshole_crate_fetch_from_store t(mut arg0: ..Store) -> SkyResult<SkyError,
+SkyResult<String,String>>` — a **literal ` t` (the type-var) IN the Rust fn name** → cargo-fail
+(`missing parameters for function definition`, `expected ... found 't'`). The `.skyi` shows
+`fetch_from_store t : Store t -> Result String t` (bogus `Store t` receiver + unresolved `t`).
+
+**Diagnosis (narrowed, not yet fully pinned).** `parse_fn_item` would DROP this (`resolve_generics` →
+`resolve_param_bounds([],Param)`=None → `bounds_are_all_serde_or_marker([])`=false → `return None` →
+`?` drops the fn). Yet it leaked as a `[pure]` METHOD wrapper — so a METHOD-binding path BYPASSES the
+resolve_generics generic-drop gate AND appends the type-var to the Rust fn name. FIX (focused effort):
+route the method-binding path through the same unconstrained-generic drop, OR drop any binding whose
+resolved name still carries a free type-var. Exact leak site needs further tracing of the method-binding
+pipeline (left for a fresh, non-fatigued pass — core inspector surgery).
+
+**Repro recipe** is the crate above + a Main that calls only `new_from_store`, built with `SKY_DCE=0`
+(forces all bindings to emit). **Affected.** docs only (probe removed; recreatable from this entry).
+
+---
+
 ## 2026-06-27 04:00 — #62 VERIFIED-RESOLVED (stale): 48/51 pass on rustc-1.92
 
 **What.** #62 claimed `48-ffi-generics` + `51-ffi-trait-methods` fail on local rustc-1.92.0 (rustdoc-shape
