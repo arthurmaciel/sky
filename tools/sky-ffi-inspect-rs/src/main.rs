@@ -4082,6 +4082,19 @@ thread_local! {
     static REACHABLE_PATHS: std::cell::RefCell<HashMap<String, String>> =
         std::cell::RefCell::new(HashMap::new());
 
+    // [WALL 5 / #66] Current crate-local alias SEE-THROUGH recursion depth. The
+    // type renderers (`rustdoc_type_to_sky` / `rustdoc_type_to_rust_str`) expand a
+    // crate-local Result/Option/non-generic alias and RECURSE on the body, which
+    // may itself reference another alias. rustc rejects a cyclic alias chain
+    // (E0275) BEFORE emitting the JSON we read, so real input is always acyclic —
+    // but this build-time tool must never stack-overflow on ANY input (a
+    // hand-crafted JSON, or a pathologically deep legitimate type tree). The
+    // `AliasDepthGuard` RAII increments this around each see-through recursion; at
+    // `ALIAS_SEE_THROUGH_MAX` the renderer SKIPS expansion and falls through to the
+    // opaque path rendering (fail-closed). Makes real the bound that
+    // `subst_self_projections` already documents it "mirrors".
+    static ALIAS_SEE_THROUGH_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+
     // Crate-local NON-generic type-alias id -> the aliased type JSON.  Lets the
     // type converters see through aliases like `uuid::Bytes = [u8; 16]` so the
     // array/slice filter drops constructors that can't take a Sky Vec<u8>.
@@ -5131,6 +5144,37 @@ fn generic_alias_body_is_result_or_option(
 /// The substitution is TOTAL: every `{ "generic": "<param>" }` whose name is a
 /// declared param is replaced, so no residual unbound type-var can survive into
 /// the rendered string (which would be an E0412 at cargo build).
+/// [WALL 5 / #66] Defense-in-depth bound on crate-local alias see-through
+/// recursion. 64 ≫ any real type-tree depth; on exceed the renderer falls
+/// through to opaque rendering (fail-closed). See `ALIAS_SEE_THROUGH_DEPTH`.
+const ALIAS_SEE_THROUGH_MAX: u32 = 64;
+
+/// RAII depth counter for the alias see-through recursion. `enter()` returns
+/// `None` when the bound is already reached (the caller must then SKIP expansion
+/// and render opaque); otherwise it returns `Some(guard)` that holds the depth
+/// incremented for the guard's lifetime and decrements on drop — so the bound is
+/// honoured across the recursive `rustdoc_type_to_*` call the caller makes.
+struct AliasDepthGuard;
+
+impl AliasDepthGuard {
+    fn enter() -> Option<AliasDepthGuard> {
+        ALIAS_SEE_THROUGH_DEPTH.with(|d| {
+            if d.get() >= ALIAS_SEE_THROUGH_MAX {
+                None
+            } else {
+                d.set(d.get() + 1);
+                Some(AliasDepthGuard)
+            }
+        })
+    }
+}
+
+impl Drop for AliasDepthGuard {
+    fn drop(&mut self) {
+        ALIAS_SEE_THROUGH_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 fn expand_generic_alias(rp: &serde_json::Value) -> Option<serde_json::Value> {
     let id = rp.get("id")?;
     let key = item_id_to_str(id);
@@ -5820,12 +5864,16 @@ fn rustdoc_type_to_sky(val: &serde_json::Value, aliases: &HashMap<String, String
         // identically to the rust-string path above, so the Sky surface and the
         // rust string the gate reads AGREE (a divergence is the classic
         // type-checks-but-cargo-fails class).  Fail-closed on arity mismatch.
-        if let Some(expanded) = expand_generic_alias(rp) {
-            return rustdoc_type_to_sky(&expanded, aliases);
-        }
-        // See through a crate-local non-generic alias (uuid::Bytes -> [u8;16]).
-        if let Some(aliased) = rp.get("id").and_then(resolve_alias) {
-            return rustdoc_type_to_sky(&aliased, aliases);
+        // [#66] The see-through recursion is depth-bounded (AliasDepthGuard); at
+        // the bound we skip expansion and render opaque (fail-closed).
+        if let Some(_g) = AliasDepthGuard::enter() {
+            if let Some(expanded) = expand_generic_alias(rp) {
+                return rustdoc_type_to_sky(&expanded, aliases);
+            }
+            // See through a crate-local non-generic alias (uuid::Bytes -> [u8;16]).
+            if let Some(aliased) = rp.get("id").and_then(resolve_alias) {
+                return rustdoc_type_to_sky(&aliased, aliases);
+            }
         }
         return resolve_path_to_sky(rp, aliases);
     }
@@ -6138,13 +6186,16 @@ fn rustdoc_type_to_rust_str(val: &serde_json::Value) -> String {
         // BEFORE the non-generic see-through, so the async-Send output gate's
         // `Result<…>`-unwrap can reach the inner type.  Fail-closed on arity
         // mismatch (returns None -> falls through to opaque rendering).
-        if let Some(expanded) = expand_generic_alias(rp) {
-            return rustdoc_type_to_rust_str(&expanded);
-        }
-        // See through a crate-local non-generic alias (uuid::Bytes -> [u8;16]),
-        // so the array/slice filter sees the real shape.
-        if let Some(aliased) = rp.get("id").and_then(resolve_alias) {
-            return rustdoc_type_to_rust_str(&aliased);
+        // [#66] depth-bounded see-through (AliasDepthGuard); fail-closed to opaque.
+        if let Some(_g) = AliasDepthGuard::enter() {
+            if let Some(expanded) = expand_generic_alias(rp) {
+                return rustdoc_type_to_rust_str(&expanded);
+            }
+            // See through a crate-local non-generic alias (uuid::Bytes -> [u8;16]),
+            // so the array/slice filter sees the real shape.
+            if let Some(aliased) = rp.get("id").and_then(resolve_alias) {
+                return rustdoc_type_to_rust_str(&aliased);
+            }
         }
         let raw_name = rp["name"]
             .as_str()
@@ -15873,6 +15924,34 @@ mod tests {
         assert!(rust.starts_with("Result<"), "outer Result must expand: {}", rust);
         // The inner stays a Box (the downstream gate, not the see-through, drops it).
         assert!(rust.contains("Box"), "inner Box must survive expansion: {}", rust);
+    }
+
+    /// [#66] A CYCLIC crate-local alias (`type DbResult<T> = Result<DbResult<T>, E>`)
+    /// — which rustc rejects as E0275 and therefore never emits, but a hand-crafted
+    /// JSON could carry — must TERMINATE via the AliasDepthGuard bound rather than
+    /// stack-overflow this build-time tool. The renderer fails closed: it expands
+    /// up to the bound then renders the inner alias OPAQUE. The test PASSING (not
+    /// hanging/aborting) is itself the termination proof; we also assert the output
+    /// is bounded + contains the opaque inner name at the truncation point.
+    #[test]
+    fn wall5_cyclic_alias_terminates_fail_closed() {
+        // body = Result<DbResult<T>, DbError>  (the first arg is the alias itself)
+        let cyclic_self = rp_with_id("DbResult", 48, vec![generic_node("T")]);
+        let body = rp_with_id("Result", 100, vec![cyclic_self, path("DbError")]);
+        install_generic_alias(generic_alias_item("DbResult", &["T"], body));
+
+        let use_site = alias_use(vec![path("Db")]);
+        // Both renderers must return (no infinite recursion) and stay bounded.
+        let rust = rustdoc_type_to_rust_str(&use_site);
+        let s = sky(&use_site);
+        assert!(rust.starts_with("Result<"), "outer Result must expand once: {}", rust);
+        assert!(rust.contains("DbResult"),
+            "inner cyclic alias must render OPAQUE at the depth bound: {}", rust);
+        // Bounded: ~one `Result<…>` wrap per level up to the cap, never unbounded.
+        assert!(rust.len() < 4096, "rendered string must be bounded: len={}", rust.len());
+        assert!(!s.is_empty(), "sky rendering must also terminate non-empty: {}", s);
+        // Depth counter must have unwound back to 0 (RAII balance).
+        ALIAS_SEE_THROUGH_DEPTH.with(|d| assert_eq!(d.get(), 0, "depth must unwind to 0"));
     }
 
     #[test]

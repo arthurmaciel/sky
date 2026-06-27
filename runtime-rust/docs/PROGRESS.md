@@ -17,6 +17,36 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 13:40 — #66 (WALL-5 hardening) — alias see-through depth-bound + provenance verified
+
+**What.** Defense-in-depth on the crate-local alias see-through (`rustdoc_type_to_sky`
+/ `rustdoc_type_to_rust_str` expand a Result/Option/non-generic alias and recurse
+on the body). rustc rejects a cyclic alias chain (E0275) BEFORE emitting the JSON
+we read, so real input is always acyclic — but this build-time tool must never
+stack-overflow on ANY input. Added an `AliasDepthGuard` RAII bound (64, fail-closed
+→ opaque rendering), making real the bound that `subst_self_projections` already
+documents it "mirrors". Both renderers' see-through branches are wrapped.
+
+**Provenance.** The "provenance-fail-closed" sub-item is ALREADY satisfied:
+`collect_generic_result_aliases` only records an alias whose body roots at a
+PROVEN std `core::result::Result` / `core::option::Option` (id via `paths`), so a
+crate-local `Result`/`Option` homonym is never expanded — pinned by the existing
+`wall5_crate_local_result_homonym_not_expanded` test. No change needed.
+
+**Residual.** The "fixture-80 !Send-param negative" is a Send-GATE e2e (not the
+alias depth) requiring a real multi-crate build → folded into the negative-fixture
+follow-up #85 (CI-coupled), not duplicated here.
+
+**Verify.** New unit test `wall5_cyclic_alias_terminates_fail_closed` (a
+self-referential `type DbResult<T> = Result<DbResult<T>, E>` terminates, renders
+the inner alias opaque, depth unwinds to 0). 220 inspector tests green; my code is
+clippy-clean (the remaining doc-lint warnings predate this change). Low-stakes
+build-time-tool robustness — no codegen/security/soundness surface, so no
+guardian-final.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (`ALIAS_SEE_THROUGH_DEPTH`
+thread-local, `AliasDepthGuard`, both renderer see-through branches + test).
+
 ## 2026-06-27 13:10 — #53 CLOSED — facade-guidance fires on the structural tell, not fn_count
 
 **What.** `sky add` of a re-export facade now prints the sub-crate guidance even
