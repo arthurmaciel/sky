@@ -86,7 +86,16 @@ guardian for code; bash -n / py_compile for scripts) then commits.
 |---|---|---|---|
 | code-1 (`224cbc03`) | 31 non-delicate runtime `.rs` (LOW+MED) | **43 fixed**, 21 dispositioned | build+clippy+557 tests + guardian **SHIP** (no rework); 3 agent-introduced clippy lints fixed by orchestrator |
 | docs+scripts (`1cd6039a`) | 77 `.md`/`.sh`/`.py` | **184 fixed**, 13 dispositioned | bash -n + py_compile all green; docs verified vs source; pre-existing WIP excluded |
-| code-2 (`w5t58b7lp`, running) | 21 swarm-1-excluded `.rs` — REMAINING LOW/MED (verify-against-current, skip already-fixed, disposition delicate) | pending | build+clippy+tests+guardian on completion |
+| code-2 (`cb971b61`) | 21 swarm-1-excluded `.rs` — REMAINING LOW/MED | **42 fixed**, 71 dispositioned (most already-fixed; delicate→orchestrator) | build+clippy+561 tests + guardian **SHIP**; 2 agent clippy lints fixed by orchestrator |
+
+**Status: every runtime `.rs`, doc, and script has been swept — all HIGH + MED + actionable LOW fixed or dispositioned-with-reason.** Three swarms (43 + 184 + 42 = 269 fixes, ~105 dispositions) + ~30 serial fixes, all guardian/gate-verified.
+
+**The genuine delicate remainder (orchestrator-owned — NOT swarm-safe; need cabal/example/design-review):**
+1. **codegen `.hs`** (≈7 MED + LOW; each needs `cabal build exe:sky` + per-shape example verify): ExprEmitter int `/`//`%` div-by-zero → checked kernel; Pattern.hs `unreachable!()`→classified runtime helper + tuple-arg binding drop; ModuleEmitter nullary-Task memoization predicate (freezes Time/Random) + std_ui_on_submit `unreachable!()`→real impl; Emitter.hs db_format_sql `?`-in-string-literal + Cargo.toml version validation; Naming/TypeEmitter/TypeRenderer LOW.
+2. **2 delicate rt-core** (design reviews): db_with_transaction cancel-leak (ROLLBACK-on-drop vs task-local routing); ssrf/http_client per-hop DNS-pin resolver.
+3. **CROSS-BACKEND / OUT-OF-RUST-BOUNDARY (signalled to user — a Rust-only change breaks Go≡Rust parity AND half-fixes):** register email-existence enumeration (Go has the same path); email case-normalization; Pattern.hs HIGH front-end exhaustiveness. **email SES/SendGrid attachments** (completeness feature). **CSV formula-injection** (policy: no lossless mitigation — orchestrator/user must choose sanitize policy). rsa Marvin (no upstream fix).
+
+**Guardian follow-ups (filed):** extend html `MAX_HTML_DEPTH` to style_inject/HtmlToVNode/diffTrees passes; jwt.rs new ≥32-byte HS256 floor is a behavior change (a short-secret `Jwt.*` caller now Errs — RFC 7518-correct, surfaced); server.rs `Vary` insert can clobber a handler-set Vary.
 
 Also fixed serially this session: console `--target rust`→`--backend rust`
 (`243465ff`, console pre-build was broken); rt-live security (console auth-gate
