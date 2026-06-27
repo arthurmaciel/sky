@@ -363,14 +363,22 @@ rustfmtFileInPlace :: FilePath -> IO ()
 rustfmtFileInPlace path = do
     exists <- doesFileExist path
     when exists $ do
-        src <- readFile path
-        _   <- Control.Exception.evaluate (length src)   -- force the read; close the handle before write-back
+        -- Best-effort: rustfmt is the lowest principle (readability) and must NEVER
+        -- fail the build. Read/write as UTF-8 BYTES (generated Rust is UTF-8) rather
+        -- than the locale-dependent readFile/writeFile (which throw on non-ASCII
+        -- content under a non-UTF-8 locale → crashed the build), and wrap the WHOLE
+        -- step in a catch-all so ANY failure (decode error, missing rustfmt,
+        -- non-zero exit, write error) leaves the valid unformatted file untouched.
         res <- Control.Exception.try
-                 (System.Process.readProcessWithExitCode "rustfmt" ["--edition", "2021"] src)
-                 :: IO (Either Control.Exception.SomeException (ExitCode, String, String))
-        case res of
-            Right (ExitSuccess, out, _) | not (null out) -> writeFile path out
-            _                                            -> return ()
+                 (do bytes <- BS.readFile path
+                     let src = T.unpack (TE.decodeUtf8 bytes)
+                     _ <- Control.Exception.evaluate (length src)
+                     (code, out, _) <- System.Process.readProcessWithExitCode "rustfmt" ["--edition", "2021"] src
+                     case code of
+                         ExitSuccess | not (null out) -> BS.writeFile path (TE.encodeUtf8 (T.pack out))
+                         _                            -> return ())
+                 :: IO (Either Control.Exception.SomeException ())
+        either (const (return ())) return res
 
 
 -- | Run the Rust code generator over the whole canonicalised program.
