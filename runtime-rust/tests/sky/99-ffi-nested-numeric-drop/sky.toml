@@ -1,0 +1,8 @@
+[project]
+name = "99-ffi-nested-numeric-drop"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+["rust.dependencies"]
+nestednum-crate = { git = "file:///home/arthur/.cache/sky/99-ffi-nested-numeric-drop-crate", branch = "master" }

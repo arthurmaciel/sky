@@ -1,0 +1,14 @@
+module Main exposing (main)
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Nestednum_crate as C
+import Std.Log exposing (println)
+main : Task Error ()
+main =
+    case C.new_from_calc 10 of
+        Ok calc ->
+            case C.scale calc 5000000000 of
+                Ok s -> if s == 4294967305 then println "nested-drop scale=4294967305 [ALL OK]" else println ("UNEXPECTED scale=" ++ String.fromInt s)
+                Err e -> println ("scale-failed: " ++ Error.toString e)
+        Err e -> println ("new-failed: " ++ Error.toString e)
