@@ -50,7 +50,15 @@ Filed follow-ups: ~40 process-internal `SKY_*` env reads via read_env_var; rende
 | `e3c8c4bd` | jwt.rs decode rejected any `aud` claim → validate_aud=false (parity); html.rs is_url_attr missing `data` (object data: XSS); file.rs temp perms 0600/0700 |
 | `fe2de983` | money.rs allocate dropped residue for negative totals (shares≠input) → sign-aware; unbounded FX registry → 16-char code + 4096-pair caps |
 
-**Next: remaining rt-core MED (auth bcrypt, csv, email, db, ws_client, http_client/ssrf, http_stream), then rt-live/tui/codegen/scripts MED, then LOW (~281). Continuing by component.**
+| `447983bb` | auth.rs bcrypt cost ceiling [4,15] (CPU-DoS) + spawn_blocking for register/login (worker starvation; timing defence preserved, fails-closed) |
+| `66d7c861` | ws_client.rs max-message 16 MiB→1 MiB (env SKY_WS_MAX_MESSAGE_BYTES; ×64 broadcast was ~1 GiB) + handshake-timeout floor (timeout≤0 no longer disables it) |
+| `911c45ae` | db.rs pool_cache unbounded across URLs → SKY_DB_MAX_POOLS cap (default 32; over-cap = uncached-but-functional) |
+
+**Deferred to focused continuations (delicate — need a guardian DESIGN review, not a rushed edit):**
+- `db.rs db_with_transaction` — open-transaction leak on future-cancellation (BEGIN issued, conn returned to pool without ROLLBACK if the body future is dropped). Fix touches transaction correctness + the task-local `TXN_CONN` routing types (sqlx `Transaction`-on-drop vs the held `PoolConnection`). MED.
+- `ssrf.rs`/`http_client.rs`/`ws_client.rs` — per-hop DNS rebinding on redirects: `check_host_not_private` validates then discards the vetted IP, leaving cross-host redirect connects unpinned (SSRF→metadata). Fix = a custom `reqwest::dns::Resolve` that pins vetted addrs (not a check-then-reconnect). MED (security).
+
+**Remaining: the 2 delicate above + rt-core (csv/email/http_stream caps), rt-live (~16), tui (depth-limit + others), codegen (~8), scripts (~10), docs (~44), LOW (~281). Continuing by component, each guardian-reviewed + build-gated.**
 
 ### Deterministic tier (supply-chain + secgrep)
 
