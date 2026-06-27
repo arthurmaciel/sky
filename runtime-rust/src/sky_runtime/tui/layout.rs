@@ -1942,14 +1942,17 @@ fn distribute_row_fill(
         return;
     }
     let n = children.len();
-    let gaps = if n > 1 { (n - 1) * gap } else { 0 };
+    // saturating_mul/add: `gap` derives from `Ui.spacing` (caller-controlled), so
+    // `(n - 1) * gap` and `non_fill + gaps` can overflow usize. The result only
+    // feeds `saturating_sub`, so saturating here never changes a valid layout.
+    let gaps = if n > 1 { gap.saturating_mul(n - 1) } else { 0 };
     let non_fill: usize = children
         .iter()
         .zip(specs)
         .filter(|(_, s)| s.is_none())
         .map(|(r, _)| r.block.width())
         .sum();
-    let remaining = content_avail.saturating_sub(non_fill + gaps);
+    let remaining = content_avail.saturating_sub(non_fill.saturating_add(gaps));
     let fill_count = specs.iter().filter(|s| s.is_some()).count();
     let mut used = 0usize;
     let mut done = 0usize;

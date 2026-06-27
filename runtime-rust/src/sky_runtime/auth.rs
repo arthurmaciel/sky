@@ -147,6 +147,12 @@ pub fn auth_verify_token<E: From<String>>(
     let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.validate_exp = true;
+    // Enforce the standard not-before window too. jsonwebtoken defaults
+    // validate_nbf = false, so a token carrying a future `nbf` (e.g. a
+    // scheduled/delayed-grant token minted elsewhere under the same secret)
+    // would otherwise be accepted before its valid-from time. Matches the
+    // documented Sky.Core.Jwt contract (signature + exp + nbf checked).
+    validation.validate_nbf = true;
     let parsed = match jsonwebtoken::decode::<serde_json::Value>(&token, &key, &validation) {
         Ok(d) => d,
         Err(e) => return SkyResult::Err(format!("jwt verify: {}", e).into()),

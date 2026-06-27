@@ -708,14 +708,31 @@ fn normalise_base_path(raw: &str) -> String {
     }
 }
 
-/// The session cookie name for a given (normalised) base path. `sky_sid` at the
-/// root; for a sub-app a base-derived DISTINCT name so this child's session
-/// cookie can never clobber the PARENT app's `sky_sid` (both would otherwise be
-/// `Path=/` and share the browser's cookie jar on the proxied paths). Go gives
-/// each sub-app a distinct `cookieName` for the same reason (live.go:2769).
+/// The session cookie name for a given (normalised) base path. At the root,
+/// `__Host-sky_sid` in secure mode (production / frame-ancestors) else `sky_sid`;
+/// for a sub-app a base-derived DISTINCT name so this child's session cookie can
+/// never clobber the PARENT app's `sky_sid` (both would otherwise be `Path=/` and
+/// share the browser's cookie jar on the proxied paths). Go gives each sub-app a
+/// distinct `cookieName` for the same reason (live.go:2769).
+///
+/// SECURITY (root, secure mode): the session cookie is the SOLE bearer credential
+/// (`sid_from_cookie` + `store.get` authorise every `/_sky/event` + `/_sky/sse`),
+/// so it gets the `__Host-` prefix — the browser then refuses any `Set-Cookie`
+/// carrying a `Domain=` attribute, closing the sibling-subdomain cookie-tossing →
+/// session-fixation vector (an attacker on `evil.example.com` with a valid cert
+/// could otherwise plant `sky_sid` for `example.com`). `__Host-` MANDATES
+/// Secure + Path=/ + no-Domain — `page_response` satisfies all three in secure
+/// mode (Secure flag set, root `cookie_path()` is `/`, no Domain attribute).
+/// Mirrors `csrf::csrf_cookie_name()`. Plain-HTTP dev keeps the bare `sky_sid`
+/// (`__Host-` requires Secure, which a browser drops over `http://`). A sub-app
+/// (Path != `/`) can never use `__Host-`, so it keeps the base-scoped name.
 fn cookie_name_for(base: &str) -> String {
     if base.is_empty() {
-        "sky_sid".to_string()
+        if csrf::cookies_secure() {
+            "__Host-sky_sid".to_string()
+        } else {
+            "sky_sid".to_string()
+        }
     } else {
         let suffix: String = base
             .chars()
@@ -763,9 +780,15 @@ fn cookie_path() -> String {
 fn page_response(sid: &str, body: &str, csrf_token: &str) -> axum::response::Response {
     use axum::response::IntoResponse;
     let html = render_page_full(sid, &live_base_path(), body, csrf_token);
-    // Session cookie now carries `Secure` in production / behind TLS (was
-    // unconditionally omitted — a downgrade hole). SameSite=Lax stays so
-    // top-level navigations keep the session.
+    // Session cookie carries `Secure` in production / frame-ancestors mode (was
+    // unconditionally omitted — a downgrade hole). NOTE the decision is
+    // ENV-gated, NOT request-scoped: `csrf::cookies_secure()` snapshots
+    // `production_from_env() || frame_ancestors().is_some()` once at process
+    // start; it does NOT inspect this request's TLS / `X-Forwarded-Proto`. A
+    // dev process fronted by a TLS proxy therefore emits a non-Secure session
+    // cookie. Request-scoped TLS detection needs trusted-proxy gating + header
+    // plumbing across the cookie-name (`__Host-`) decision and is deferred.
+    // SameSite=Lax stays so top-level navigations keep the session.
     let secure = if csrf::cookies_secure() { "; Secure" } else { "" };
     // SameSite (Go parity, live.go ~5653): a deploy opted into cross-origin
     // embedding via SKY_LIVE_FRAME_ANCESTORS needs `SameSite=None; Secure` so the

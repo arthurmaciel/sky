@@ -177,16 +177,22 @@ pub fn file_remove<E: Send + From<String> + 'static>(path: String) -> SkyTask<E,
 /// `path`, in filesystem order. Mirrors Go's `os.ReadDir` → `e.Name()`.
 pub fn file_read_dir<E: Send + From<String> + 'static>(path: String) -> SkyTask<E, Vec<String>> {
     Box::pin(async move {
-        let result = std::fs::read_dir(&path).map(|rd| {
+        // Propagate per-entry read errors instead of silently dropping them
+        // (`rd.flatten()` would discard `Err` items mid-walk, omitting entries
+        // a transient stat/readdir failure touched — Go's `os.ReadDir` surfaces
+        // such an error rather than returning a truncated list).
+        let result: Result<Vec<String>, String> = (|| {
+            let rd = std::fs::read_dir(&path).map_err(|e| format!("{}", e))?;
             let mut names: Vec<String> = Vec::new();
-            for entry in rd.flatten() {
+            for entry in rd {
+                let entry = entry.map_err(|e| format!("{}", e))?;
                 names.push(entry.file_name().to_string_lossy().into_owned());
             }
-            names
-        });
+            Ok(names)
+        })();
         match result {
             Ok(names) => ok_res(names),
-            Err(e) => SkyResult::Err(str_err(&format!("{}", e))),
+            Err(e) => SkyResult::Err(str_err(&e)),
         }
     })
 }

@@ -28,6 +28,18 @@
 
 use crate::sky_runtime::html::{is_void, Attribute, Html};
 
+/// Every style marker attr this module consumes, across all four passes. Used to
+/// strip a void TREE-ROOT's markers (see `apply_style_injections`). MUST stay in
+/// sync with the per-pass marker lists below.
+const ALL_MARKERS: &[&str] = &[
+    "data-sky-mq-q",
+    "data-sky-mq-rules",
+    "data-sky-pc-rules",
+    "data-sky-tr-rules",
+    "data-sky-tr-respect",
+    "data-sky-anim-rules",
+];
+
 /// Run every style-marker pass over the tree in Go's fixed order. Call
 /// immediately after `assign_sky_ids`, on the SAME tree that becomes both the
 /// render output AND the diff baseline (Go applies it before render + before
@@ -38,6 +50,18 @@ pub fn apply_style_injections<M>(node: &mut Html<M>) {
     inject_pass(node, &["data-sky-pc-rules"], "data-sky-pc", &|id, a| build_pc(id, a));
     inject_pass(node, &["data-sky-tr-rules", "data-sky-tr-respect"], "data-sky-tr", &|id, a| build_tr(id, a));
     inject_pass(node, &["data-sky-anim-rules"], "data-sky-anim", &|id, a| build_anim(id, a));
+    // A void element at the TREE ROOT is never self-handled (inject_pass skips
+    // void self-build, since a void tag can take no child <style>) and has no
+    // parent to hoist a sibling <style> after it (#409). Its markers would
+    // therefore survive every pass and leak as inert data-* attrs, breaking the
+    // post-condition. Strip them here. The CSS is necessarily dropped — a void
+    // root has nowhere to carry a <style> node. (A void node WITH a parent is
+    // unaffected: the parent's loop still finds its markers intact and hoists.)
+    if let Html::HElement(t, attrs, _) = node {
+        if is_void(t) {
+            strip_markers(attrs, ALL_MARKERS);
+        }
+    }
 }
 
 /// One style-injection pass over a subtree: self-handle (non-void prepends a
@@ -420,6 +444,29 @@ mod tests {
             assert_eq!(kids.len(), 2, "input + hoisted style sibling");
             assert!(matches!(&kids[0], Html::HElement(t, _, _) if t == "input"));
             assert!(matches!(&kids[1], Html::HElement(t, _, _) if t == "style"));
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn void_root_strips_its_markers() {
+        // A void element at the tree root has no parent to hoist a sibling style
+        // and is never self-handled; its markers must still be stripped so they
+        // don't leak as inert data-* attrs (post-condition).
+        let mut tree: Html<()> = Html::HElement(
+            "input".to_string(),
+            vec![attr("sky-id", "r"), attr("data-sky-pc-rules", "f|outline: none")],
+            vec![],
+        );
+        apply_style_injections(&mut tree);
+        if let Html::HElement(_, attrs, _) = &tree {
+            assert!(
+                !attrs
+                    .iter()
+                    .any(|a| matches!(a, Attribute::Attr(k, _) if k == "data-sky-pc-rules")),
+                "void-root marker must be stripped"
+            );
         } else {
             panic!("expected element");
         }

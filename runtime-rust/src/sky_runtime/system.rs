@@ -80,7 +80,10 @@ pub fn process_run<E: Send + From<String> + 'static>(
                         while end > 0 && !text.is_char_boundary(end) {
                             end -= 1;
                         }
-                        format!("{}… (output truncated)", &text[..end])
+                        // Total accessor — `end` is a char boundary <= len, so
+                        // `get` yields Some; the fallback keeps it slice-free and
+                        // clippy::indexing_slicing-clean for non-test runtime code.
+                        format!("{}… (output truncated)", text.get(..end).unwrap_or(&text))
                     } else {
                         text
                     };
@@ -160,7 +163,11 @@ pub fn system_getenv_int<E: Send + From<String> + 'static>(key: String) -> SkyTa
             Ok(v) => v
                 .trim()
                 .parse::<i64>()
-                .map_err(|_| format!("env {}: not an int: {}", key, v)),
+                // Do NOT echo the env var VALUE into the Sky-propagated error
+                // string: env vars are a primary secret store and this message
+                // flows out via Task Error → Error.toString → operator logs /
+                // user surface. Mirror system_getenv (key only).
+                .map_err(|_| format!("env {}: not a valid int", key)),
         };
         match r {
             Ok(n) => ok_res(n),
@@ -179,7 +186,8 @@ pub fn system_getenv_bool<E: Send + From<String> + 'static>(key: String) -> SkyT
             Ok(v) => match v.trim().to_lowercase().as_str() {
                 "true" | "yes" | "1" | "on" | "y" | "t" => Ok(true),
                 "false" | "no" | "0" | "off" | "n" | "f" | "" => Ok(false),
-                _ => Err(format!("env {}: not a bool: {}", key, v)),
+                // Key only — never echo the env var VALUE (secret-store leak).
+                _ => Err(format!("env {}: not a valid bool", key)),
             },
         };
         match r {

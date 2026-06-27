@@ -270,9 +270,12 @@ pub fn money_allocate(places: i64, parts: i64, amount: Decimal) -> Vec<Decimal> 
     let extra_slots = rem_int.unsigned_abs() as i64;
     let step: i64 = if rem_int < 0 { -1 } else { 1 };
     let inv_scale = RD::from(factor);
-    // Bound the share count: `parts` is caller-controlled; a huge value aborts the
-    // process on Vec::with_capacity (and DoSes the loop). A >1e6-way split is a bug.
-    if parts > 1_000_000 { return Vec::new(); }
+    // Bound the share count: `parts` is caller-controlled; a huge value both
+    // allocates a large Vec (≈16 bytes/Decimal) and runs the checked-Decimal loop
+    // once per slot — a per-call amplification vector. A "fair split" of money
+    // realistically tops out in the thousands; 100k is already extravagant, so cap
+    // there to cut the worst-case allocation + loop work 10× vs the prior 1e6 bound.
+    if parts > 100_000 { return Vec::new(); }
     let mut out = Vec::with_capacity(parts as usize);
     for i in 0..parts {
         // base ± 1 (toward zero by sign) for the first |remainder| slots.

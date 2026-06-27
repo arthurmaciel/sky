@@ -7,12 +7,18 @@ use serde_json::Value as JsonValue;
 
 /// Sky `Jwt_encodeHs256 : String -> String -> Result Error String`
 pub fn jwt_encode_hs256<E: From<String>>(secret: String, claims_json: String) -> SkyResult<E, String> {
-    // An EMPTY HMAC key is never a legitimate signing secret — the token it mints
-    // is forgeable by anyone (HMAC-SHA256 with a zero-length key). Reject it
-    // rather than emit a trivially-forgeable token. (Std.Auth enforces a 32-byte
-    // floor upstream; this catches a direct misconfigured Jwt.* caller.)
-    if secret.is_empty() {
-        return SkyResult::Err("jwt-encode: HS256 secret must not be empty".to_string().into());
+    // An HMAC key shorter than 32 bytes (256 bits) is below the RFC 7518 §3.2
+    // floor for HS256 and yields a low-entropy / forgeable signing secret —
+    // a 1-byte key mints a token anyone can re-sign. Reject it rather than emit
+    // a weakly-keyed token. This mirrors the 32-byte floor auth.rs enforces and
+    // Std.Auth applies upstream, closing the gap for a direct misconfigured
+    // Jwt.* caller that bypasses Std.Auth.
+    if secret.len() < 32 {
+        return SkyResult::Err(
+            "jwt-encode: HS256 secret must be at least 32 bytes (RFC 7518 §3.2)"
+                .to_string()
+                .into(),
+        );
     }
     let claims: JsonValue = match serde_json::from_str(&claims_json) {
         Ok(v) => v,
@@ -28,10 +34,15 @@ pub fn jwt_encode_hs256<E: From<String>>(secret: String, claims_json: String) ->
 
 /// Sky `Jwt_decodeHs256 : String -> String -> Result Error String`
 pub fn jwt_decode_hs256<E: From<String>>(secret: String, token: String) -> SkyResult<E, String> {
-    // Reject verification under an empty HMAC key — see jwt_encode_hs256. A token
-    // "verified" with a zero-length key carries no authenticity guarantee.
-    if secret.is_empty() {
-        return SkyResult::Err("jwt-decode: HS256 secret must not be empty".to_string().into());
+    // Reject verification under a sub-32-byte HMAC key — see jwt_encode_hs256.
+    // A token "verified" with a low-entropy key carries no real authenticity
+    // guarantee; mirror the 32-byte floor in auth.rs / Std.Auth (RFC 7518 §3.2).
+    if secret.len() < 32 {
+        return SkyResult::Err(
+            "jwt-decode: HS256 secret must be at least 32 bytes (RFC 7518 §3.2)"
+                .to_string()
+                .into(),
+        );
     }
     let key = DecodingKey::from_secret(secret.as_bytes());
     let mut validation = Validation::new(Algorithm::HS256);
@@ -111,7 +122,8 @@ mod tests {
 
     #[test]
     fn test_hs256_roundtrip() {
-        let secret = "my-secret".to_string();
+        // >= 32 bytes to clear the RFC 7518 §3.2 HS256 secret floor.
+        let secret = "roundtrip-secret-0123456789abcdef".to_string();
         let claims = r#"{"sub":"alice","exp":9999999999}"#.to_string();
         let token: SkyResult<String, String> = jwt_encode_hs256(secret.clone(), claims.clone());
         let token = match token { SkyResult::Ok(t) => t, SkyResult::Err(e) => panic!("encode: {}", e) };
@@ -122,12 +134,15 @@ mod tests {
 
     #[test]
     fn test_hs256_wrong_secret_fails() {
-        let token: SkyResult<String, String> = jwt_encode_hs256("right".to_string(),
+        // Both secrets >= 32 bytes (RFC 7518 §3.2 floor); they differ so verify fails.
+        let token: SkyResult<String, String> = jwt_encode_hs256(
+            "right-secret-0123456789abcdef0123".to_string(),
             r#"{"sub":"x","exp":9999999999}"#.to_string());
         let token = match token {
             SkyResult::Ok(t) => t, SkyResult::Err(e) => panic!("encode: {}", e),
         };
-        let bad: SkyResult<String, String> = jwt_decode_hs256("wrong".to_string(), token);
+        let bad: SkyResult<String, String> =
+            jwt_decode_hs256("wrong-secret-0123456789abcdef0123".to_string(), token);
         assert!(matches!(bad, SkyResult::Err(_)));
     }
 

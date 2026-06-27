@@ -557,9 +557,24 @@ async fn send_smtp<E: From<String>>(cfg: &SmtpConfig, m: &EmailMessage) -> SkyRe
     } else {
         Tls::Opportunistic(tls)
     };
+    // Validate the port range before narrowing: `cfg.port` is an i64 from Sky, so
+    // a bare `as u16` truncates (65536 → 0, 70000 → 4464, -1 → 65535) and would
+    // silently dial a wrong/garbage port. Surface a clear Err instead.
+    let port = match u16::try_from(cfg.port) {
+        Ok(p) => p,
+        Err(_) => {
+            return SkyResult::Err(
+                "email.send/Smtp: port out of range (1-65535)".to_string().into(),
+            )
+        }
+    };
+    // Explicit transport deadline matching the reqwest path's 30s bound, so a
+    // stalled SMTP peer (STARTTLS handshake is multi-round-trip) can't hold the
+    // task open on lettre's default timeout.
     let mut tb = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.host)
-        .port(cfg.port as u16)
-        .tls(tls_policy);
+        .port(port)
+        .tls(tls_policy)
+        .timeout(Some(std::time::Duration::from_secs(30)));
     if !cfg.user.is_empty() {
         tb = tb.credentials(Credentials::new(cfg.user.clone(), cfg.pass.clone()));
     }

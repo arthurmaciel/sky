@@ -174,9 +174,11 @@ where E: Send + 'static, H: IntoServerHandler<E>
 pub fn server_api<E, H>(spec: String, h: H) -> ServerRoute
 where E: Send + 'static, H: IntoServerHandler<E>
 {
-    let (method, path) = match spec.find(' ') {
-        Some(idx) if idx > 0 =>
-            (spec[..idx].trim().to_uppercase(), spec[idx + 1..].trim().to_string()),
+    // split_once is total by construction — no raw `spec[..idx]` range slice
+    // (the restriction-lint footgun if the delimiter ever became multi-byte).
+    let (method, path) = match spec.split_once(' ') {
+        Some((m, p)) if !m.is_empty() =>
+            (m.trim().to_uppercase(), p.trim().to_string()),
         _ => ("ANY".to_string(), spec.trim().to_string()),
     };
     route(&method, path, h)
@@ -292,6 +294,16 @@ fn parse_query(q: Option<&str>) -> HashMap<String, String> {
 
 fn urldecode(s: &str) -> String { form_url_decode(s) }
 
+/// Percent-decode a raw path-param value so `Server.param` matches the decoding
+/// `Server.queryParam` already applies (`RawPathParams` hands back the raw,
+/// still-escaped segment). Path segments are percent-encoded ONLY — unlike a
+/// query string a literal `+` is NOT a space here (RFC 3986 §3.3), so this uses a
+/// pure percent-decode rather than `form_url_decode` (which maps `+` → space).
+/// Lossy + total (never panics on invalid UTF-8).
+fn decode_path_param(v: &str) -> String {
+    percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned()
+}
+
 fn parse_cookies(header: &str, out: &mut HashMap<String, String>) {
     for c in header.split(';') {
         let c = c.trim();
@@ -323,7 +335,7 @@ async fn build_request(req: axum::extract::Request) -> Result<(ServerRequest, Op
     }
     let (mut parts, body) = req.into_parts();
     let params = match RawPathParams::from_request_parts(&mut parts, &()).await {
-        Ok(rpp) => rpp.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        Ok(rpp) => rpp.iter().map(|(k, v)| (k.to_string(), decode_path_param(v))).collect(),
         Err(_) => HashMap::new(),
     };
     // remoteAddr: trust the real TCP peer (ConnectInfo) by DEFAULT. Only honour a
@@ -399,7 +411,13 @@ fn to_axum_response(r: ServerResponse) -> axum::response::Response {
     let status = axum::http::StatusCode::from_u16(status_u16)
         .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = axum::http::Response::builder().status(status);
-    if !r.contentType.is_empty() {
+    // Emit the response's contentType UNLESS the handler already set a
+    // content-type via withHeader (case-insensitive). builder.header APPENDS, so
+    // emitting both would produce two `content-type` headers on the wire; an
+    // explicit handler override wins (parity with the security-headers `if-unset`
+    // policy below).
+    let has_ct_header = r.headers.keys().any(|k| k.eq_ignore_ascii_case("content-type"));
+    if !r.contentType.is_empty() && !has_ct_header {
         builder = builder.header("content-type", r.contentType.clone());
     }
     for (k, v) in &r.headers {
@@ -462,7 +480,12 @@ fn method_router(method: &str, h: ErasedHandler) -> axum::routing::MethodRouter 
 }
 
 fn strip_trailing_slash(p: &str) -> String {
-    if p.len() > 1 && p.ends_with('/') { p[..p.len() - 1].to_string() } else { p.to_string() }
+    // strip_suffix is total — drops the trailing '/' without a raw range slice,
+    // keeping a lone "/" intact (filtering out the empty result).
+    match p.strip_suffix('/') {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => p.to_string(),
+    }
 }
 
 /// Server.listen : Int -> List Route -> Task Error ()  — serves via axum/tokio.
@@ -823,14 +846,26 @@ where
                 ("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS"),
                 ("access-control-allow-headers", "Content-Type, Authorization"),
             ]);
-            if let Some(a) = allow { resp.headers.insert("access-control-allow-origin".to_string(), a); }
+            if let Some(a) = allow {
+                // A reflected SPECIFIC origin (not `*`) makes the response
+                // origin-dependent — emit `Vary: Origin` so a shared/intermediary
+                // cache can't serve one origin's ACAO to another (CORS cache
+                // poisoning). `*` is origin-independent, so no Vary needed.
+                if a != "*" { resp.headers.insert("Vary".to_string(), "Origin".to_string()); }
+                resp.headers.insert("access-control-allow-origin".to_string(), a);
+            }
             return Box::pin(async move { ok_res(resp) });
         }
         let task = h(req);
         Box::pin(async move {
             match task.await {
                 SkyResult::Ok(mut resp) => {
-                    if let Some(a) = allow { resp.headers.insert("access-control-allow-origin".to_string(), a); }
+                    if let Some(a) = allow {
+                        // See preflight branch: a reflected specific origin needs
+                        // `Vary: Origin` to be cache-safe.
+                        if a != "*" { resp.headers.insert("Vary".to_string(), "Origin".to_string()); }
+                        resp.headers.insert("access-control-allow-origin".to_string(), a);
+                    }
                     ok_res(resp)
                 }
                 other => other,
@@ -900,6 +935,14 @@ where
     })
 }
 
+/// How often (in calls) the rate-limit maps run their full-map expiry sweep.
+/// The `retain` is O(n); running it every call lets an attacker who supplies many
+/// distinct client keys (trusted-proxy mode, attacker-controlled X-Forwarded-For)
+/// turn each request into a full-map scan (CPU amplification). Amortizing the
+/// sweep to every RL_SWEEP_EVERY calls bounds that to O(n / RL_SWEEP_EVERY) per
+/// request while still reclaiming expired entries (memory stays bounded).
+const RL_SWEEP_EVERY: u64 = 256;
+
 fn unix_secs_f64() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
@@ -908,14 +951,19 @@ struct WindowEntry { start: f64, count: i64 }
 
 fn fixed_window_allow(key: &str, client: &str, limit: i64, window_secs: i64) -> bool {
     static W: OnceLock<Mutex<HashMap<(String, String), WindowEntry>>> = OnceLock::new();
+    static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let now = unix_secs_f64();
     let window = window_secs.max(1) as f64;
     let mut m = W.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
-    // Evict fully-expired entries on access so the map can't grow without bound
-    // (distinct clients/keys would otherwise accumulate forever → memory-DoS). An
-    // entry whose window has elapsed would reset to count 0 anyway, so dropping it
-    // is behaviour-preserving for the surviving (live) entries.
-    m.retain(|_, ent| now - ent.start < window);
+    // Evict fully-expired entries so the map can't grow without bound (distinct
+    // clients/keys would otherwise accumulate forever → memory-DoS). The O(n) scan
+    // is AMORTIZED to every RL_SWEEP_EVERY calls so an attacker can't force a
+    // full-map scan per request (CPU amplification). An expired entry resets to
+    // count 0 on access anyway, so a lingering one between sweeps is
+    // behaviour-preserving for the surviving (live) entries.
+    if TICK.fetch_add(1, Ordering::Relaxed).is_multiple_of(RL_SWEEP_EVERY) {
+        m.retain(|_, ent| now - ent.start < window);
+    }
     let e = m.entry((key.to_string(), client.to_string())).or_insert(WindowEntry { start: now, count: 0 });
     if now - e.start >= window { e.start = now; e.count = 0; }
     if e.count < limit.max(0) { e.count += 1; true } else { false }
@@ -928,6 +976,7 @@ struct Bucket { tokens: f64, last: f64 }
 /// consumed.
 pub fn rate_limit_allow(name: String, key: String, capacity: i64, refill_per_sec: i64) -> bool {
     static B: OnceLock<Mutex<HashMap<(String, String), Bucket>>> = OnceLock::new();
+    static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let cap = capacity.max(0) as f64;
     let now = unix_secs_f64();
     let refill = refill_per_sec.max(0) as f64;
@@ -937,12 +986,16 @@ pub fn rate_limit_allow(name: String, key: String, capacity: i64, refill_per_sec
     // idle bound is refill-INDEPENDENT: with refill_per_sec == 0 a partially-drained
     // bucket never refills to full, so the refill-only predicate would retain it
     // forever and the map grows unbounded across distinct (name, key) pairs
-    // (memory-DoS). Either way the current entry is re-created below if swept.
+    // (memory-DoS). The O(n) scan is AMORTIZED to every RL_SWEEP_EVERY calls so an
+    // attacker supplying many distinct keys can't force a full-map scan per request
+    // (CPU amplification). Either way the current entry is re-created below if swept.
     const RL_IDLE_TTL: f64 = 3600.0; // 1 h with no access → reclaim
-    m.retain(|_, bk| {
-        let refilled = (bk.tokens + (now - bk.last) * refill).min(cap);
-        refilled < cap && (now - bk.last) < RL_IDLE_TTL
-    });
+    if TICK.fetch_add(1, Ordering::Relaxed).is_multiple_of(RL_SWEEP_EVERY) {
+        m.retain(|_, bk| {
+            let refilled = (bk.tokens + (now - bk.last) * refill).min(cap);
+            refilled < cap && (now - bk.last) < RL_IDLE_TTL
+        });
+    }
     let b = m.entry((name, key)).or_insert(Bucket { tokens: cap, last: now });
     b.tokens = (b.tokens + (now - b.last) * refill).min(cap);
     b.last = now;

@@ -227,12 +227,14 @@ pub async fn ingest(headers: axum::http::HeaderMap, body: String) -> axum::respo
                 }
             }
             serde_json::Value::Object(_) => {
-                if let Some(serde_json::Value::Array(logs)) = v.get("logs").cloned() {
+                // Iterate the arrays by reference — no `.cloned()` of the whole
+                // log/span batch (fold_log + the span reader both take `&Value`).
+                if let Some(serde_json::Value::Array(logs)) = v.get("logs") {
                     for it in logs {
-                        fold_log(&it);
+                        fold_log(it);
                     }
                 }
-                if let Some(serde_json::Value::Array(spans)) = v.get("spans").cloned() {
+                if let Some(serde_json::Value::Array(spans)) = v.get("spans") {
                     for it in spans {
                         let name = it.get("name").and_then(|x| x.as_str()).unwrap_or("");
                         let dur_us = it.get("durUs").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -260,7 +262,21 @@ pub async fn ingest(headers: axum::http::HeaderMap, body: String) -> axum::respo
 /// the request path via `sanitise_path`; first-party `Log.*` does NOT route
 /// through ingest, so it is unaffected.
 fn sanitise_ingest(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).take(2048).collect()
+    // Reject control bytes AND Unicode bidi-override / zero-width / format chars
+    // (U+200B-200F, U+202A-202E, U+2066-2069, U+FEFF) — a right-to-left override
+    // or zero-width joiner in an untrusted log message can still spoof / reorder
+    // a line in the operator's terminal even though it's not an ASCII control.
+    s.chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(c,
+                    '\u{200B}'..='\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{FEFF}')
+        })
+        .take(2048)
+        .collect()
 }
 
 /// Fold one ingested log object `{level, message}` into the local rings.

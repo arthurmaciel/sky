@@ -123,10 +123,28 @@ async fn do_connect<E: From<String> + Send + 'static>(
         Ok(r) => r,
         Err(e) => return SkyResult::Err(format!("WebSocket.connect {}: bad url: {}", url, e).into()),
     };
+    // Fail CLOSED on an unparseable caller-supplied header: a credential (e.g.
+    // an Authorization bearer) that can't be attached must abort the connect,
+    // never connect unauthenticated. Echo only the header NAME (k) in the error
+    // — never the value (v), which may carry the secret.
     for (k, v) in &headers {
-        if let (Ok(name), Ok(val)) = (k.parse::<HeaderName>(), HeaderValue::from_str(v)) {
-            req.headers_mut().insert(name, val);
-        }
+        let name = match k.parse::<HeaderName>() {
+            Ok(n) => n,
+            Err(_) => {
+                return SkyResult::Err(
+                    format!("WebSocket.connect {}: invalid header name {:?}", url, k).into(),
+                )
+            }
+        };
+        let val = match HeaderValue::from_str(v) {
+            Ok(val) => val,
+            Err(_) => {
+                return SkyResult::Err(
+                    format!("WebSocket.connect {}: invalid value for header {:?}", url, k).into(),
+                )
+            }
+        };
+        req.headers_mut().insert(name, val);
     }
     // Cap inbound frame/message size to prevent a remote server from forcing the
     // client to buffer an arbitrarily large payload. Default 1 MiB (matches the
@@ -174,20 +192,24 @@ async fn do_connect<E: From<String> + Send + 'static>(
                         url
                     ).into());
                 }
-                let tcp = match tokio::net::TcpStream::connect(addr).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return SkyResult::Err(format!(
-                            "WebSocket.connect {}: pinned dial {} failed: {}",
-                            url, addr, e
-                        ).into())
-                    }
-                };
-                Box::pin(tokio_tungstenite::client_async_with_config(
-                    req,
-                    tokio_tungstenite::MaybeTlsStream::Plain(tcp),
-                    Some(ws_config),
-                ))
+                // Dial INSIDE the future so the single handshake timeout below
+                // also bounds the pinned TCP connect — otherwise an unreachable
+                // / silently-stalling pinned addr would hang here, outside the
+                // timeout guard, leaking the task + FD.
+                Box::pin(async move {
+                    let tcp = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
+                        tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
+                            e.kind(),
+                            format!("pinned dial {} failed: {}", addr, e),
+                        ))
+                    })?;
+                    tokio_tungstenite::client_async_with_config(
+                        req,
+                        tokio_tungstenite::MaybeTlsStream::Plain(tcp),
+                        Some(ws_config),
+                    )
+                    .await
+                })
             }
             None => {
                 Box::pin(tokio_tungstenite::connect_async_with_config(req, Some(ws_config), false))
@@ -408,12 +430,21 @@ fn ws_subscribed() -> &'static Mutex<std::collections::HashSet<(i64, &'static st
 fn ws_mark_subscribed(socket_id: i64, kind: &'static str) -> bool {
     ws_subscribed().lock().unwrap_or_else(|e| e.into_inner()).insert((socket_id, kind))
 }
+// True iff the socket is currently in the registry. Gate ws_mark_subscribed on
+// this (registry-check FIRST, short-circuiting the insert) so subscribing to a
+// never-connected / already-closed id doesn't leave a permanent marker behind
+// (socket ids are monotonic, so a leaked marker is never reclaimed by
+// deregister). The guard drops at return, so the registry + ws_subscribed locks
+// are never held simultaneously.
+fn ws_registered(socket_id: i64) -> bool {
+    registry().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&socket_id)
+}
 
 /// onMessage : (WebSocketMessage -> msg) -> Sub msg
 pub fn sub_subscribe_ws_message<M, F>(socket_id: i64, to_msg: F) -> SkySub<M>
 where M: Send + 'static, F: Fn(WsClientMessage) -> M + Send + Sync + 'static {
     SkySub::Source(Box::new(move |emit| {
-        if ws_mark_subscribed(socket_id, "message") {
+        if ws_registered(socket_id) && ws_mark_subscribed(socket_id, "message") {
             tokio::spawn(async move {
                 let mut rx = match subscribe_events(socket_id) { Some(rx) => rx, None => return };
                 loop {
@@ -437,7 +468,7 @@ where M: Send + 'static, F: Fn(WsClientMessage) -> M + Send + Sync + 'static {
 pub fn sub_subscribe_ws_open<M>(socket_id: i64, msg: M) -> SkySub<M>
 where M: Send + 'static {
     SkySub::Source(Box::new(move |emit| {
-        if ws_mark_subscribed(socket_id, "open") && registry().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&socket_id) {
+        if ws_registered(socket_id) && ws_mark_subscribed(socket_id, "open") {
             emit(msg);
         }
         tokio::spawn(async {})
@@ -448,7 +479,7 @@ where M: Send + 'static {
 pub fn sub_subscribe_ws_close<M, F>(socket_id: i64, to_msg: F) -> SkySub<M>
 where M: Send + 'static, F: Fn(WsCloseCode) -> M + Send + Sync + 'static {
     SkySub::Source(Box::new(move |emit| {
-        if ws_mark_subscribed(socket_id, "close") {
+        if ws_registered(socket_id) && ws_mark_subscribed(socket_id, "close") {
             tokio::spawn(async move {
                 let mut rx = match subscribe_events(socket_id) { Some(rx) => rx, None => return };
                 loop {
@@ -470,7 +501,7 @@ where M: Send + 'static, F: Fn(WsCloseCode) -> M + Send + Sync + 'static {
 pub fn sub_subscribe_ws_error<E, M, F>(socket_id: i64, to_msg: F) -> SkySub<M>
 where E: From<String> + Send + 'static, M: Send + 'static, F: Fn(E) -> M + Send + Sync + 'static {
     SkySub::Source(Box::new(move |emit| {
-        if ws_mark_subscribed(socket_id, "error") {
+        if ws_registered(socket_id) && ws_mark_subscribed(socket_id, "error") {
             tokio::spawn(async move {
                 let mut rx = match subscribe_events(socket_id) { Some(rx) => rx, None => return };
                 loop {

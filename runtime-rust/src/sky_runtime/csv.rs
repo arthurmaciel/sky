@@ -47,10 +47,29 @@ fn parse_delim<E: From<String>>(text: &str, delim: u8) -> SkyResult<E, CsvDoc> {
         Ok(h) => h.iter().map(|s| s.to_string()).collect(),
         Err(e) => return SkyResult::Err(format!("Csv.parse: {}", e).into()),
     };
+    // Row cap: a large/untrusted input would otherwise accumulate unbounded into
+    // `rows`. Bound it (SKY_CSV_MAX_ROWS, default 10M) → Err rather than OOM.
+    // Mirrors csv_parse_stream_from_file's cap.
+    let max_rows: usize = std::env::var("SKY_CSV_MAX_ROWS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(10_000_000);
     let mut rows = Vec::new();
     for rec in rdr.records() {
         match rec {
-            Ok(r) => rows.push(r.iter().map(|s| s.to_string()).collect()),
+            Ok(r) => {
+                if rows.len() >= max_rows {
+                    return SkyResult::Err(
+                        format!(
+                            "Csv.parse: exceeds row cap of {} (raise SKY_CSV_MAX_ROWS)",
+                            max_rows
+                        )
+                        .into(),
+                    );
+                }
+                rows.push(r.iter().map(|s| s.to_string()).collect());
+            }
             Err(e) => return SkyResult::Err(format!("Csv.parse: {}", e).into()),
         }
     }

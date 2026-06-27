@@ -278,7 +278,16 @@ pub fn crypto_aes_gcm_decrypt<E: From<String>>(key: String, encoded: String) -> 
         Err(e) => return SkyResult::Err(format!("Crypto.aesGcmDecrypt: {}", e).into()),
     };
     match cipher.decrypt(Nonce::from_slice(nonce_bytes), ct) {
-        Ok(pt) => SkyResult::Ok(String::from_utf8_lossy(&pt).into_owned()),
+        // A Sky String is UTF-8 by construction. Go's oracle returns string(pt)
+        // (Go strings are arbitrary bytes), but lossy-replacing invalid UTF-8 here
+        // would silently corrupt the plaintext. Reject non-UTF-8 plaintext with a
+        // structured Err instead — total, and surfaces the mismatch at the boundary.
+        Ok(pt) => match String::from_utf8(pt) {
+            Ok(s) => SkyResult::Ok(s),
+            Err(_) => SkyResult::Err(
+                "Crypto.aesGcmDecrypt: decrypted plaintext is not valid UTF-8".to_string().into(),
+            ),
+        },
         Err(e) => SkyResult::Err(format!("Crypto.aesGcmDecrypt: {}", e).into()),
     }
 }
@@ -318,7 +327,14 @@ pub fn crypto_chacha20_decrypt<E: From<String>>(key: String, encoded: String) ->
         Err(e) => return SkyResult::Err(format!("Crypto.chacha20Decrypt: {}", e).into()),
     };
     match cipher.decrypt(Nonce::from_slice(nonce_bytes), ct) {
-        Ok(pt) => SkyResult::Ok(String::from_utf8_lossy(&pt).into_owned()),
+        // A Sky String is UTF-8 by construction (see aesGcmDecrypt note). Reject
+        // non-UTF-8 plaintext with a structured Err rather than lossy-corrupting it.
+        Ok(pt) => match String::from_utf8(pt) {
+            Ok(s) => SkyResult::Ok(s),
+            Err(_) => SkyResult::Err(
+                "Crypto.chacha20Decrypt: decrypted plaintext is not valid UTF-8".to_string().into(),
+            ),
+        },
         Err(e) => SkyResult::Err(format!("Crypto.chacha20Decrypt: {}", e).into()),
     }
 }

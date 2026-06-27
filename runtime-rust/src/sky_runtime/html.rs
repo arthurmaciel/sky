@@ -152,15 +152,38 @@ pub fn render_html<M>(node: &Html<M>) -> String {
     s
 }
 
+/// Maximum Html nesting depth the renderer and the sky-id stamper descend.
+/// The Html tree is produced by the Sky `view` from Model, and Model commonly
+/// holds attacker-influenced data (nested comments / replies / a worst-case
+/// string folded into a chain of wrapper elements). Recursing once per nesting
+/// level with no cap would overflow the thread stack and ABORT the whole
+/// process — a panic the no-runtime-error thesis forbids. At the cap we stop
+/// descending (deeper nodes are not emitted / not stamped) rather than recurse
+/// further: a truncated render is strictly better than a process abort, and no
+/// legitimate UI nests anywhere near this deep.
+const MAX_HTML_DEPTH: usize = 1024;
+
 fn render_into<M>(node: &Html<M>, s: &mut String) {
-    render_into_ctx(node, s, None, false)
+    render_into_ctx(node, s, None, false, 0)
 }
 
 // `select_value`: when this node renders as a direct child of a `<select>` that
 // carries a value, the chosen value is threaded here so the matching `<option>`
 // flips `selected` (Go renderVNode, live.go:432-453). `raw_text`: set when the
 // parent is `<script>`/`<style>` so HText children emit verbatim — see SECURITY.
-fn render_into_ctx<M>(node: &Html<M>, s: &mut String, select_value: Option<&str>, raw_text: bool) {
+fn render_into_ctx<M>(
+    node: &Html<M>,
+    s: &mut String,
+    select_value: Option<&str>,
+    raw_text: bool,
+    depth: usize,
+) {
+    // Bounded descent: a tree deeper than the cap is dropped here rather than
+    // recursed into (see MAX_HTML_DEPTH). The parent has already emitted its
+    // open tag and will emit its close tag, so the output stays well-formed.
+    if depth >= MAX_HTML_DEPTH {
+        return;
+    }
     match node {
         // SECURITY: verbatim (un-escaped) text is reachable ONLY here, with
         // raw_text=true, which is set ONLY when the parent tag is the literal
@@ -190,7 +213,7 @@ fn render_into_ctx<M>(node: &Html<M>, s: &mut String, select_value: Option<&str>
             if tag == "!doctype-wrapper" {
                 s.push_str("<!DOCTYPE html>");
                 for c in kids {
-                    render_into_ctx(c, s, None, false);
+                    render_into_ctx(c, s, None, false, depth.saturating_add(1));
                 }
                 return;
             }
@@ -379,7 +402,7 @@ fn render_into_ctx<M>(node: &Html<M>, s: &mut String, select_value: Option<&str>
                 None
             };
             for c in kids {
-                render_into_ctx(c, s, child_select_value, raw_body);
+                render_into_ctx(c, s, child_select_value, raw_body, depth.saturating_add(1));
             }
             s.push_str("</");
             s.push_str(tag);
@@ -575,6 +598,17 @@ fn sanitise_url_attr<'a>(name: &str, value: &'a str) -> &'a str {
 /// and named form fields keep identity across reorder. Mirrors Go `assignSkyIDs`
 /// / `skyIDKey` (`runtime-go/rt/live.go`).
 pub fn assign_sky_ids<M>(node: &mut Html<M>, path: &str) {
+    assign_sky_ids_depth(node, path, 0)
+}
+
+// Same bounded-descent rationale as render_into_ctx (see MAX_HTML_DEPTH): the
+// stamper recurses once per nesting level, so an attacker-influenced deep tree
+// would overflow the stack. Stop descending at the cap. Kept in step with the
+// renderer's cap so a node the renderer drops is also left unstamped.
+fn assign_sky_ids_depth<M>(node: &mut Html<M>, path: &str, depth: usize) {
+    if depth >= MAX_HTML_DEPTH {
+        return;
+    }
     if let Html::HElement(_tag, attrs, kids) = node {
         set_attr(attrs, "sky-id", path);
         let mut idx = 0usize;
@@ -586,7 +620,7 @@ pub fn assign_sky_ids<M>(node: &mut Html<M>, path: &str) {
                     seg.push_str(&key);
                 }
                 idx += 1;
-                assign_sky_ids(child, &seg);
+                assign_sky_ids_depth(child, &seg, depth.saturating_add(1));
             }
         }
     }

@@ -15,7 +15,7 @@
 //! unspecified, or v4-mapped-private. OFF by default so dev against `localhost`
 //! keeps working.
 
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use url::Url;
 
 /// Returns `true` when `SKY_HTTP_DENY_PRIVATE` is set to a truthy value
@@ -35,11 +35,13 @@ pub(crate) fn ssrf_deny_private_enabled() -> bool {
 /// - link-local      (169.254/16, fe80::/10)
 /// - unique-local    (fc00::/7 — fc00:: and fd00::)
 /// - unspecified     (0.0.0.0, ::)
+/// - this-network    (0.0.0.0/8 — RFC 1122; whole /8, not just 0.0.0.0)
 /// - CGNAT/shared    (100.64.0.0/10 — RFC 6598; cloud internal hosts live here)
 /// - IETF protocol   (192.0.0.0/24 — incl. 192.0.0.192)
 /// - benchmarking    (198.18.0.0/15 — RFC 2544)
 /// - reserved/bcast  (240.0.0.0/4 — incl. 255.255.255.255)
 /// - v4-mapped IPv6  (::ffff:0:0/96) whose embedded v4 is in the above ranges
+/// - NAT64           (64:ff9b::/96) / 6to4 (2002::/16) whose embedded v4 is private
 ///
 /// The std `Ipv4Addr` predicates for CGNAT / benchmarking / reserved are
 /// nightly-only (`is_shared`/`is_benchmarking`/`is_reserved`), so the extra
@@ -54,6 +56,7 @@ pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
                 || v4.is_private()
                 || v4.is_link_local()
                 || v4.is_unspecified()
+                || a == 0                             // 0.0.0.0/8 "this host on this network" (RFC 1122)
                 || (a == 100 && (b & 0xc0) == 0x40)   // 100.64.0.0/10
                 || (a == 192 && b == 0 && c == 0)     // 192.0.0.0/24
                 || (a == 198 && (b & 0xfe) == 18)     // 198.18.0.0/15
@@ -63,14 +66,37 @@ pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
             if v6.is_loopback() || v6.is_unspecified() {
                 return true;
             }
+            // Slice-pattern destructure (not indexing) → provably total, no panic site.
+            let [s0, s1, s2, _s3, _s4, _s5, s6, s7] = v6.segments();
             // Link-local: fe80::/10
-            let seg = v6.segments();
-            if (seg[0] & 0xffc0) == 0xfe80 {
+            if (s0 & 0xffc0) == 0xfe80 {
                 return true;
             }
             // Unique-local: fc00::/7 (covers fc00:: and fd00::)
-            if (seg[0] & 0xfe00) == 0xfc00 {
+            if (s0 & 0xfe00) == 0xfc00 {
                 return true;
+            }
+            // NAT64: 64:ff9b::/96 embeds the destination IPv4 in the low 32 bits.
+            // to_ipv4_mapped/to_ipv4 miss it (high bits non-zero), so a private v4
+            // reachable through a NAT64 gateway would slip past the v4 checks below.
+            if s0 == 0x0064 && s1 == 0xff9b {
+                let v4 = Ipv4Addr::new(
+                    (s6 >> 8) as u8,
+                    (s6 & 0xff) as u8,
+                    (s7 >> 8) as u8,
+                    (s7 & 0xff) as u8,
+                );
+                return is_private_ip(IpAddr::V4(v4));
+            }
+            // 6to4: 2002::/16 embeds the IPv4 in segments 1..=2 (2002:V4HI:V4LO::/48).
+            if s0 == 0x2002 {
+                let v4 = Ipv4Addr::new(
+                    (s1 >> 8) as u8,
+                    (s1 & 0xff) as u8,
+                    (s2 >> 8) as u8,
+                    (s2 & 0xff) as u8,
+                );
+                return is_private_ip(IpAddr::V4(v4));
             }
             // v4-mapped: ::ffff:0:0/96
             if let Some(v4) = v6.to_ipv4_mapped() {
@@ -192,6 +218,18 @@ pub(crate) fn ssrf_pinned_ws_addr(url: &str) -> Result<Option<SocketAddr>, Strin
 /// returning the resolved address.  Used in the redirect policy callback
 /// where we only have a URL and cannot rebuild the client.
 ///
+/// SECURITY — residual redirect-hop rebind window: unlike the initial-request
+/// path (which PINS the vetted IP into reqwest's resolver via
+/// `resolve_to_addrs`, closing the TOCTOU per the doc on
+/// `resolve_first_non_private_addr`), this validate-then-discard call leaves a
+/// gap: the address that passed the check here is NOT the address the redirect
+/// hop connects to — reqwest re-resolves the host at connect time, so a DNS
+/// rebind between this check and the TCP connect can still reach a private host.
+/// Fully closing it needs a custom `reqwest::dns::Resolve` that runs
+/// `is_private_ip` at resolution time for every hop (tracked as a redesign;
+/// see the deferred SSRF finding). Operators needing a hard guarantee today
+/// should disable redirect following on the client.
+///
 /// Returns `Ok(())` if allowed, `Err(message)` if blocked.
 fn check_host_not_private(host: &str) -> Result<(), String> {
     resolve_first_non_private_addr(host).map(|_| ())
@@ -308,6 +346,36 @@ mod tests {
         assert!(is_private_ip("::ffff:192.168.1.1".parse().unwrap()));
         // ::ffff:127.0.0.1 — v4-mapped loopback
         assert!(is_private_ip("::ffff:127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_this_network_v4() {
+        // 0.0.0.0/8 "this host on this network" (RFC 1122) — whole /8, not just 0.0.0.0.
+        assert!(is_private_ip("0.0.0.0".parse().unwrap()));
+        assert!(is_private_ip("0.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("0.255.255.255".parse().unwrap()));
+        // Boundary just above the /8 must stay public.
+        assert!(!is_private_ip("1.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_nat64_embedded_private() {
+        // 64:ff9b::/96 embeds the destination IPv4 in the low 32 bits.
+        assert!(is_private_ip("64:ff9b::7f00:1".parse().unwrap()));   // → 127.0.0.1
+        assert!(is_private_ip("64:ff9b::a9fe:a9fe".parse().unwrap())); // → 169.254.169.254 (AWS IMDS)
+        assert!(is_private_ip("64:ff9b::c0a8:101".parse().unwrap()));  // → 192.168.1.1
+        // NAT64 wrapping a public v4 stays public.
+        assert!(!is_private_ip("64:ff9b::101:101".parse().unwrap()));  // → 1.1.1.1
+    }
+
+    #[test]
+    fn is_private_ip_6to4_embedded_private() {
+        // 2002::/16 embeds the IPv4 in segments 1..=2 (2002:V4HI:V4LO::).
+        assert!(is_private_ip("2002:7f00:1::1".parse().unwrap()));   // → 127.0.0.1
+        assert!(is_private_ip("2002:a9fe:a9fe::1".parse().unwrap())); // → 169.254.169.254
+        assert!(is_private_ip("2002:c0a8:101::1".parse().unwrap()));  // → 192.168.1.1
+        // 6to4 wrapping a public v4 stays public.
+        assert!(!is_private_ip("2002:101:101::1".parse().unwrap()));  // → 1.1.1.1
     }
 
     #[test]

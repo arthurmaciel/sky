@@ -64,8 +64,19 @@ pub fn list_range(lo: i64, hi: i64) -> Vec<i64> {
     if hi < lo { return Vec::new(); }
     // Bound the allocation: lo/hi are caller-controlled; an absurd span (e.g.
     // 0..i64::MAX) would OOM. Cap at 10M elements (any real list is far smaller).
+    // Over the cap, emit the first 10M (a correct PREFIX) plus a structured warn,
+    // never a silently-wrong empty list — `[]` for `List.range 1 20000000` is a
+    // wrong result for input Sky's types accept, far more surprising than a
+    // truncated-with-warning span.
+    const CAP: usize = 10_000_000;
     let n = (hi as i128) - (lo as i128) + 1;
-    if n > 10_000_000 { return Vec::new(); }
+    if n > CAP as i128 {
+        eprintln!(
+            "[sky.list] List.range: span of {n} elements exceeds the {CAP}-element \
+             allocation cap; returning the first {CAP} only"
+        );
+        return (lo..=hi).take(CAP).collect();
+    }
     (lo..=hi).collect()
 }
 pub fn list_indexed_map<T0, T1>(f: impl Fn(i64, T0) -> T1 + Clone, list: Vec<T0>) -> Vec<T1> {

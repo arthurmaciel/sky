@@ -40,7 +40,6 @@
 
 use super::*;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 // SSRF deny-private helpers live in the reqwest-free `ssrf` module (so the
 // WebSocket client can validate URLs without linking reqwest). The reqwest-
 // coupled `ssrf_apply` + the request executor below import the three they use.
@@ -135,20 +134,26 @@ pub(crate) fn ssrf_apply(
 // ---------------------------------------------------------------------------
 
 async fn do_request<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyResult<E, HttpResponse> {
-    let deny_private = ssrf_deny_private_enabled();
-
-    // Pre-send SSRF check + DNS-rebinding pin (when guard is enabled).
-    //
-    // We resolve the host once here, verify it is non-private, and then
-    // instruct reqwest to connect to that exact `SocketAddr` via
-    // `resolve_to_addrs`.  Because reqwest's DNS override is applied at
-    // client-build time and wins over any subsequent OS-level DNS lookup,
-    // a rebind that returns a private address at TCP-connect time has no
-    // effect — the connection goes to the vetted IP regardless.
-    let pinned_host_addr: Option<(String, SocketAddr)> = if deny_private {
-        // Validate URL structure and scheme first.
-        let parsed = match reqwest::Url::parse(&req.url) {
-            Ok(u) => u,
+    // This surface (Http.get/post/request) accepts only http/https — ws/wss is
+    // the WebSocket client's surface. When the SSRF guard is on, enforce that
+    // narrower scheme set here, then delegate the host-resolve + DNS-rebinding
+    // pin + per-redirect re-check to the SHARED `ssrf_apply` (single source of
+    // truth — no second hand-rolled copy of the guard that could drift out of
+    // sync with the one every other outbound surface uses).
+    if ssrf_deny_private_enabled() {
+        match reqwest::Url::parse(&req.url) {
+            Ok(u) => {
+                let scheme = u.scheme();
+                if scheme != "http" && scheme != "https" {
+                    return SkyResult::Err(
+                        format!(
+                            "http: blocked: scheme {:?} is not http/https (SKY_HTTP_DENY_PRIVATE)",
+                            scheme
+                        )
+                        .into(),
+                    );
+                }
+            }
             Err(e) => {
                 return SkyResult::Err(
                     format!(
@@ -158,75 +163,33 @@ async fn do_request<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyRe
                     .into(),
                 );
             }
-        };
-        let scheme = parsed.scheme();
-        if scheme != "http" && scheme != "https" {
-            return SkyResult::Err(
-                format!(
-                    "http: blocked: scheme {:?} is not http/https (SKY_HTTP_DENY_PRIVATE)",
-                    scheme
-                )
-                .into(),
-            );
         }
-        let host = match parsed.host_str() {
-            Some(h) => h.to_owned(),
-            None => {
-                return SkyResult::Err(
-                    "http: blocked: URL has no host (SKY_HTTP_DENY_PRIVATE)".to_string().into(),
-                );
-            }
-        };
-        // Resolve + validate; get back the vetted SocketAddr for pinning.
-        match resolve_first_non_private_addr(&host) {
-            Ok(addr) => Some((host, addr)),
-            Err(msg) => return SkyResult::Err(msg.into()),
-        }
-    } else {
-        None
-    };
-
-    let mut builder = reqwest::Client::builder();
-
-    // Pin DNS to the vetted address so reqwest cannot re-resolve to a
-    // different (potentially private) IP at connect time.
-    if let Some((ref host, vetted_addr)) = pinned_host_addr {
-        builder = builder.resolve_to_addrs(host.as_str(), &[vetted_addr]);
     }
 
-    builder = if req.followRedirects {
-        if deny_private {
-            // Redirect policy that re-applies the SSRF check on every hop.
-            let max = req.maxRedirects.max(0) as usize;
-            builder.redirect(reqwest::redirect::Policy::custom(move |attempt| {
-                if attempt.previous().len() >= max {
-                    return attempt.error(format!(
-                        "http: too many redirects (max {})",
-                        max
-                    ));
-                }
-                // Check the redirect target URL.
-                let next_url = attempt.url().as_str();
-                if let Err(msg) = ssrf_check_url(next_url) {
-                    return attempt.error(msg);
-                }
-                attempt.follow()
-            }))
-        } else {
-            builder.redirect(reqwest::redirect::Policy::limited(req.maxRedirects.max(0) as usize))
-        }
-    } else {
-        builder.redirect(reqwest::redirect::Policy::none())
+    let builder = reqwest::Client::builder();
+    let mut builder = match ssrf_apply(builder, &req.url, req.followRedirects, req.maxRedirects) {
+        Ok(b) => b,
+        Err(e) => return SkyResult::Err(e.into()),
     };
-    if req.timeout > 0 {
-        builder = builder.timeout(std::time::Duration::from_millis(req.timeout as u64));
-    }
+
+    // Always install a request deadline. A Sky-controllable `timeout <= 0`
+    // would otherwise leave the request with no deadline (slowloris / hung-
+    // connection vector), so floor it to 30 s instead of disabling it.
+    let timeout_ms = if req.timeout > 0 { req.timeout as u64 } else { 30_000 };
+    builder = builder.timeout(std::time::Duration::from_millis(timeout_ms));
+
     let client = match builder.build() {
         Ok(c) => c,
         Err(e) => return SkyResult::Err(format!("http: client build failed: {}", e).into()),
     };
-    let method = reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes())
-        .unwrap_or(reqwest::Method::GET);
+    let method = match reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes()) {
+        Ok(m) => m,
+        Err(_) => {
+            return SkyResult::Err(
+                format!("http: invalid method {:?}", req.method).into(),
+            );
+        }
+    };
     let mut rb = client.request(method, &req.url);
     for (k, v) in &req.headers {
         rb = rb.header(k.as_str(), v.as_str());

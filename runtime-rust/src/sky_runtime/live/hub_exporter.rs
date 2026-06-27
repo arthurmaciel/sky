@@ -42,6 +42,15 @@ const MIN_INTERVAL_MS: u64 = 100;
 const MIN_TOKEN_BYTES: usize = 32;
 /// Max batches held in the retry spool before the oldest is evicted.
 const SPOOL_MAX_BATCHES: usize = 256;
+/// Total bytes of spooled batch JSON before the oldest is evicted (Go parity:
+/// `SKY_CONSOLE_SPOOL_MAX_BYTES` default 100 MB). Bounds the spool by size, not
+/// just by batch count — a single batch can be large.
+const SPOOL_MAX_BYTES: usize = 100 * 1024 * 1024;
+/// Max accumulated entries (logs + spans) held between flushes before an early
+/// flush is forced. Bounds the in-memory accumulator by count rather than only
+/// by the flush interval — a high-rate producer can otherwise grow it without
+/// bound (the channel stays near-empty as the batcher drains it eagerly).
+const MAX_BATCH_ENTRIES: usize = 4096;
 
 /// One telemetry record queued for the exporter.
 pub(crate) enum Entry {
@@ -57,8 +66,12 @@ static SENDER: OnceLock<mpsc::Sender<Entry>> = OnceLock::new();
 /// Enable the remote-hub OTLP exporter from env. No-op unless `SKY_CONSOLE_HUB`
 /// is set. Refuses a too-short token (Go parity). Idempotent; call once at boot.
 pub async fn enable_from_env() {
+    // Trim ONCE so the URL we validate is the exact one we push to. A
+    // leading-whitespace value (" https://hub") otherwise passes the scheme
+    // check (which trims) yet leaves the space in `base`, so every push fails
+    // with an invalid URL.
     let hub = match std::env::var(HUB_ENV) {
-        Ok(h) if !h.is_empty() => h,
+        Ok(h) if !h.trim().is_empty() => h.trim().to_string(),
         _ => return,
     };
     if SENDER.get().is_some() {
@@ -78,7 +91,7 @@ pub async fn enable_from_env() {
     // `http://localhost.evil.com`, leaking the bearer token over cleartext to an
     // attacker host. Accept https://, or http:// ONLY when the host is exactly a
     // loopback name/address.
-    let scheme_ok = match reqwest::Url::parse(hub.trim()) {
+    let scheme_ok = match reqwest::Url::parse(&hub) {
         Ok(u) => {
             u.scheme() == "https"
                 || (u.scheme() == "http"
@@ -129,7 +142,13 @@ async fn batcher(
     service: String,
     interval_ms: u64,
 ) {
-    let client = reqwest::Client::new();
+    // Cap each push so a hung/black-holed hub (TCP handshake completes, no HTTP
+    // response — slowloris) can't wedge the exporter task forever.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let mut logs: Vec<(u64, String, String)> = Vec::new();
     let mut spans: Vec<(u64, String, u64, bool)> = Vec::new();
     let mut spool: VecDeque<OtlpBatch> = VecDeque::new();
@@ -143,8 +162,18 @@ async fn batcher(
                     // Best-effort ack — ignore send errors (caller may have timed out).
                     let _ = ack.send(());
                 }
-                Some(Entry::Log { ts_ms, level, message }) => logs.push((ts_ms, level, message)),
-                Some(Entry::Span { ts_ms, name, dur_us, ok }) => spans.push((ts_ms, name, dur_us, ok)),
+                Some(Entry::Log { ts_ms, level, message }) => {
+                    logs.push((ts_ms, level, message));
+                    if logs.len() + spans.len() >= MAX_BATCH_ENTRIES {
+                        flush(&client, &base, &token, &service, &mut logs, &mut spans, &mut spool).await;
+                    }
+                }
+                Some(Entry::Span { ts_ms, name, dur_us, ok }) => {
+                    spans.push((ts_ms, name, dur_us, ok));
+                    if logs.len() + spans.len() >= MAX_BATCH_ENTRIES {
+                        flush(&client, &base, &token, &service, &mut logs, &mut spans, &mut spool).await;
+                    }
+                }
                 None => {
                     flush(&client, &base, &token, &service, &mut logs, &mut spans, &mut spool).await;
                     break;
@@ -220,11 +249,22 @@ async fn push_one(client: &reqwest::Client, base: &str, token: &str, batch: &Otl
 }
 
 /// Bounded spool insert (evict oldest on overflow — never grows unbounded).
+/// Caps BOTH the batch count and the total JSON byte size, since a single batch
+/// can be large.
 fn spool_push(spool: &mut VecDeque<OtlpBatch>, batch: OtlpBatch) {
     if spool.len() >= SPOOL_MAX_BATCHES {
         spool.pop_front();
     }
     spool.push_back(batch);
+    // Byte cap: evict oldest until under the limit, but always keep at least the
+    // batch we just pushed (a single oversized batch is preferable to losing it).
+    let mut total: usize = spool.iter().map(|b| b.json.len()).sum();
+    while total > SPOOL_MAX_BYTES && spool.len() > 1 {
+        match spool.pop_front() {
+            Some(b) => total = total.saturating_sub(b.json.len()),
+            None => break,
+        }
+    }
 }
 
 fn ns(ts_ms: u64) -> String {

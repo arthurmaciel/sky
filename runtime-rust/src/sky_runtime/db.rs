@@ -298,26 +298,23 @@ pub fn db_decode_money<E: From<String> + 'static>(col: String) -> Decoder<E, (De
             JsonVal::Null      => return decode_err_str(format!("column {}: expected Money 'CODE AMOUNT', got NULL", col)),
             _                  => return decode_err_str(format!("column {}: expected Money 'CODE AMOUNT' string", col)),
         };
-        // Find the first space separating the currency code from the amount.
-        match s.find(' ') {
-            None | Some(0) => decode_err_str(format!(
-                "column {}: expected Money 'CODE AMOUNT', got {:?} (no space separator)", col, s
-            )),
-            Some(idx) if idx >= s.len() - 1 => decode_err_str(format!(
-                "column {}: expected Money 'CODE AMOUNT', got {:?} (empty amount)", col, s
-            )),
-            Some(idx) => {
-                let code = s[..idx].to_string();
-                let amount_str = &s[idx+1..];
+        // Split on the first space separating the currency code from the amount.
+        // `split_once` is total — no raw slicing / index arithmetic on `s` (which
+        // would be `indexing_slicing` + an underflow risk on `s.len() - 1`).
+        match s.split_once(' ') {
+            Some((code, amount_str)) if !code.is_empty() && !amount_str.is_empty() => {
                 use rust_decimal::Decimal as RD;
                 use std::str::FromStr;
                 match RD::from_str(amount_str) {
-                    Ok(d)  => decode_ok((Decimal(d), code)),
+                    Ok(d)  => decode_ok((Decimal(d), code.to_string())),
                     Err(e) => decode_err_str(format!(
                         "column {}: Money amount parse error for {:?}: {}", col, amount_str, e
                     )),
                 }
             }
+            _ => decode_err_str(format!(
+                "column {}: expected Money 'CODE AMOUNT', got {:?}", col, s
+            )),
         }
     }), vec![]))
 }
@@ -1586,9 +1583,11 @@ pub fn db_update_fields<E: Send + From<String> + 'static>(
 /// `RETURNING <projection>`, runs it through `fetch_all`, and decodes each
 /// returned row via the `Decoder<E,A>` (using `row_to_json` — NULL-preserving).
 ///
-/// The `projection` string is caller-controlled (matches Go's trust model):
-/// `"*"`, column lists, SQL expressions, and aliases all work.  An empty
-/// projection is rejected (`Err`).
+/// The `projection` string is caller-controlled but VALIDATED for injection
+/// safety (stricter than Go): it must be `"*"` or a comma-separated list of
+/// plain identifiers (`col` / `table.col`, chars `[A-Za-z0-9_.]` only). Arbitrary
+/// SQL expressions and `AS` aliases are intentionally REJECTED (`Err`), as is an
+/// empty projection.
 ///
 /// Requires SQLite ≥ 3.35 (Mar 2021) or PostgreSQL — same requirement as
 /// other RETURNING uses already in Std.Db.
