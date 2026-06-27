@@ -1,0 +1,39 @@
+module Main exposing (main)
+
+-- 95-ffi-inherent-self-output-async: WALL-J Stage 2+3 (#91) — the real async-stripe
+-- `send` shape in one crate: `CreateReq.new(seed).send(client)` →
+-- `Result<<Self as Req>::Output, C::Err>` = Task Error Resp.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Sendreq_crate as R
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    case R.new_from_createReq "seed" of
+        Ok req ->
+            case R.new_from_realClient () of
+                Ok client ->
+                    R.send_from_createReq req client
+                        |> Task.andThen
+                            (\resp ->
+                                case R.shown_from_resp resp of
+                                    Ok s ->
+                                        if s == "sent:seed" then
+                                            println "send=sent:seed [ALL OK]"
+
+                                        else
+                                            println ("send=UNEXPECTED " ++ s)
+
+                                    Err e ->
+                                        println ("shown-failed: " ++ Error.toString e)
+                            )
+                        |> Task.onError (\e -> println ("send-failed: " ++ Error.toString e))
+
+                Err e ->
+                    println ("client-failed: " ++ Error.toString e)
+
+        Err e ->
+            println ("new-failed: " ++ Error.toString e)

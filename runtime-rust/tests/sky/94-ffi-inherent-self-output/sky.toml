@@ -1,0 +1,11 @@
+[project]
+name = "94-ffi-inherent-self-output"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# WALL-J Stage 1 (#91): single selfout-crate with the inherent `Thing::out(&self) ->
+# <Self as LocalTrait>::Output` + the sibling `impl LocalTrait for Thing { type
+# Output = Payload }`. The inherent-method Self::Output projection must bind `out`.
+["rust.dependencies"]
+selfout-crate = { git = "file:///home/arthur/.cache/sky/94-ffi-inherent-self-output-crate", branch = "master" }

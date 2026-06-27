@@ -1,0 +1,11 @@
+[package]
+name = "sendreq-crate"
+version = "0.1.0"
+edition = "2021"
+
+# WALL-J Stage 2+3 (#91): the real async-stripe `send` shape in one crate — inherent
+# async `send<C: LocalClient>(&self, &C) -> Result<<Self as Req>::Output, C::Err>` +
+# `impl Req for CreateReq { type Output = Resp }` + a unique `impl LocalClient for
+# RealClient`. Validates WALL-J Self::Output + de-async + #52 C-mono + error-slot.
+[dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

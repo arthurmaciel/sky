@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain 94-ffi-inherent-self-output 95-ffi-inherent-self-output-async)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -1026,6 +1026,105 @@ run_customize_chain() {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 94-ffi-inherent-self-output — WALL-J Stage 1 (#91): inherent-method
+# `<Self as ForeignTrait>::Output` return projection (sync, non-generic, one crate).
+# `Thing::out(&self) -> <Self as LocalTrait>::Output` must resolve to `Payload` via
+# the SIBLING `impl LocalTrait for Thing { type Output = Payload }` — pre-fix it
+# rendered the bare assoc name `Output` (a bogus Sky type). Built under FORCED
+# SKY_DCE=0. POSITIVE: new→out→shown runs "out:seed".
+# ─────────────────────────────────────────────────────────────────────────────
+run_inherent_self_output() {
+  local base=94-ffi-inherent-self-output
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+  [ -f "$src/setup.sh" ]     || { _fail "$base (no setup.sh)"; return; }
+
+  bash "$src/setup.sh" >/tmp/ffi-fixture-"$base".setup.log 2>&1 || {
+    _fail "$base (setup.sh failed — see /tmp/ffi-fixture-$base.setup.log)"; return; }
+  local crateDir="$HOME/.cache/sky/$base-crate"
+  [ -d "$crateDir/.git" ] || { _fail "$base (expected staged crate at $crateDir)"; return; }
+
+  local wd; wd="$(mktemp -d "${TMPDIR:-/tmp}/ffi-fixture-$base.XXXXXX")" || { _fail "$base (mktemp)"; return; }
+  mkdir -p "$wd/src"
+  cp -r "$src/src/." "$wd/src/" 2>/dev/null || true
+  cp "$src/sky.toml" "$wd/sky.toml" || { _fail "$base (cp sky.toml)"; rm -rf "$wd"; return; }
+  local escC
+  escC="$(printf 'file://%s' "$crateDir" | sed -e 's/[\/&]/\\&/g')"
+  sed -i -E "s|file://[^\"]*/$base-crate|$escC|g" "$wd/sky.toml" \
+    || { _fail "$base (sed sky.toml)"; rm -rf "$wd"; return; }
+
+  local bin; bin="$(SKY_DCE=0 build_fixture "$wd")" || {
+    _fail "$base (build failed — Self::Output projection unresolved? bogus 'Output' type / E0412)"; rm -rf "$wd"; return; }
+
+  # POSITIVE: `out` must bind returning Payload (NOT the bogus assoc name `Output`).
+  local skyi="$wd/.skycache/ffi/rust/selfout-crate.skyi"
+  if ! rg -q 'out_from_thing : Thing -> Result Error Payload' "$skyi" 2>/dev/null; then
+    _fail "$base: out did NOT resolve <Self as LocalTrait>::Output to Payload (WALL-J broken) — got: $(rg 'out_from_thing' "$skyi" 2>/dev/null)"; rm -rf "$wd"; return
+  fi
+
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (inherent Thing.out -> <Self as LocalTrait>::Output resolved to Payload via sibling impl · SKY_DCE=0 cargo-clean · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 95-ffi-inherent-self-output-async — WALL-J Stage 2+3 (#91): the REAL async-stripe
+# `send` shape in one crate. Inherent `async fn send<C: LocalClient>(&self, c: &C) ->
+# Result<<Self as Req>::Output, C::Err>` + `impl Req for CreateReq { type Output =
+# Resp }` + a unique `impl LocalClient for RealClient`. Validates the full
+# composition: WALL-J Self::Output (Ok) + de-async + #52 C-mono + C::Err→SkyError +
+# &self async-Send. SKY_DCE=0. POSITIVE: send runs "sent:seed".
+# ─────────────────────────────────────────────────────────────────────────────
+run_inherent_self_output_async() {
+  local base=95-ffi-inherent-self-output-async
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+  [ -f "$src/setup.sh" ]     || { _fail "$base (no setup.sh)"; return; }
+
+  bash "$src/setup.sh" >/tmp/ffi-fixture-"$base".setup.log 2>&1 || {
+    _fail "$base (setup.sh failed — see /tmp/ffi-fixture-$base.setup.log)"; return; }
+  local crateDir="$HOME/.cache/sky/$base-crate"
+  [ -d "$crateDir/.git" ] || { _fail "$base (expected staged crate at $crateDir)"; return; }
+
+  local wd; wd="$(mktemp -d "${TMPDIR:-/tmp}/ffi-fixture-$base.XXXXXX")" || { _fail "$base (mktemp)"; return; }
+  mkdir -p "$wd/src"
+  cp -r "$src/src/." "$wd/src/" 2>/dev/null || true
+  cp "$src/sky.toml" "$wd/sky.toml" || { _fail "$base (cp sky.toml)"; rm -rf "$wd"; return; }
+  local escC
+  escC="$(printf 'file://%s' "$crateDir" | sed -e 's/[\/&]/\\&/g')"
+  sed -i -E "s|file://[^\"]*/$base-crate|$escC|g" "$wd/sky.toml" \
+    || { _fail "$base (sed sky.toml)"; rm -rf "$wd"; return; }
+
+  local bin; bin="$(SKY_DCE=0 build_fixture "$wd")" || {
+    _fail "$base (build failed — async Self::Output send compose cargo-fail?)"; rm -rf "$wd"; return; }
+
+  # POSITIVE: the real-stripe-shaped send binds with the Ok = Resp (Self::Output
+  # resolved) and the cross-bound C mono'd to RealClient.
+  local skyi="$wd/.skycache/ffi/rust/sendreq-crate.skyi"
+  if ! rg -q 'send_from_createReq : CreateReq -> RealClient -> Task Error Resp' "$skyi" 2>/dev/null; then
+    _fail "$base: async send did NOT bind as CreateReq -> RealClient -> Task Error Resp (WALL-J+#52 compose broken) — got: $(rg 'send_from_createReq' "$skyi" 2>/dev/null)"; rm -rf "$wd"; return
+  fi
+
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (inherent async send<C> -> Result<<Self as Req>::Output, C::Err> bound+ran 'sent:seed' · SKY_DCE=0 cargo-clean · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
 # ── Drive ────────────────────────────────────────────────────────────────────
 FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -1048,6 +1147,8 @@ for n in "${FIXTURES[@]}"; do
     91-ffi-cross-crate-impl)  run_cross_crate_impl ;;
     92-ffi-generic-self-open-t) run_generic_self_open_t ;;
     93-ffi-customize-chain)   run_customize_chain ;;
+    94-ffi-inherent-self-output) run_inherent_self_output ;;
+    95-ffi-inherent-self-output-async) run_inherent_self_output_async ;;
     *)                        run_basic "$n" ;;
   esac
 done

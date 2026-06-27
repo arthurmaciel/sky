@@ -1639,6 +1639,22 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                             let de_async_owned = de_async_clone(fn_data);
                             let fn_data: &serde_json::Value =
                                 de_async_owned.as_ref().unwrap_or(fn_data);
+                            // [WALL-J #91] Resolve `<Self as ForeignTrait>::Assoc`
+                            // projections (e.g. the real async-stripe
+                            // `CreateCustomer::send(&self) -> <Self as
+                            // StripeRequest>::Output`) to the concrete assoc type from
+                            // the SIBLING `impl ForeignTrait for ConcreteSelf` block.
+                            // Runs AFTER de-async (sees the unwrapped output) and
+                            // BEFORE `method_is_generic_bearing` so the now-concrete
+                            // `Self` no longer counts as a used tyvar in EITHER the
+                            // parse_fn_item (non-generic) or the parametric path — the
+                            // single seam that closes the `undeclared type-var Self`
+                            // drop. B3-gated to a concrete Self; fail-closed when the
+                            // sibling impl is absent/cross-crate/generic/non-unique.
+                            let self_assoc_owned =
+                                resolve_self_assoc_projections(fn_data, for_val, index);
+                            let fn_data: &serde_json::Value =
+                                self_assoc_owned.as_ref().unwrap_or(fn_data);
                             // Wall #3: if this method is GENERIC-BEARING (its
                             // own / the impl's / the struct's generics declare a
                             // type param used in the sig), retire Alt-1's concrete
@@ -8678,6 +8694,155 @@ fn impl_assoc_bindings(
         }
     }
     out
+}
+
+/// [WALL-J #91] The crate-local type-id of a `{resolved_path:{id:N}}` node, or None
+/// for any other shape (a generic / tuple / ref / a synthetic `__sky_xc_path` node
+/// which carries no real index id). Used to match a Self-projection's concrete Self
+/// against a sibling impl's `for` type by ID, not by rendered name (a same-named
+/// sibling in another submodule would mis-match on name).
+fn resolved_path_type_id(node: &serde_json::Value) -> Option<String> {
+    let rp = node.get("resolved_path")?;
+    if rp.get("__sky_xc_path").is_some() {
+        return None;
+    }
+    rp.get("id").map(item_id_to_str)
+}
+
+/// [WALL-J #91] Resolve `<ConcreteSelf as Trait>::<assoc>` to the concrete RHS bound
+/// by the SIBLING `impl Trait for ConcreteSelf` block, matched by (trait-id,
+/// self-id). Returns the concrete type node, or None when the sibling is absent /
+/// cross-crate (its assoc items aren't in THIS crate's `index`) / generic / not
+/// unique — every such case is fail-closed (the caller leaves the projection
+/// unresolved, which renders/drops downstream as before).
+///
+/// Soundness (design B2/B4): match by IDS (trait + concrete-self), exclude a
+/// blanket `impl<T> Trait for Wrapper<T>` (its `for` carries a free tyvar), and
+/// require EXACTLY ONE concrete impl binding the assoc (coherence gives ≤1; the
+/// index may also hold a generic impl, excluded by the concreteness test).
+fn sibling_impl_assoc(
+    index: &serde_json::Map<String, serde_json::Value>,
+    trait_id: &str,
+    self_id: &str,
+    assoc_name: &str,
+) -> Option<serde_json::Value> {
+    let mut found: Option<serde_json::Value> = None;
+    let mut count = 0usize;
+    for item in index.values() {
+        let Some(im) = item.get("inner").and_then(|i| i.get("impl")) else { continue };
+        // Trait matches by resolved id.
+        let t_id = im.get("trait").and_then(|t| t.get("id")).map(item_id_to_str);
+        if t_id.as_deref() != Some(trait_id) {
+            continue;
+        }
+        // `for` type must be CONCRETE (no free tyvar → excludes a blanket impl) and
+        // match the concrete Self by id.
+        let Some(for_t) = im.get("for").or_else(|| im.get("for_")) else { continue };
+        if !self_is_concrete_named(for_t) {
+            continue;
+        }
+        if resolved_path_type_id(for_t).as_deref() != Some(self_id) {
+            continue;
+        }
+        if let Some(rhs) = impl_assoc_bindings(im, index).get(assoc_name) {
+            count += 1;
+            found = Some(rhs.clone());
+        }
+    }
+    if count == 1 { found } else { None }
+}
+
+/// [WALL-J #91] Walk a type tree and replace every `<Self as Trait>::<assoc>`
+/// projection (a `qualified_path` whose `self_type` is `{generic:"Self"}`) with the
+/// concrete assoc type from the sibling `impl Trait for ConcreteSelf` (`self_id`).
+/// Trait-AWARE and Self-SCOPED (design B2): only Self-projections are touched, and
+/// each resolves via its OWN trait id — so a same-named `<X as OtherTrait>::Output`
+/// in another position is never mis-substituted. An unresolvable Self-projection is
+/// left in place (fail-closed). Sets `*changed` when any substitution happens.
+fn subst_self_projections(
+    val: &serde_json::Value,
+    self_id: &str,
+    index: &serde_json::Map<String, serde_json::Value>,
+    changed: &mut bool,
+    depth: u32,
+) -> serde_json::Value {
+    // Defense-in-depth: cap the recursion so a (rustc-impossible — E0275 — but
+    // cheap-to-guard) self-cyclic assoc binding `type Output = <Self as Trait>::Output`
+    // can't stack-overflow this build-time tool. 64 ≫ any real type-tree depth; on
+    // exceed, leave the node unresolved (fail-closed). Mirrors the WALL-5 depth bound.
+    if depth > 64 {
+        return val.clone();
+    }
+    if let Some(qp) = val.get("qualified_path") {
+        let is_self = qp
+            .get("self_type")
+            .and_then(|st| st.get("generic"))
+            .and_then(|g| g.as_str())
+            == Some("Self");
+        if is_self {
+            if let (Some(trait_id), Some(assoc)) = (
+                qp.get("trait").and_then(|t| t.get("id")).map(item_id_to_str),
+                qp.get("name").and_then(|n| n.as_str()),
+            ) {
+                if let Some(concrete) = sibling_impl_assoc(index, &trait_id, self_id, assoc) {
+                    *changed = true;
+                    // Recurse into the binding in case it nests a further projection.
+                    return subst_self_projections(&concrete, self_id, index, changed, depth + 1);
+                }
+            }
+            // Unresolved Self-projection → leave as-is (fail-closed).
+        }
+    }
+    match val {
+        serde_json::Value::Object(o) => serde_json::Value::Object(
+            o.iter()
+                .map(|(k, v)| (k.clone(), subst_self_projections(v, self_id, index, changed, depth + 1)))
+                .collect(),
+        ),
+        serde_json::Value::Array(a) => serde_json::Value::Array(
+            a.iter().map(|v| subst_self_projections(v, self_id, index, changed, depth + 1)).collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// [WALL-J #91] If `fn_data`'s sig contains any `<Self as Trait>::<assoc>` projection
+/// and `Self` (`for_val`) is a CONCRETE named type, resolve each projection via its
+/// sibling trait-impl and return a rewritten `fn_data`. None when there is nothing
+/// to resolve OR `Self` is generic (design B3 — a generic `impl<T> Foo<T>` would
+/// reinject an unbound `T`) — both leave the caller byte-identical to pre-WALL-J.
+///
+/// The real async-stripe `CreateCustomer::send(&self) -> Result<<Self as
+/// StripeRequest>::Output, _>` shape: `Self` is the concrete request, and the
+/// projection resolves via the DIFFERENT `impl StripeRequest for CreateCustomer`
+/// block. Runs at the impl-walk call site (where `for_val` + `index` are in scope)
+/// so BOTH the non-generic (`parse_fn_item`) and generic (`parse_generic_method_fn`)
+/// downstream paths see the resolved output — and a now-concrete `Self` no longer
+/// counts as an undeclared tyvar in either.
+fn resolve_self_assoc_projections(
+    fn_data: &serde_json::Value,
+    for_val: Option<&serde_json::Value>,
+    index: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let sig = fn_data.get("sig").or_else(|| fn_data.get("decl"))?;
+    let for_val = for_val?;
+    // B3: Self must be a concrete named type.
+    if !self_is_concrete_named(for_val) {
+        return None;
+    }
+    let self_id = resolved_path_type_id(for_val)?;
+    let mut changed = false;
+    let rewritten_sig = subst_self_projections(sig, &self_id, index, &mut changed, 0);
+    if !changed {
+        return None;
+    }
+    let mut out = fn_data.clone();
+    if out.get("sig").is_some() {
+        out["sig"] = rewritten_sig;
+    } else {
+        out["decl"] = rewritten_sig;
+    }
+    Some(out)
 }
 
 /// Normalise a reachable crate-local path (`mycrate::Mod::Type`) to the crate-
@@ -15907,5 +16072,77 @@ mod tests {
     fn visibility_features_empty_is_empty() {
         // A crate with no features → empty injection → plain default build.
         assert!(choose_visibility_features(&[]).is_empty());
+    }
+
+    // [WALL-J #91] Sibling-impl `<Self as Trait>::Output` resolution.
+    fn wallj_index() -> serde_json::Map<String, serde_json::Value> {
+        // impl LocalTrait (id 1) for Thing (id 5) { type Output = Payload (id 7) }
+        let mut idx = serde_json::Map::new();
+        idx.insert("4".into(), serde_json::json!({
+            "inner": { "impl": {
+                "trait": { "path": "LocalTrait", "id": 1 },
+                "for": { "resolved_path": { "path": "Thing", "id": 5 } },
+                "items": [6]
+            }}
+        }));
+        idx.insert("6".into(), serde_json::json!({
+            "name": "Output",
+            "inner": { "assoc_type": { "type": { "resolved_path": { "path": "Payload", "id": 7 } } } }
+        }));
+        idx
+    }
+    fn wallj_fn_self_output() -> serde_json::Value {
+        // fn out(&self) -> <Self as LocalTrait>::Output
+        serde_json::json!({
+            "sig": {
+                "inputs": [["self", { "borrowed_ref": { "type": { "generic": "Self" } } }]],
+                "output": { "qualified_path": {
+                    "name": "Output", "self_type": { "generic": "Self" }, "trait": { "id": 1 }
+                }}
+            }
+        })
+    }
+
+    #[test]
+    fn wallj_resolves_self_output_via_sibling_impl() {
+        let idx = wallj_index();
+        let fnd = wallj_fn_self_output();
+        let for_val = serde_json::json!({ "resolved_path": { "path": "Thing", "id": 5 } });
+        let out = resolve_self_assoc_projections(&fnd, Some(&for_val), &idx)
+            .expect("Self::Output must resolve via the sibling impl");
+        let resolved = &out["sig"]["output"];
+        assert!(resolved.get("qualified_path").is_none(),
+            "the projection must be gone — got: {resolved}");
+        assert_eq!(resolved["resolved_path"]["id"].as_u64(), Some(7),
+            "output must resolve to Payload (id 7) — got: {resolved}");
+    }
+
+    #[test]
+    fn wallj_generic_self_is_not_resolved() {
+        // B3: a generic `for_val` (free tyvar) must NOT resolve (would reinject T).
+        let idx = wallj_index();
+        let fnd = wallj_fn_self_output();
+        let generic_self = serde_json::json!({ "generic": "T" });
+        assert!(resolve_self_assoc_projections(&fnd, Some(&generic_self), &idx).is_none());
+    }
+
+    #[test]
+    fn wallj_missing_sibling_impl_fails_closed() {
+        // No sibling impl for self-id 99 → fail-closed (None, projection left).
+        let idx = wallj_index();
+        let fnd = wallj_fn_self_output();
+        let other_self = serde_json::json!({ "resolved_path": { "path": "Other", "id": 99 } });
+        assert!(resolve_self_assoc_projections(&fnd, Some(&other_self), &idx).is_none());
+    }
+
+    #[test]
+    fn wallj_wrong_trait_not_substituted() {
+        // B2: a Self-projection of a DIFFERENT trait id (2) must not pick trait 1's
+        // Output — no sibling for (trait 2, self 5) → fail-closed.
+        let idx = wallj_index();
+        let mut fnd = wallj_fn_self_output();
+        fnd["sig"]["output"]["qualified_path"]["trait"]["id"] = serde_json::json!(2);
+        let for_val = serde_json::json!({ "resolved_path": { "path": "Thing", "id": 5 } });
+        assert!(resolve_self_assoc_projections(&fnd, Some(&for_val), &idx).is_none());
     }
 }

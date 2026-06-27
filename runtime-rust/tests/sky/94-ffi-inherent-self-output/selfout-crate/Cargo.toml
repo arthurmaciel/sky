@@ -1,0 +1,12 @@
+[package]
+name = "selfout-crate"
+version = "0.1.0"
+edition = "2021"
+
+# WALL-J Stage 1 (#91): isolates the inherent-method `<Self as ForeignTrait>::Output`
+# return projection — sync, non-generic, single-crate. `Thing::out(&self) ->
+# <Self as LocalTrait>::Output` returns the assoc `Output` resolved from the SIBLING
+# `impl LocalTrait for Thing { type Output = Payload }`. Mirrors the real stripe
+# `CreateCustomer::send -> <Self as StripeRequest>::Output` shape, minus async +
+# the cross-crate client generic (added in later stages).
+[dependencies]

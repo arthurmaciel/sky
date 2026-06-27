@@ -1,0 +1,34 @@
+module Main exposing (main)
+
+-- 94-ffi-inherent-self-output: WALL-J Stage 1 (#91) — inherent-method
+-- `<Self as ForeignTrait>::Output` return projection. `Thing.out` returns the
+-- assoc `Output` resolved from the sibling `impl LocalTrait for Thing`.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Selfout_crate as S
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    case S.new_from_thing "seed" of
+        Ok thing ->
+            case S.out_from_thing thing of
+                Ok payload ->
+                    case S.shown_from_payload payload of
+                        Ok s ->
+                            if s == "out:seed" then
+                                println "selfout=out:seed [ALL OK]"
+
+                            else
+                                println ("selfout=UNEXPECTED " ++ s)
+
+                        Err e ->
+                            println ("shown-failed: " ++ Error.toString e)
+
+                Err e ->
+                    println ("out-failed: " ++ Error.toString e)
+
+        Err e ->
+            println ("new-failed: " ++ Error.toString e)

@@ -272,3 +272,46 @@ unresolved `<C: StripeClient>`. Every partial failure is fail-closed.
   error-slot (B1) lands BEFORE the cross-crate-`C` work.**
 
 Full memo: guardian memory `rust-ffi-wall-j-inherent-self-output-gate`.
+
+## 11. WALL-J implementation log
+
+### Stage 0 (B8) — SHIPPED (commit a39dc413)
+`sky_error_from_foreign` redacts: server-log raw Debug under a corr-id, return only
+`external operation failed (ref <8-hex>)`. Guardian-final CLEAN. See PROGRESS 2026-06-26 20:00.
+
+### Stage 1 — sibling-impl `<Self as Trait>::Output` resolution — SHIPPED
+Fixture `94-ffi-inherent-self-output` (single crate, sync, non-generic): inherent
+`Thing::out(&self) -> <Self as LocalTrait>::Output` + sibling `impl LocalTrait for
+Thing { type Output = Payload }`. PRE-fix it rendered the bare assoc name `Output`
+(bogus); now `out_from_thing : Thing -> Result Error Payload`, runs `out:seed [ALL OK]`.
+
+Mechanism (inspector): new `resolve_self_assoc_projections` (B3-gated to a concrete
+`for_val`) + `subst_self_projections` (trait-AWARE, Self-SCOPED — B2) + `sibling_impl_assoc`
+(matches by (trait-id, self-id), concrete + unique — B4; cross-crate sibling → empty
+bindings → fail-closed) + `resolved_path_type_id`. Wired at the impl-walk call site
+AFTER de-async and BEFORE `method_is_generic_bearing` (B6) — the single seam that
+removes the now-concrete `Self` from the used-tyvar set for BOTH the `parse_fn_item`
+(non-generic) and the parametric paths, closing the `undeclared type-var Self` drop.
+4 unit tests (resolve / generic-self-rejected / missing-sibling / wrong-trait). The
+`None`-context path is byte-identical to pre-WALL-J.
+
+### Stage 2+3 — async + `Result<_, C::Err>` + generic `<C: Client>` — SHIPPED (zero extra code)
+`95-ffi-inherent-self-output-async` mirrors the real stripe `send` shape in one crate:
+inherent `async fn send<C: LocalClient>(&self, c: &C) -> Result<<Self as Req>::Output,
+C::Err>` + `impl Req for CreateReq { type Output = Resp }` + a unique `impl LocalClient
+for RealClient`. **The SAME Stage-1 resolver composes with no extra inspector code** —
+`send_from_createReq : CreateReq -> RealClient -> Task Error Resp` binds + runs
+`sent:seed [ALL OK]` under SKY_DCE=0: WALL-J resolves `<Self as Req>::Output`→Resp, #52
+mono's `C`→RealClient, `C::Err`→SkyError, de-async→Task, `&self`→owned-copy+Send. This
+is the EXACT real-stripe `send` shape; only the cross-crate `C` (the facade's
+`impl StripeClient for hyper::Client`) separates it from real stripe — Stage 4, via
+`--manifest` + the shipped WALL-G.
+
+Guardian-final on Stages 1-3: APPROVED CLEAN, all B1-B8 honored. Added a 64-deep
+recursion bound to `subst_self_projections` (guardian rewrite-opp #1 — defense-in-depth
+vs a rustc-impossible self-cyclic assoc; fail-closed on exceed).
+
+### Stage 4 — real async-stripe via multi-crate `--manifest` (NEXT)
+The cross-crate `C: StripeClient` resolves via WALL-G from a `--manifest` run including
+the facade `async-stripe`. The mechanism is fully proven on 94/95; Stage 4 is the
+real-crate manifest assembly + measurement.

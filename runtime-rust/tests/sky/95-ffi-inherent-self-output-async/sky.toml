@@ -1,0 +1,8 @@
+[project]
+name = "95-ffi-inherent-self-output-async"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+["rust.dependencies"]
+sendreq-crate = { git = "file:///home/arthur/.cache/sky/95-ffi-inherent-self-output-async-crate", branch = "master" }

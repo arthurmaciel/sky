@@ -17,6 +17,46 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 20:40 — WALL-J Stage 1 (#91): sibling-impl `<Self as Trait>::Output` resolution
+
+**What.** The inherent-method assoc-projection wall. An inherent `fn out(&self) -> <Self as
+LocalTrait>::Output` (the real async-stripe `CreateCustomer::send` return shape) rendered the
+bare assoc name `Output` (a bogus Sky type) because the projection's `Self` + the assoc were
+never resolved — the assoc binding lives in a SIBLING `impl LocalTrait for Thing { type Output =
+Payload }`, a different block than the inherent one being walked.
+
+**Fix (inspector).** New `resolve_self_assoc_projections` (B3-gated to a concrete `for_val`) +
+`subst_self_projections` (trait-AWARE, Self-SCOPED — B2: only `{generic:"Self"}` projections,
+each via its own trait id) + `sibling_impl_assoc` (matches the sibling by (trait-id, self-id),
+requires concrete + unique — B4; a cross-crate sibling's assoc items aren't in this crate's index
+→ empty → fail-closed) + `resolved_path_type_id`. Wired at the impl-walk call site AFTER de-async
+and BEFORE `method_is_generic_bearing` (B6) — the single seam that removes the now-concrete
+`Self` from the used-tyvar set for BOTH the `parse_fn_item` (non-generic) and the parametric
+paths, closing the `undeclared type-var Self` drop. `None`-context path byte-identical to before.
+
+**Verification.** Fixture `94-ffi-inherent-self-output` (single crate, sync): `out_from_thing :
+Thing -> Result Error Payload` (was bogus `Output`), runs `selfout=out:seed [ALL OK]` under
+SKY_DCE=0; `shown_from_payload` now also surfaces. 4 new inspector unit tests (resolve /
+generic-self-rejected / missing-sibling / wrong-trait), 217 total. Gate-wired
+`run_inherent_self_output`. Clippy: no new warnings.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (4 new fns + 1 call-site wiring + 4 unit
+tests), `runtime-rust/scripts/ffi-fixtures-test.sh` (`run_inherent_self_output` + 94 in
+ALL_FIXTURES + dispatch), fixture `runtime-rust/tests/sky/94-ffi-inherent-self-output/`, spec §11.
+
+### Stage 2+3 (same commit) — async + `Result<_, C::Err>` + generic `<C: Client>` — ZERO extra code
+Fixture `95-ffi-inherent-self-output-async` mirrors the REAL stripe `send` shape in one crate:
+inherent `async fn send<C: LocalClient>(&self, c: &C) -> Result<<Self as Req>::Output, C::Err>` +
+`impl Req for CreateReq { type Output = Resp }` + a unique `impl LocalClient for RealClient`. The
+SAME Stage-1 resolver composes with the existing machinery — `send_from_createReq : CreateReq ->
+RealClient -> Task Error Resp` binds + runs `sent:seed [ALL OK]` (SKY_DCE=0): WALL-J Self::Output→Resp,
+#52 C→RealClient, C::Err→SkyError, de-async→Task, &self→owned+Send. This IS the real-stripe send
+shape; only cross-crate `C` (Stage 4, WALL-G `--manifest`) remains. Guardian-final on Stages 1-3:
+APPROVED CLEAN (all B1-B8 honored); added a 64-deep recursion bound to `subst_self_projections`
+(defense-in-depth vs a rustc-impossible self-cyclic assoc). Full FFI gate **40 ok · 0 fail**.
+
+---
+
 ## 2026-06-26 20:00 — WALL-J Stage 0 (B8, SECURITY): redact foreign FFI error Debug from the Sky message
 
 **What.** The WALL-J design's BLOCKING B8 finding: `sky_error_from_foreign` (the codegen-emitted
