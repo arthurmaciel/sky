@@ -129,13 +129,18 @@ async fn do_connect<E: From<String> + Send + 'static>(
         }
     }
     // Cap inbound frame/message size to prevent a remote server from forcing the
-    // client to buffer an arbitrarily large payload. Mirror the server-side 1 MiB
-    // default; Sky's cfg.timeout field is the Sky-level max-message-bytes when > 0
-    // (re-use that slot — no dedicated field yet), falling back to 16 MiB.
+    // client to buffer an arbitrarily large payload. Default 1 MiB (matches the
+    // server-side cap): the prior 16 MiB × the 64-deep broadcast buffer below was
+    // ~1 GiB worst-case retained per socket under a lagging subscriber. Override
+    // via SKY_WS_MAX_MESSAGE_BYTES for apps that legitimately need larger frames.
     //
     // tokio-tungstenite 0.24 exposes connect_async_with_config which passes a
     // tungstenite::protocol::WebSocketConfig directly to the handshake.
-    let max_msg: usize = 16 * 1024 * 1024; // 16 MiB hard cap
+    let max_msg: usize = std::env::var("SKY_WS_MAX_MESSAGE_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(1024 * 1024);
     let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
         max_message_size: Some(max_msg),
         max_frame_size: Some(max_msg),
@@ -188,18 +193,20 @@ async fn do_connect<E: From<String> + Send + 'static>(
                 Box::pin(tokio_tungstenite::connect_async_with_config(req, Some(ws_config), false))
             }
         };
-    let (stream, _resp) = if timeout_ms > 0 {
-        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms as u64), connect_fut).await {
+    // Floor the handshake timeout: a non-positive cfg.timeout must NOT disable it
+    // (an unreachable / silently-stalling host would otherwise hang connect_async
+    // forever, leaking the task + FD). Default 30 s.
+    let to_ms: u64 = if timeout_ms > 0 { timeout_ms as u64 } else { 30_000 };
+    let (stream, _resp) =
+        match tokio::time::timeout(std::time::Duration::from_millis(to_ms), connect_fut).await {
             Ok(Ok(ok)) => ok,
             Ok(Err(e)) => return SkyResult::Err(format!("WebSocket.connect {}: {}", url, e).into()),
-            Err(_) => return SkyResult::Err(format!("WebSocket.connect {}: handshake timed out after {}ms", url, timeout_ms).into()),
-        }
-    } else {
-        match connect_fut.await {
-            Ok(ok) => ok,
-            Err(e) => return SkyResult::Err(format!("WebSocket.connect {}: {}", url, e).into()),
-        }
-    };
+            Err(_) => {
+                return SkyResult::Err(
+                    format!("WebSocket.connect {}: handshake timed out after {}ms", url, to_ms).into(),
+                )
+            }
+        };
     let id = WS_CLIENT_NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let (mut write, mut read) = stream.split();
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<WsCmd>(1024);
