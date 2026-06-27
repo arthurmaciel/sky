@@ -17,6 +17,21 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 03:05 — #73 CLASS 1 CLOSED: fail-closed-drop AsRef/Borrow impl-trait returns
+
+**What.** `bound_to_concrete` now returns `None` for an `AsRef`/`Borrow` bound in RETURN position →
+an anonymous `impl AsRef<str>` return DROPS the fn (fail-closed) instead of binding broken
+(`-> SkyResult<SkyError, str>` unsized = E0277). Mirrors the existing iterator-impl-trait return drop
+([C-R]). PARAM path unchanged (WALL-2); named-generic `S: AsRef<str>` returns unaffected (resolve at
+`BoundPos::Param` → mono S→String); Into/From at Return unaffected. Unit-tested both directions
+(inspector suite 219/0) + end-to-end fixture 100 (SKY_DCE=0: `tag` dropped, `&str` `borrowed_name`
+binds→String, builds green, `[ALL OK]`). Wired into the gate. Guardian final CLEAN. Commit `9a2298b7`.
+
+**Remaining for #73:** class 2 (generic-result-hole wrappers) + the bind-as-`String`
+(`.as_ref().to_string()`) coverage win vs the current drop — both fail-closed today, tracked.
+
+---
+
 ## 2026-06-27 02:40 — #73 REPRODUCED + root-caused (return-position AsRef<str>): scoped, fix deferred to a focused effort
 
 **Repro.** `runtime-rust/tests/sky/100-ffi-asref-return` (probe, NOT gate-wired — RED pre-fix): a pure
