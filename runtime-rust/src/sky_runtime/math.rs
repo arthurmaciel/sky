@@ -25,6 +25,23 @@ pub fn math_nan()   -> f64 { f64::NAN }
 /// Saturates `i64::MIN` to `i64::MAX` (no-panic rule: `-i64::MIN` is not representable).
 pub fn math_abs(x: i64) -> i64 { x.checked_abs().unwrap_or(i64::MAX) }
 
+/// Integer division for Sky's `//` operator, TOTAL by construction (no-panic
+/// thesis). Bare `a / b` on `i64` panics on `b == 0` AND on `i64::MIN / -1`
+/// (overflow) — both Sky-reachable from a well-typed program. Divisor `0` → `0`
+/// (matches Elm's `5 // 0 == 0`); `wrapping_div` makes the `MIN / -1` corner
+/// return `i64::MIN` instead of aborting. For every ordinary divisor the result
+/// is identical to `a / b`, so normal programs are byte-unchanged.
+pub fn sky_int_div(a: i64, b: i64) -> i64 {
+    if b == 0 { 0 } else { a.wrapping_div(b) }
+}
+
+/// Integer remainder for Sky's `%` operator, TOTAL by construction. `% 0` → `0`
+/// (no panic); `wrapping_rem` covers the `i64::MIN % -1` corner. Identical to
+/// `a % b` for every non-zero divisor.
+pub fn sky_int_rem(a: i64, b: i64) -> i64 {
+    if b == 0 { 0 } else { a.wrapping_rem(b) }
+}
+
 // CONTRACT (documented deliberately — audit 2026-06-19): `min`/`max` use a real
 // `PartialOrd` compare. For floats this tracks the TYPED Go path (`Math_minT`),
 // NOT Go's polymorphic any-path (which routes floats through `AsInt` and compares

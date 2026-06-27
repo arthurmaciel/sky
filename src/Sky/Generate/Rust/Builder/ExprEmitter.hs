@@ -1406,7 +1406,16 @@ exprToRustInner ctx e = case e of
             in if isList
                then "{ let mut __r = " ++ aStr ++ ".clone(); __r.extend(" ++ bStr ++ "); __r }"
                else "format!(\"{}{}\", " ++ aStr ++ ", " ++ bStr ++ ")"
-        | otherwise -> 
+        -- Integer `//` and `%` route through TOTAL runtime helpers: bare `a / b`
+        -- / `a % b` on i64 PANIC on a zero divisor (Sky-reachable) and on the
+        -- `i64::MIN / -1` overflow. sky_int_div/_rem return 0 on a zero divisor
+        -- (Elm `5 // 0 == 0`) and wrap the MIN/-1 corner — identical to the bare
+        -- operator for every ordinary divisor. (Float `/` stays bare: x/0.0 = inf.)
+        | op == "//" ->
+            "sky_runtime::math::sky_int_div(" ++ exprToRustString ctx a ++ ", " ++ exprToRustString ctx b ++ ")"
+        | op == "%" ->
+            "sky_runtime::math::sky_int_rem(" ++ exprToRustString ctx a ++ ", " ++ exprToRustString ctx b ++ ")"
+        | otherwise ->
             "(" ++ exprToRustString ctx a ++ " " ++ binopToRust op ++ " " ++ exprToRustString ctx b ++ ")"
     Can.Lambda params body ->
         let counts = collectVarLocalsMulti body
