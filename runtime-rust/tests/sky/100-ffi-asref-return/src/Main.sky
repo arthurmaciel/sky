@@ -1,0 +1,31 @@
+module Main exposing (main)
+
+-- #73 (C-R): a RETURN-position `impl AsRef<str>` (`tag`) can't be soundly owned
+-- by the codegen, so it fail-closed-DROPS (absent from bindings) — the crate
+-- builds instead of cargo-failing E0277. A `&str` return (`borrowed_name`) DOES
+-- bind (→ Sky String via `.to_string()`). This fixture builds under SKY_DCE=0
+-- (which forces every binding to emit), proving the drop closes the cargo-fail.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Asrefret_crate as C
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    case C.new_from_doc "hello" of
+        Ok doc ->
+            case C.borrowed_name_from_doc doc of
+                Ok n ->
+                    if n == "hello" then
+                        println "asref-return: borrowed_name=hello, impl-AsRef-return dropped [ALL OK]"
+
+                    else
+                        println ("UNEXPECTED borrowed_name=" ++ n)
+
+                Err e ->
+                    println ("borrowed-failed: " ++ Error.toString e)
+
+        Err e ->
+            println ("new-failed: " ++ Error.toString e)

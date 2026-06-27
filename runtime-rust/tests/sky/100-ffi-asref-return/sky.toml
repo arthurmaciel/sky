@@ -1,0 +1,7 @@
+[project]
+name = "100-ffi-asref-return"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+["rust.dependencies"]
+asrefret-crate = { git = "file:///home/arthur/.cache/sky/100-ffi-asref-return-crate", branch = "master" }

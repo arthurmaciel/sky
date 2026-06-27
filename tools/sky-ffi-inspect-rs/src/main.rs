@@ -6783,6 +6783,21 @@ fn bound_to_concrete(bound: &serde_json::Value, pos: BoundPos) -> Option<serde_j
                 Some("AsRef") | Some("Borrow") | Some("Into") | Some("From") => {}
                 _ => return None,
             }
+            // [#73, C-R] An `AsRef`/`Borrow` bound in RETURN position is a STR-LENDING
+            // trait: the value can only LEND an `&str` (`.as_ref()`), never BE an owned
+            // `String`. As an ANONYMOUS `impl AsRef<str>` return the wrapper body
+            // (`ok_res(recv.m())`) yields the opaque value, which the codegen cannot
+            // own without a `.as_ref().to_string()` coercion it has no path for → the
+            // pre-#73 bind emitted `-> SkyResult<SkyError, str>` (unsized) = E0277.
+            // Fail-closed DROP — sound over a broken binding, mirroring the existing
+            // iterator-impl-trait return drop ([C-R]). (Named-generic `S: AsRef<str>`
+            // returns are UNAFFECTED: they resolve at `BoundPos::Param` and monomorphise
+            // S→String soundly. The bind-as-`String`-via-`.as_ref().to_string()` coverage
+            // win is the tracked #73 follow-up.) Into/From keep their behaviour (a value
+            // that can BECOME the target is a separate, convertible case).
+            if pos == BoundPos::Return && matches!(name, "AsRef" | "Borrow") {
+                return None;
+            }
             let arg = args.first()?;
             if let Some(p) = arg.get("primitive").and_then(|p| p.as_str()) {
                 match (name, p) {
@@ -11190,8 +11205,17 @@ mod tests {
         // AsRef<[u8]> / Borrow<[u8]>  -> Vec<u8> (List Int)
         let asref_u8 = trait_bound("AsRef", vec![serde_json::json!({ "slice": { "primitive": "u8" } })]);
         assert_eq!(bound_to_concrete(&asref_u8, BoundPos::Param), Some(vec_u8_node()));
-        // AsRef<str> / Borrow<str>    -> String
+        // AsRef<str> / Borrow<str>    -> String (PARAM: call site does `.as_ref()`)
         assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("str")]), BoundPos::Param), Some(string_node()));
+        // [#73, C-R] AsRef/Borrow in RETURN position DROP (None): an anonymous
+        // `impl AsRef<str>` return can't be owned by the codegen body (needs a
+        // `.as_ref().to_string()` coercion it lacks) → fail-closed, like iterators.
+        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("str")]), BoundPos::Return), None);
+        assert_eq!(bound_to_concrete(&trait_bound("Borrow", vec![prim("str")]), BoundPos::Return), None);
+        // AsRef<[u8]> also drops at Return (same coercion gap).
+        assert_eq!(bound_to_concrete(&asref_u8, BoundPos::Return), None);
+        // Into in RETURN position is UNAFFECTED by the C-R AsRef drop (separate case).
+        assert_eq!(bound_to_concrete(&trait_bound("Into", vec![path("String")]), BoundPos::Return), Some(string_node()));
         // Display / ToString (no arg) -> String
         assert_eq!(bound_to_concrete(&trait_bound("Display", vec![]), BoundPos::Param), Some(string_node()));
         assert_eq!(bound_to_concrete(&trait_bound("ToString", vec![]), BoundPos::Param), Some(string_node()));
