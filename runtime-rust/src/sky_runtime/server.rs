@@ -106,13 +106,17 @@ where
     fn into_server_handler(self) -> ServerHandler<E> { self }
 }
 
+/// Discriminated union over the two possible route targets — replaces the
+/// two `Option` fields so both-None is unrepresentable.
+#[derive(Clone)]
+enum RouteTarget { Handler(ErasedHandler), Static(String) }
+
 /// Sky.Http.Server.Route (opaque). Non-generic — see ErasedHandler.
 #[derive(Clone)]
 pub struct ServerRoute {
     pub method: String,
     pub path: String,
-    pub handler: Option<ErasedHandler>,
-    pub static_dir: Option<String>,
+    target: RouteTarget,   // private; was the two pub Options
 }
 
 // ─── handler erasure ──────────────────────────────────────────────────────
@@ -140,7 +144,7 @@ where
     E: Send + 'static,
     H: IntoServerHandler<E>,
 {
-    ServerRoute { method: method.to_string(), path, handler: Some(erase(h.into_server_handler())), static_dir: None }
+    ServerRoute { method: method.to_string(), path, target: RouteTarget::Handler(erase(h.into_server_handler())) }
 }
 
 // ─── routing kernels ──────────────────────────────────────────────────────
@@ -186,7 +190,7 @@ where E: Send + 'static, H: IntoServerHandler<E>
 
 /// Server.static : String -> String -> Route  (urlPrefix, dir)
 pub fn server_static(path: String, dir: String) -> ServerRoute {
-    ServerRoute { method: "GET".to_string(), path, handler: None, static_dir: Some(dir) }
+    ServerRoute { method: "GET".to_string(), path, target: RouteTarget::Static(dir) }
 }
 
 // ─── response builders (pure) ─────────────────────────────────────────────
@@ -493,12 +497,13 @@ pub fn server_listen<E: From<String> + Send + 'static>(port: i64, routes: Vec<Se
     Box::pin(async move {
         let mut app: axum::Router = axum::Router::new();
         for r in routes {
-            if let Some(dir) = r.static_dir {
-                app = app.nest_service(&strip_trailing_slash(&r.path), tower_http::services::ServeDir::new(dir));
-                continue;
-            }
-            if let Some(h) = r.handler {
-                app = app.route(&r.path, method_router(&r.method, h));
+            match r.target {
+                RouteTarget::Static(dir) => {
+                    app = app.nest_service(&strip_trailing_slash(&r.path), tower_http::services::ServeDir::new(dir));
+                }
+                RouteTarget::Handler(h) => {
+                    app = app.route(&r.path, method_router(&r.method, h));
+                }
             }
         }
         // Sky doctrine: a panicking handler returns 500, never crashes the
@@ -1034,7 +1039,7 @@ mod tests {
             Box::pin(ready(ok_res::<String, _>(server_text("hi".to_string())))) as SkyTask<String, ServerResponse>
         });
         assert_eq!(r.method, "GET");
-        assert!(r.handler.is_some());
+        assert!(matches!(r.target, RouteTarget::Handler(_)));
         let resp = server_with_status(404, server_text("nope".to_string()));
         assert_eq!(resp.status, 404);
     }

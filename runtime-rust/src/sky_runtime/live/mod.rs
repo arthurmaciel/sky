@@ -1186,16 +1186,14 @@ where
                 .filter(|t| csrf::token_is_well_formed(t))
                 .unwrap_or_else(csrf::gen_token);
             let hit = match cookie_sid.as_ref() {
-                Some(s) => st.store.get(s).await,
+                Some(s) => st.store.get(s).await.map(|h| (s.clone(), h)),
                 None => None,
             };
 
             let (sid, model, cmd0) = match hit {
-                Some(store::StoreHit::Live(handle)) => {
-                    // cookie_sid is structurally Some on a store hit (the hit was looked
-                    // up from it); the impossible None degrades to a fresh session rather
-                    // than panicking.
-                    let s = cookie_sid.unwrap_or_else(new_sid);
+                Some((sid, store::StoreHit::Live(handle))) => {
+                    // sid is carried from the cookie lookup; the "hit but no sid"
+                    // state is unrepresentable.
                     let body = {
                         let mut e = handle.lock().unwrap_or_else(|e| e.into_inner());
                         e.model = (st.route_resolver)(e.model.clone(), uri.path());
@@ -1206,16 +1204,15 @@ where
                         e.last_view = tree.clone();
                         render_html(&tree)
                     };
-                    st.store.set(&s, handle).await; // touch last-seen
-                    return page_response(&s, &body, &csrf_tok);
+                    st.store.set(&sid, handle).await; // touch last-seen
+                    return page_response(&sid, &body, &csrf_tok);
                 }
-                Some(store::StoreHit::Cold(m)) => {
+                Some((sid, store::StoreHit::Cold(m))) => {
                     // A returning user with a valid sid cookie → not new attack
                     // volume, so NOT rejected; but count its driver so the slot it
                     // gets below is paired (decremented on the driver's exit).
                     st.session_count.fetch_add(1, Ordering::SeqCst);
-                    let s = cookie_sid.unwrap_or_else(new_sid);
-                    (s, (st.route_resolver)(m, uri.path()), SkyCmd::None)
+                    (sid, (st.route_resolver)(m, uri.path()), SkyCmd::None)
                 }
                 None => {
                     // Admission control (cookieless = brand-new session = the

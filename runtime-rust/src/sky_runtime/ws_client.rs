@@ -423,11 +423,14 @@ fn subscribe_events(socket_id: i64) -> Option<tokio::sync::broadcast::Receiver<W
 // time, and re-subscribes are no-ops — matching Go's "subsequent re-subscriptions
 // are no-ops". The emit callback funnels into the loop channel, stable for the
 // program's lifetime.
-fn ws_subscribed() -> &'static Mutex<std::collections::HashSet<(i64, &'static str)>> {
-    static S: OnceLock<Mutex<std::collections::HashSet<(i64, &'static str)>>> = OnceLock::new();
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
+enum WsSubKind { Message, Open, Close, Error }
+
+fn ws_subscribed() -> &'static Mutex<std::collections::HashSet<(i64, WsSubKind)>> {
+    static S: OnceLock<Mutex<std::collections::HashSet<(i64, WsSubKind)>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
-fn ws_mark_subscribed(socket_id: i64, kind: &'static str) -> bool {
+fn ws_mark_subscribed(socket_id: i64, kind: WsSubKind) -> bool {
     ws_subscribed().lock().unwrap_or_else(|e| e.into_inner()).insert((socket_id, kind))
 }
 // True iff the socket is currently in the registry. Gate ws_mark_subscribed on
@@ -444,7 +447,7 @@ fn ws_registered(socket_id: i64) -> bool {
 pub fn sub_subscribe_ws_message<M, F>(socket_id: i64, to_msg: F) -> SkySub<M>
 where M: Send + 'static, F: Fn(WsClientMessage) -> M + Send + Sync + 'static {
     SkySub::Source(Box::new(move |emit| {
-        if ws_registered(socket_id) && ws_mark_subscribed(socket_id, "message") {
+        if ws_registered(socket_id) && ws_mark_subscribed(socket_id, WsSubKind::Message) {
             tokio::spawn(async move {
                 let mut rx = match subscribe_events(socket_id) { Some(rx) => rx, None => return };
                 loop {
@@ -468,7 +471,7 @@ where M: Send + 'static, F: Fn(WsClientMessage) -> M + Send + Sync + 'static {
 pub fn sub_subscribe_ws_open<M>(socket_id: i64, msg: M) -> SkySub<M>
 where M: Send + 'static {
     SkySub::Source(Box::new(move |emit| {
-        if ws_registered(socket_id) && ws_mark_subscribed(socket_id, "open") {
+        if ws_registered(socket_id) && ws_mark_subscribed(socket_id, WsSubKind::Open) {
             emit(msg);
         }
         tokio::spawn(async {})
@@ -479,7 +482,7 @@ where M: Send + 'static {
 pub fn sub_subscribe_ws_close<M, F>(socket_id: i64, to_msg: F) -> SkySub<M>
 where M: Send + 'static, F: Fn(WsCloseCode) -> M + Send + Sync + 'static {
     SkySub::Source(Box::new(move |emit| {
-        if ws_registered(socket_id) && ws_mark_subscribed(socket_id, "close") {
+        if ws_registered(socket_id) && ws_mark_subscribed(socket_id, WsSubKind::Close) {
             tokio::spawn(async move {
                 let mut rx = match subscribe_events(socket_id) { Some(rx) => rx, None => return };
                 loop {
@@ -501,7 +504,7 @@ where M: Send + 'static, F: Fn(WsCloseCode) -> M + Send + Sync + 'static {
 pub fn sub_subscribe_ws_error<E, M, F>(socket_id: i64, to_msg: F) -> SkySub<M>
 where E: From<String> + Send + 'static, M: Send + 'static, F: Fn(E) -> M + Send + Sync + 'static {
     SkySub::Source(Box::new(move |emit| {
-        if ws_registered(socket_id) && ws_mark_subscribed(socket_id, "error") {
+        if ws_registered(socket_id) && ws_mark_subscribed(socket_id, WsSubKind::Error) {
             tokio::spawn(async move {
                 let mut rx = match subscribe_events(socket_id) { Some(rx) => rx, None => return };
                 loop {

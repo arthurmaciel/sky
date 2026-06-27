@@ -414,19 +414,31 @@ fn render_labels_with_le(labels: &[(String, String)], le: &str) -> String {
     format!("{{{}}}", pairs.join(","))
 }
 
-/// Per-metric (TYPE, HELP) for the exposition header. Unknown names default to a
-/// counter with a generic help line (still well-formed for scrapers).
-fn metric_meta(name: &str) -> (&'static str, &'static str) {
+/// Prometheus `# TYPE` token from the stored value variant — single source of
+/// truth, so the header can't contradict the emitted series body.
+fn prom_type_token(v: &MetricValue) -> &'static str {
+    match v {
+        MetricValue::Counter(_) => "counter",
+        MetricValue::Gauge(_) => "gauge",
+        MetricValue::Histogram { .. } => "histogram",
+    }
+}
+
+/// Per-metric HELP line for the exposition header. Unknown names get a generic
+/// help line (still well-formed for scrapers). The TYPE header is now derived
+/// from the stored `MetricValue` variant via `prom_type_token`, so the two
+/// can't contradict each other.
+fn metric_help(name: &str) -> &'static str {
     match name {
-        "sky_live_requests_total" => ("counter", "Total HTTP requests served, by method and status."),
-        "sky_live_sse_drops_total" => ("counter", "SSE patches dropped due to a full per-session buffer."),
-        "sky_live_sse_connections_total" => ("counter", "Total SSE connections opened."),
-        "sky_live_sessions_active" => ("gauge", "Currently-active Sky.Live sessions."),
-        "sky_live_errors_total" => ("counter", "Total responses with a 5xx status."),
-        "sky_live_request_seconds" => ("histogram", "HTTP request latency in seconds."),
-        "sky_live_msg_seconds" => ("histogram", "Msg-handling latency in seconds, by Msg variant name."),
-        "sky_live_msg_total" => ("counter", "Total Msgs handled, by variant name, outcome, and noop."),
-        _ => ("counter", "Sky runtime metric."),
+        "sky_live_requests_total" => "Total HTTP requests served, by method and status.",
+        "sky_live_sse_drops_total" => "SSE patches dropped due to a full per-session buffer.",
+        "sky_live_sse_connections_total" => "Total SSE connections opened.",
+        "sky_live_sessions_active" => "Currently-active Sky.Live sessions.",
+        "sky_live_errors_total" => "Total responses with a 5xx status.",
+        "sky_live_request_seconds" => "HTTP request latency in seconds.",
+        "sky_live_msg_seconds" => "Msg-handling latency in seconds, by Msg variant name.",
+        "sky_live_msg_total" => "Total Msgs handled, by variant name, outcome, and noop.",
+        _ => "Sky runtime metric.",
     }
 }
 
@@ -463,8 +475,8 @@ pub fn write_prom() -> String {
     let mut last_name: Option<&str> = None;
     for (key, val) in g.iter() {
         if last_name != Some(key.name.as_str()) {
-            let (typ, help) = metric_meta(&key.name);
-            out.push_str(&format!("# HELP {} {}\n# TYPE {} {}\n", key.name, help, key.name, typ));
+            out.push_str(&format!("# HELP {} {}\n# TYPE {} {}\n",
+                key.name, metric_help(&key.name), key.name, prom_type_token(val)));
             last_name = Some(key.name.as_str());
         }
         let labels = render_labels(&key.labels);

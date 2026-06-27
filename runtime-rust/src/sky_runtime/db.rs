@@ -957,14 +957,20 @@ pub fn db_get_bool<R: SkyRow>(field: String, row: R) -> bool {
     )
 }
 
-/// Quote an identifier (table/column name) for safe SQL inclusion.
-/// Allows only [A-Za-z0-9_]; returns empty on invalid input.
-fn safe_ident(name: &str) -> String {
-    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !name.is_empty() {
-        name.to_string()
-    } else {
-        String::new()
+/// A validated SQL identifier (table/column name) — parse-don't-validate. The
+/// only constructor runs the `[A-Za-z0-9_]`, non-empty policy, so a value of
+/// this type is always safe to interpolate. No `""` sentinel to re-check; an
+/// unvalidated name is unrepresentable past the boundary.
+struct SqlIdent(String);
+impl SqlIdent {
+    fn parse(name: &str) -> Option<SqlIdent> {
+        if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            Some(SqlIdent(name.to_string()))
+        } else {
+            None
+        }
     }
+    fn as_str(&self) -> &str { &self.0 }
 }
 
 /// `insertRow : Db -> String -> Dict String String -> Task Error Int` —
@@ -973,23 +979,18 @@ pub fn db_insert_row<E: Send + From<String> + 'static>(
     conn: Db, table: String, row: HashMap<String, String>
 ) -> SkyTask<E, i64> {
     Box::pin(async move {
-        let qtable = safe_ident(&table);
-        if qtable.is_empty() {
-            return SkyResult::Err(format!("db.insertRow: invalid table name {:?}", table).into());
-        }
+        let qtable = match SqlIdent::parse(&table) { Some(t) => t, None => return SkyResult::Err(format!("db.insertRow: invalid table name {:?}", table).into()) };
         if row.is_empty() {
             return SkyResult::Err("db.insertRow: empty row".to_string().into());
         }
         let mut keys: Vec<&String> = row.keys().collect();
         keys.sort();  // deterministic column order
-        let col_names: Vec<String> = keys.iter().map(|k| safe_ident(k)).collect();
-        if col_names.iter().any(|c| c.is_empty()) {
-            return SkyResult::Err("db.insertRow: invalid column name".to_string().into());
-        }
+        let col_idents: Vec<SqlIdent> = match keys.iter().map(|k| SqlIdent::parse(k)).collect::<Option<Vec<_>>>() { Some(v) => v, None => return SkyResult::Err("db.insertRow: invalid column name".to_string().into()) };
+        let col_names: Vec<&str> = col_idents.iter().map(SqlIdent::as_str).collect();
         let placeholders = vec!["?"; col_names.len()].join(", ");
         let base = format!(
             "INSERT INTO {} ({}) VALUES ({})",
-            qtable, col_names.join(", "), placeholders
+            qtable.as_str(), col_names.join(", "), placeholders
         );
         if DB_USES_RETURNING_ID {
             // Postgres has no LastInsertId — append `RETURNING id` and read the
@@ -1028,11 +1029,8 @@ pub fn db_get_by_id<E: Send + From<String> + 'static>(
     conn: Db, table: String, id: String
 ) -> SkyTask<E, SkyMaybe<HashMap<String, String>>> {
     Box::pin(async move {
-        let qtable = safe_ident(&table);
-        if qtable.is_empty() {
-            return SkyResult::Err(format!("db.getById: invalid table name {:?}", table).into());
-        }
-        let sql = db_format_sql(format!("SELECT * FROM {} WHERE id = ? LIMIT 1", qtable));
+        let qtable = match SqlIdent::parse(&table) { Some(t) => t, None => return SkyResult::Err(format!("db.getById: invalid table name {:?}", table).into()) };
+        let sql = db_format_sql(format!("SELECT * FROM {} WHERE id = ? LIMIT 1", qtable.as_str()));
         match fetch_optional_routed(&conn, sqlx::query(&sql).bind(id)).await {
             Ok(Some(r)) => ok_res(SkyMaybe::Just(row_to_map(&r))),
             Ok(None) => ok_res(SkyMaybe::Nothing),
@@ -1047,21 +1045,16 @@ pub fn db_update_by_id<E: Send + From<String> + 'static>(
     conn: Db, table: String, id: String, row: HashMap<String, String>
 ) -> SkyTask<E, i64> {
     Box::pin(async move {
-        let qtable = safe_ident(&table);
-        if qtable.is_empty() {
-            return SkyResult::Err(format!("db.updateById: invalid table name {:?}", table).into());
-        }
+        let qtable = match SqlIdent::parse(&table) { Some(t) => t, None => return SkyResult::Err(format!("db.updateById: invalid table name {:?}", table).into()) };
         if row.is_empty() {
             return ok_res(0);
         }
         let mut keys: Vec<&String> = row.keys().collect();
         keys.sort();
-        let col_names: Vec<String> = keys.iter().map(|k| safe_ident(k)).collect();
-        if col_names.iter().any(|c| c.is_empty()) {
-            return SkyResult::Err("db.updateById: invalid column name".to_string().into());
-        }
+        let col_idents: Vec<SqlIdent> = match keys.iter().map(|k| SqlIdent::parse(k)).collect::<Option<Vec<_>>>() { Some(v) => v, None => return SkyResult::Err("db.updateById: invalid column name".to_string().into()) };
+        let col_names: Vec<&str> = col_idents.iter().map(SqlIdent::as_str).collect();
         let sets: Vec<String> = col_names.iter().map(|c| format!("{} = ?", c)).collect();
-        let sql = db_format_sql(format!("UPDATE {} SET {} WHERE id = ?", qtable, sets.join(", ")));
+        let sql = db_format_sql(format!("UPDATE {} SET {} WHERE id = ?", qtable.as_str(), sets.join(", ")));
         let mut q = sqlx::query(&sql);
         for k in &keys {
             q = q.bind(row.get(*k).cloned().unwrap_or_default());
@@ -1080,11 +1073,8 @@ pub fn db_delete_by_id<E: Send + From<String> + 'static>(
     conn: Db, table: String, id: String
 ) -> SkyTask<E, i64> {
     Box::pin(async move {
-        let qtable = safe_ident(&table);
-        if qtable.is_empty() {
-            return SkyResult::Err(format!("db.deleteById: invalid table name {:?}", table).into());
-        }
-        let sql = db_format_sql(format!("DELETE FROM {} WHERE id = ?", qtable));
+        let qtable = match SqlIdent::parse(&table) { Some(t) => t, None => return SkyResult::Err(format!("db.deleteById: invalid table name {:?}", table).into()) };
+        let sql = db_format_sql(format!("DELETE FROM {} WHERE id = ?", qtable.as_str()));
         match exec_routed(&conn, sqlx::query(&sql).bind(id)).await {
             Ok(res) => ok_res(res.rows_affected() as i64),
             Err(e) => SkyResult::Err(sky_err(&e)),
@@ -1097,12 +1087,8 @@ pub fn db_find_one_by_field<E: Send + From<String> + 'static>(
     conn: Db, table: String, field: String, value: String
 ) -> SkyTask<E, SkyMaybe<HashMap<String, String>>> {
     Box::pin(async move {
-        let qtable = safe_ident(&table);
-        let qfield = safe_ident(&field);
-        if qtable.is_empty() || qfield.is_empty() {
-            return SkyResult::Err(format!("db.findOneByField: invalid identifier in {:?}.{:?}", table, field).into());
-        }
-        let sql = db_format_sql(format!("SELECT * FROM {} WHERE {} = ? LIMIT 1", qtable, qfield));
+        let (qtable, qfield) = match (SqlIdent::parse(&table), SqlIdent::parse(&field)) { (Some(t), Some(f)) => (t, f), _ => return SkyResult::Err(format!("db.findOneByField: invalid identifier in {:?}.{:?}", table, field).into()) };
+        let sql = db_format_sql(format!("SELECT * FROM {} WHERE {} = ? LIMIT 1", qtable.as_str(), qfield.as_str()));
         match fetch_optional_routed(&conn, sqlx::query(&sql).bind(value)).await {
             Ok(Some(r)) => ok_res(SkyMaybe::Just(row_to_map(&r))),
             Ok(None) => ok_res(SkyMaybe::Nothing),
@@ -1116,12 +1102,8 @@ pub fn db_find_many_by_field<E: Send + From<String> + 'static>(
     conn: Db, table: String, field: String, value: String
 ) -> SkyTask<E, Vec<HashMap<String, String>>> {
     Box::pin(async move {
-        let qtable = safe_ident(&table);
-        let qfield = safe_ident(&field);
-        if qtable.is_empty() || qfield.is_empty() {
-            return SkyResult::Err(format!("db.findManyByField: invalid identifier in {:?}.{:?}", table, field).into());
-        }
-        let sql = db_format_sql(format!("SELECT * FROM {} WHERE {} = ?", qtable, qfield));
+        let (qtable, qfield) = match (SqlIdent::parse(&table), SqlIdent::parse(&field)) { (Some(t), Some(f)) => (t, f), _ => return SkyResult::Err(format!("db.findManyByField: invalid identifier in {:?}.{:?}", table, field).into()) };
+        let sql = db_format_sql(format!("SELECT * FROM {} WHERE {} = ?", qtable.as_str(), qfield.as_str()));
         match fetch_all_routed(&conn, sqlx::query(&sql).bind(value)).await {
             Ok(rows) => ok_res(rows.iter().map(row_to_map).collect()),
             Err(e) => SkyResult::Err(sky_err(&e)),
@@ -1135,21 +1117,16 @@ pub fn db_find_by_conditions<E: Send + From<String> + 'static>(
     conn: Db, table: String, conditions: HashMap<String, String>
 ) -> SkyTask<E, Vec<HashMap<String, String>>> {
     Box::pin(async move {
-        let qtable = safe_ident(&table);
-        if qtable.is_empty() {
-            return SkyResult::Err(format!("db.findByConditions: invalid table {:?}", table).into());
-        }
+        let qtable = match SqlIdent::parse(&table) { Some(t) => t, None => return SkyResult::Err(format!("db.findByConditions: invalid table {:?}", table).into()) };
         let mut keys: Vec<&String> = conditions.keys().collect();
         keys.sort();
-        let qfields: Vec<String> = keys.iter().map(|k| safe_ident(k)).collect();
-        if qfields.iter().any(|c| c.is_empty()) {
-            return SkyResult::Err("db.findByConditions: invalid column name".to_string().into());
-        }
+        let qfield_idents: Vec<SqlIdent> = match keys.iter().map(|k| SqlIdent::parse(k)).collect::<Option<Vec<_>>>() { Some(v) => v, None => return SkyResult::Err("db.findByConditions: invalid column name".to_string().into()) };
+        let qfields: Vec<&str> = qfield_idents.iter().map(SqlIdent::as_str).collect();
         let sql = db_format_sql(if keys.is_empty() {
-            format!("SELECT * FROM {}", qtable)
+            format!("SELECT * FROM {}", qtable.as_str())
         } else {
             let wheres: Vec<String> = qfields.iter().map(|c| format!("{} = ?", c)).collect();
-            format!("SELECT * FROM {} WHERE {}", qtable, wheres.join(" AND "))
+            format!("SELECT * FROM {} WHERE {}", qtable.as_str(), wheres.join(" AND "))
         });
         let mut q = sqlx::query(&sql);
         for k in &keys {
@@ -1169,11 +1146,8 @@ pub fn db_unsafe_find_where<E: Send + From<String> + 'static>(
     conn: Db, table: String, where_clause: String, args: Vec<String>
 ) -> SkyTask<E, Vec<HashMap<String, String>>> {
     Box::pin(async move {
-        let qtable = safe_ident(&table);
-        if qtable.is_empty() {
-            return SkyResult::Err(format!("db.unsafeFindWhere: invalid table {:?}", table).into());
-        }
-        let sql = format!("SELECT * FROM {} WHERE {}", qtable, where_clause);
+        let qtable = match SqlIdent::parse(&table) { Some(t) => t, None => return SkyResult::Err(format!("db.unsafeFindWhere: invalid table {:?}", table).into()) };
+        let sql = format!("SELECT * FROM {} WHERE {}", qtable.as_str(), where_clause);
         db_query(conn, sql, args).await
     })
 }
@@ -1250,14 +1224,9 @@ pub fn db_get_by_id_decode<E: Send + From<String> + 'static, A: Send + 'static>(
     conn: Db, table: String, id: i64, decoder: Decoder<E, A>,
 ) -> SkyTask<E, SkyMaybe<A>> {
     Box::pin(async move {
-        let qtable = safe_ident(&table);
-        if qtable.is_empty() {
-            return SkyResult::Err(
-                format!("db.getByIdDecode: invalid table name {:?}", table).into()
-            );
-        }
+        let qtable = match SqlIdent::parse(&table) { Some(t) => t, None => return SkyResult::Err(format!("db.getByIdDecode: invalid table name {:?}", table).into()) };
         // id is bound as a parameter — injection-safe.
-        let sql = db_format_sql(format!("SELECT * FROM {} WHERE id = ? LIMIT 1", qtable));
+        let sql = db_format_sql(format!("SELECT * FROM {} WHERE id = ? LIMIT 1", qtable.as_str()));
         match fetch_optional_routed(&conn, sqlx::query(&sql).bind(id)).await {
             Ok(None)       => ok_res(SkyMaybe::Nothing),
             Ok(Some(row))  => {

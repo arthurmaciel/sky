@@ -91,7 +91,10 @@ pub fn gate_allows() -> bool {
     ) {
         return false;
     }
-    if std::env::var("SKY_CONSOLE_AUTH").map(|v| v == "off").unwrap_or(false) {
+    if std::env::var("SKY_CONSOLE_AUTH")
+        .map(|v| v.trim().eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+    {
         return false;
     }
     // Production without an admin token → no silent open-to-the-world mount.

@@ -16,11 +16,12 @@ use std::sync::{Mutex, OnceLock};
 // ── Currency table ─────────────────────────────────────────────────
 
 /// One row of the ISO 4217 / cryptocurrency lookup table.
-/// (minor_units, symbol, name)
-fn lookup_currency(code: &str) -> (i64, &'static str, &'static str) {
+struct CurrencyInfo { minor_units: u32, symbol: &'static str, name: &'static str }
+
+fn lookup_currency(code: &str) -> Option<CurrencyInfo> {
     let c = code.trim().to_uppercase();
-    match c.as_str() {
-        "USD" => (2, "$", "US Dollar"),
+    let (minor_units, symbol, name) = match c.as_str() {
+        "USD" => (2u32, "$", "US Dollar"),
         "EUR" => (2, "€", "Euro"),
         "GBP" => (2, "£", "British Pound"),
         "JPY" => (0, "¥", "Japanese Yen"),
@@ -75,36 +76,30 @@ fn lookup_currency(code: &str) -> (i64, &'static str, &'static str) {
         "RUB" => (2, "₽", "Russian Ruble"),
         "UAH" => (2, "₴", "Ukrainian Hryvnia"),
         "BTC" => (8, "₿", "Bitcoin"),
-        // Fallback: unknown code → (2, code, code), matching Go's lookupCurrency.
-        // We can't return owned strings from a static match — so for unknowns
-        // we just signal via the Minor field and let callers handle string
-        // fallback (the public-facing kernels below own that logic).
-        _ => (-1, "", ""),
-    }
+        _ => return None,
+    };
+    Some(CurrencyInfo { minor_units, symbol, name })
 }
 
 /// "Is this a known ISO 4217 / crypto code?" — used by `money_is_known_currency`.
 fn is_known(code: &str) -> bool {
-    lookup_currency(code).0 != -1
+    lookup_currency(code).is_some()
 }
 
 // ── Property kernels ───────────────────────────────────────────────
 
 pub fn money_minor_units(code: String) -> i64 {
-    let (m, _, _) = lookup_currency(&code);
-    if m < 0 { 2 } else { m }
+    match lookup_currency(&code) { Some(c) => c.minor_units as i64, None => 2 }
 }
 
 pub fn money_symbol(code: String) -> String {
     let upper = code.trim().to_uppercase();
-    let (m, s, _) = lookup_currency(&upper);
-    if m < 0 { upper } else { s.to_string() }
+    match lookup_currency(&upper) { Some(c) => c.symbol.to_string(), None => upper }
 }
 
 pub fn money_currency_name(code: String) -> String {
     let upper = code.trim().to_uppercase();
-    let (m, _, n) = lookup_currency(&upper);
-    if m < 0 { upper } else { n.to_string() }
+    match lookup_currency(&upper) { Some(c) => c.name.to_string(), None => upper }
 }
 
 pub fn money_is_known_currency(code: String) -> bool {
@@ -116,9 +111,10 @@ pub fn money_is_known_currency(code: String) -> bool {
 /// `format : Code -> Decimal -> String` — "$12.34" / "-$12.34".
 pub fn money_format(code: String, amount: Decimal) -> String {
     let upper = code.trim().to_uppercase();
-    let (raw_minor, symbol, _) = lookup_currency(&upper);
-    let minor = if raw_minor < 0 { 2 } else { raw_minor } as u32;
-    let symbol = if raw_minor < 0 { upper.as_str() } else { symbol };
+    let (minor, symbol) = match lookup_currency(&upper) {
+        Some(c) => (c.minor_units, c.symbol.to_string()),
+        None => (2, upper.clone()),
+    };
     let neg = amount.0.is_sign_negative();
     let abs = if neg { -amount.0 } else { amount.0 };
     let fixed = format!("{:.*}", minor as usize, abs);
@@ -132,8 +128,7 @@ pub fn money_format(code: String, amount: Decimal) -> String {
 /// `formatWithCode : Code -> Decimal -> String` — "12.34 USD" for B2B output.
 pub fn money_format_with_code(code: String, amount: Decimal) -> String {
     let upper = code.trim().to_uppercase();
-    let (raw_minor, _, _) = lookup_currency(&upper);
-    let minor = if raw_minor < 0 { 2 } else { raw_minor } as u32;
+    let minor = match lookup_currency(&upper) { Some(c) => c.minor_units, None => 2 };
     format!("{:.*} {}", minor as usize, amount.0, upper)
 }
 

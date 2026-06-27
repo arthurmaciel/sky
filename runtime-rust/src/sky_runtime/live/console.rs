@@ -116,6 +116,46 @@ fn header_authorizes(auth: &str, tok: &str) -> bool {
     false
 }
 
+/// The parsed console-auth mode — the single authoritative representation of
+/// `SKY_CONSOLE_AUTH` (trim + lowercase; unknown → `Off`, no silent widen).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ConsoleAuthMode {
+    Off,
+    Token,
+    App,
+    UnsetProd,
+    DevOpen,
+}
+impl ConsoleAuthMode {
+    fn label(self) -> &'static str {
+        match self {
+            ConsoleAuthMode::Off => "off",
+            ConsoleAuthMode::Token => "token",
+            ConsoleAuthMode::App => "app",
+            ConsoleAuthMode::UnsetProd => "unset-prod",
+            ConsoleAuthMode::DevOpen => "dev-open",
+        }
+    }
+}
+/// The ONE parse of `SKY_CONSOLE_AUTH` (trim + lowercase; unknown → `Off`, no
+/// silent widen). Unset → `DevOpen` in dev / `UnsetProd` in production.
+fn resolve_console_auth_mode() -> ConsoleAuthMode {
+    let raw = std::env::var("SKY_CONSOLE_AUTH").unwrap_or_default();
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" => ConsoleAuthMode::Off,
+        "token" => ConsoleAuthMode::Token,
+        "app" => ConsoleAuthMode::App,
+        "" => {
+            if telemetry::production_from_env() {
+                ConsoleAuthMode::UnsetProd
+            } else {
+                ConsoleAuthMode::DevOpen
+            }
+        }
+        _ => ConsoleAuthMode::Off,
+    }
+}
+
 /// The console-auth mode label, mirroring Go's `describeConsoleAuthMode`
 /// (`console_auth_v2.go:149`) over `resolveConsoleAuthMode`'s env/production
 /// derivation. Used for the `[sky.console] inline console mounted … mode=<m>`
@@ -126,33 +166,21 @@ fn header_authorizes(auth: &str, tok: &str) -> bool {
 /// in production (`ENV`/`SKY_ENV` non-dev); any unknown value → `off` (Go refuses
 /// to silently widen to something more permissive).
 pub fn console_auth_mode_label() -> &'static str {
-    let raw = std::env::var("SKY_CONSOLE_AUTH").unwrap_or_default();
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "off" => "off",
-        "token" => "token",
-        "app" => "app",
-        "" => {
-            if telemetry::production_from_env() {
-                "unset-prod"
-            } else {
-                "dev-open"
-            }
-        }
-        _ => "off",
-    }
+    resolve_console_auth_mode().label()
 }
 
 pub fn gate_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::Response> {
     // Resolve through the SAME normalizer as console_auth_mode_label (trim +
-    // lowercase + unknown→off). A raw, case-sensitive `== "off"` let `OFF` / `Off`
-    // / ` off ` slip through and leave the console MOUNTED (fail-OPEN) — diverging
-    // from the label's fail-closed contract. One resolver, one behaviour.
-    match console_auth_mode_label() {
-        "off" => return Some((StatusCode::NOT_FOUND, "console disabled").into_response()),
+    // lowercase + unknown→off). One resolver, one behaviour — the exhaustive
+    // enum match makes the compiler verify every variant is handled.
+    match resolve_console_auth_mode() {
+        ConsoleAuthMode::Off => {
+            return Some((StatusCode::NOT_FOUND, "console disabled").into_response())
+        }
         // `SKY_CONSOLE_AUTH=app` (row-poly `consoleAuth` callback) is not yet
         // implemented in the Rust runtime. Fail closed with a clear 501 rather than
         // a misleading 401 that suggests a bad token would fix it.
-        "app" => {
+        ConsoleAuthMode::App => {
             return Some(
                 (
                     StatusCode::NOT_IMPLEMENTED,
@@ -162,8 +190,8 @@ pub fn gate_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::R
                     .into_response(),
             )
         }
-        // "token" / "unset-prod" / "dev-open" fall through to the prod/token gate.
-        _ => {}
+        // Token / UnsetProd / DevOpen fall through to the prod/token gate below.
+        ConsoleAuthMode::Token | ConsoleAuthMode::UnsetProd | ConsoleAuthMode::DevOpen => {}
     }
     if !telemetry::production_from_env() {
         return None;
