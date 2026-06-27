@@ -36,9 +36,12 @@ pub fn auth_hash_password<E: From<String>>(pw: String) -> SkyResult<E, String> {
     auth_hash_password_cost(pw, 12)
 }
 
-/// Sky `hashPasswordCost : String -> Int -> Result Error String`. Clamps cost
-/// to [4, 31] (bcrypt's valid range; 4 = fast for tests, 12 = production
-/// default, 14+ = high security).
+/// Sky `hashPasswordCost : String -> Int -> Result Error String`. Clamps cost to
+/// [4, 15] (4 = fast for tests, 12 = production default, 14–15 = high security).
+/// The bcrypt VALID range is [4, 31], but cost is caller-controlled: each +1
+/// DOUBLES the work, so cost 31 is a single-call CPU-exhaustion DoS (~years per
+/// hash). 15 (~1–2 s/hash) is a generous operational ceiling; higher is always a
+/// self-DoS, so it is clamped down rather than honoured.
 pub fn auth_hash_password_cost<E: From<String>>(pw: String, cost: i64) -> SkyResult<E, String> {
     if pw.chars().count() < 8 {
         return SkyResult::Err("password must be at least 8 characters".to_string().into());
@@ -46,7 +49,7 @@ pub fn auth_hash_password_cost<E: From<String>>(pw: String, cost: i64) -> SkyRes
     if pw.len() > 72 {
         return SkyResult::Err("password longer than 72 bytes (bcrypt limit)".to_string().into());
     }
-    let clamped = cost.clamp(4, 31) as u32;
+    let clamped = cost.clamp(4, 15) as u32;
     match bcrypt::hash(&pw, clamped) {
         Ok(h) => SkyResult::Ok(h),
         Err(e) => SkyResult::Err(format!("bcrypt: {}", e).into()),
@@ -198,9 +201,13 @@ pub fn auth_register<E: Send + From<String> + 'static>(
         if let SkyResult::Err(e) = ensure_users_schema::<E>(&conn).await {
             return SkyResult::Err(e);
         }
-        let hash = match auth_hash_password::<E>(password) {
-            SkyResult::Ok(h) => h,
-            SkyResult::Err(e) => return SkyResult::Err(e),
+        // bcrypt is CPU-bound and BLOCKING (~250 ms at cost 12). Running it on a
+        // tokio worker thread starves the async runtime (every concurrent register
+        // ties up a core worker). Offload to the blocking pool.
+        let hash = match tokio::task::spawn_blocking(move || auth_hash_password::<E>(password)).await {
+            Ok(SkyResult::Ok(h)) => h,
+            Ok(SkyResult::Err(e)) => return SkyResult::Err(e),
+            Err(_) => return SkyResult::Err("auth.register: password-hash task failed".to_string().into()),
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -245,9 +252,14 @@ pub fn auth_login<E: Send + From<String> + 'static>(
                 use sqlx::Row;
                 let id: i64 = row.try_get(0).unwrap_or(0);
                 let hash: String = row.try_get(1).unwrap_or_default();
-                match bcrypt::verify(&password, &hash) {
-                    Ok(true) => SkyResult::Ok(id),
-                    _ => SkyResult::Err("auth.login: invalid credentials".to_string().into()),
+                // bcrypt::verify is CPU-bound + blocking → blocking pool (see register).
+                let ok = tokio::task::spawn_blocking(move || bcrypt::verify(&password, &hash).unwrap_or(false))
+                    .await
+                    .unwrap_or(false);
+                if ok {
+                    SkyResult::Ok(id)
+                } else {
+                    SkyResult::Err("auth.login: invalid credentials".to_string().into())
                 }
             }
             Ok(None) => {
@@ -255,7 +267,8 @@ pub fn auth_login<E: Send + From<String> + 'static>(
                 // cost-12 hash so the unknown-email path does the same hashing
                 // work as the known-email path — removing the email-enumeration
                 // timing oracle. The result is discarded.
-                let _ = bcrypt::verify(&password, dummy_bcrypt_hash());
+                let _ = tokio::task::spawn_blocking(move || bcrypt::verify(&password, dummy_bcrypt_hash()))
+                    .await;
                 SkyResult::Err("auth.login: invalid credentials".to_string().into())
             }
             Err(e) => SkyResult::Err(format!("auth.login: {}", e).into()),
