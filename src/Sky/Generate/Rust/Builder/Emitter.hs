@@ -1414,16 +1414,23 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore resolvedTransitiveCrates = 
             error $ "sky codegen: invalid feature string for crate " ++ show name
         | null feats    = name ++ " = \"" ++ ver ++ "\""
         | otherwise     = name ++ " = { version = \"" ++ ver ++ "\", features = [" ++ intercalate ", " (map show feats) ++ "] }"
-    emitDepLine name (Toml.RustGitDep url mRev mBranch mTag)
+    emitDepLine name (Toml.RustGitDep url mRev mBranch mTag feats)
         | not (validCrateName name) =
             error $ "sky codegen: invalid Rust crate name in sky.toml: " ++ show name
         | not (validTomlStr url) =
             error $ "sky codegen: invalid git URL for crate " ++ show name ++ ": " ++ show url
         | not (all validTomlStr (maybe [] pure mRev ++ maybe [] pure mBranch ++ maybe [] pure mTag)) =
             error $ "sky codegen: invalid git ref (rev/branch/tag) for crate " ++ show name
+        | not (all validTomlStr feats) =
+            error $ "sky codegen: invalid feature string for crate " ++ show name
         | otherwise =
+            -- #100 Part B: a git-sourced FFI crate also needs its feature-gated
+            -- APIs enabled (inspector-merged in Project.mergePkgFeatures). Render a
+            -- `features = [...]` field when non-empty; absent → byte-identical to
+            -- the pre-#100 git dep line.
             let fields = [ "git = " ++ show url ]
                     ++ maybe [] (\r -> ["rev = " ++ show r]) mRev
                     ++ maybe [] (\b -> ["branch = " ++ show b]) mBranch
                     ++ maybe [] (\t -> ["tag = " ++ show t]) mTag
+                    ++ [ "features = [" ++ intercalate ", " (map show feats) ++ "]" | not (null feats) ]
             in name ++ " = { " ++ intercalate ", " fields ++ " }"

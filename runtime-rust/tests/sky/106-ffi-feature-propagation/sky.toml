@@ -1,0 +1,10 @@
+[project]
+name = "106-ffi-feature-propagation"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# NO features declared here on purpose: the inspector auto-discovers `extra`
+# (#89 visibility) and Part B (#100) propagates it into the generated Cargo.toml.
+["rust.dependencies"]
+featgate106crate = { git = "file:///home/arthur/.cache/sky/106-ffi-feature-propagation-crate", branch = "master" }

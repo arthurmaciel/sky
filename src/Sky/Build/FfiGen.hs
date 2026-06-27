@@ -170,6 +170,15 @@ data PkgInfo = PkgInfo
         -- locked version). The Rust kernel.json emitter re-emits this; the Rust
         -- codegen consults it to resolve a wrapper's `::<ident>::…` crate-absolute
         -- reference to the real `[dependencies]` key + version. Empty for Go.
+    , _pkgFeatures :: [String]
+        -- ^ #100 Part B: Rust target only. The EFFECTIVE crate feature set the
+        -- inspector's rustdoc introspection SUCCEEDED with — i.e. the set the
+        -- bound wrappers reference. The Rust kernel.json emitter re-emits this;
+        -- the Rust codegen merges it into the primary FFI crate's `[dependencies]`
+        -- line so feature-gated APIs (firestore `caching`, …) actually exist at
+        -- build time. Empty when rustdoc ran on default features (no injection or
+        -- the injected set was dropped on the exclusive-feature fallback). Empty
+        -- for Go.
     }
     deriving (Show)
 
@@ -225,6 +234,8 @@ instance A.FromJSON PkgInfo where
         <*> o A..:? "notes" A..!= []
         -- WALL-B (#75): camelCase key the Rust inspector emits; absent for Go.
         <*> (o A..:? "transitiveDeps" A..!= [] >>= mapM parseTransDep)
+        -- #100 Part B: effective crate feature set; absent for Go / default-feature builds.
+        <*> o A..:? "features" A..!= []
       where
         parseTransDep = A.withObject "TransitiveDep" $ \d ->
             (,,) <$> d A..: "ident" <*> d A..: "name" <*> d A..: "version"

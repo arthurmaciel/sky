@@ -1,8 +1,40 @@
 # #73 — firestore SKY_DCE=0 full-surface residuals: validated analysis + 2-part plan
 
-> **Status:** ANALYSIS COMPLETE + Part B empirically validated. Implementation in
-> progress. Branch `feat/runtime-rust`. Reproduced on real firestore 0.49.0 with a
+> **Status:** ANALYSIS COMPLETE. **Part B SHIPPED + guardian-approved** (feature
+> propagation, incl. git deps). **Part A: E0107 gate SHIPPED**; 9-error UFCS tail
+> remaining. Branch `feat/runtime-rust`. Reproduced on real firestore 0.49.0 with a
 > `firestore = "0.49.0"` scratch project under `SKY_DCE=0` (keeps ALL 862 wrappers).
+
+## OUTCOME (2026-06-27)
+
+**Part B (#100) — SHIPPED.** Feature propagation closes the dominant 112-error
+class. Real firestore `SKY_DCE=0`: **124 → 11 errors** (the 11 = Part A tail). Both
+guardian gates passed (design APPROVE-WITH-CONSTRAINTS → all constraints applied →
+final APPROVE-WITH-CONSTRAINTS, safe to commit).
+- Inspector (`tools/sky-ffi-inspect-rs`): `PkgInfo.features` = the EFFECTIVE
+  feature set rustdoc SUCCEEDED with (threaded through `run_rustdoc`; the existing
+  mutually-exclusive fallback ⇒ `effective=[]`). Serialized into kernel.json.
+- Codegen: `readPkgFeatures` + `mergePkgFeatures` (`src/Sky/Generate/Rust/Project.hs`)
+  union the inspector set into the user's sky.toml dep spec (charset fail-safe-drop
+  on inspector features; user features keep the strict emit gate; `try`-guarded read).
+- **Generalised to git deps** (not just crates.io `RustVersion`): `_gitFeatures`
+  on `RustGitDep` + parse + `emitDepLine` + `mergePkgFeatures` git arm — a
+  git-sourced complex crate gets its gated APIs too. Soundness is dep-source-agnostic.
+- Regression: hermetic fixture `106-ffi-feature-propagation` (git dep, gated
+  `extra_value`) builds + runs `[ALL OK]` — the gated fn links ONLY because the
+  feature was propagated. Existing git-dep fixtures 104/105 stay `[ALL OK]` (bare
+  dep lines; their crates have no features → byte-identical).
+- Soundness keystone: every propagated set is one rustdoc (macro-expand +
+  type-check) accepted ⇒ free of the `compile_error!`-class conflict; residual
+  rustdoc-vs-cargo divergences are all FAIL-CLOSED (loud cargo error). Inspector
+  features are TRIPLE-gated (cargo charset + jsonQuote + validCargoFeature drop +
+  validTomlStr) ⇒ can never inject TOML nor reach the emit-time `error`.
+- Follow-up filed: #103 (pre-existing `parseInlineTable` multi-element user-feature
+  array drop — fail-safe under-featuring; doesn't affect any current crate).
+
+**Part A — E0107 gate SHIPPED** (generic-struct field-accessor drop; fixture 105).
+Remaining: the 9-error UFCS/external-trait tail (6 E0308 + 3 E0603 — wait, now 5
+E0308 + 3 E0603 + 1 E0261 = 9 after E0107). See §"Part A" below.
 
 ## The real residual count: 124 (not the filed 66)
 

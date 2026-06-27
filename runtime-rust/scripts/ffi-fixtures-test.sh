@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain 94-ffi-inherent-self-output 95-ffi-inherent-self-output-async 96-ffi-external-trait-xcrate 97-ffi-numeric-param-coerce 98-ffi-projected-numeric 99-ffi-nested-numeric-drop 100-ffi-asref-return 101-task-rethunk 102-task-rethunk-free-tvar 103-task-rethunk-discard 104-ffi-owned-query-builder 105-ffi-generic-struct-accessor)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain 94-ffi-inherent-self-output 95-ffi-inherent-self-output-async 96-ffi-external-trait-xcrate 97-ffi-numeric-param-coerce 98-ffi-projected-numeric 99-ffi-nested-numeric-drop 100-ffi-asref-return 101-task-rethunk 102-task-rethunk-free-tvar 103-task-rethunk-discard 104-ffi-owned-query-builder 105-ffi-generic-struct-accessor 106-ffi-feature-propagation)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -1318,6 +1318,44 @@ run_generic_struct_accessor() {
 }
 
 
+# 106-ffi-feature-propagation — #100 Part B. `featgate106crate` gates `extra_value`
+# behind the `extra` Cargo feature. The inspector auto-discovers `extra` (#89: no
+# `full` feature ⇒ enable all) + binds it; Part B then PROPAGATES `extra` into the
+# generated project's `[dependencies]` line (a GIT dep — exercises the RustGitDep
+# merge path) so the auto-bound wrapper actually compiles + runs.
+# POSITIVE: generated Cargo.toml git dep carries `features = ["extra"]`; both
+# base_value + extra_value bind; [ALL OK] (gated extra_value runs → 42).
+# Without Part B the dep line stays bare → extra_value is E0425 cargo-fail.
+# ─────────────────────────────────────────────────────────────────────────────
+run_feature_propagation() {
+  local base=106-ffi-feature-propagation
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+  local wd; wd="$(stage_workdir "$src")" || { _fail "$base (stage failed)"; return; }
+  local bin; bin="$(build_fixture "$wd")" || { _fail "$base (build failed)"; rm -rf "$wd"; return; }
+  local cargo="$wd/sky-out/rust/Cargo.toml"
+  local skyi="$wd/.skycache/ffi/rust/featgate106crate.skyi"
+  # POSITIVE: the inspector-discovered `extra` feature must be propagated onto the
+  # git dep line (the heart of Part B). A bare line = the bug this fixture guards.
+  if ! rg -q '^featgate106crate = .*features = \[.*"extra".*\]' "$cargo" 2>/dev/null; then
+    _fail "$base: 'extra' feature NOT propagated to git dep line (got: $(rg '^featgate106crate' "$cargo" 2>/dev/null))"; rm -rf "$wd"; return
+  fi
+  # POSITIVE: the feature-gated binding must be present in the .skyi.
+  if ! rg -q 'extra_value : Int -> Result Error Int' "$skyi" 2>/dev/null; then
+    _fail "$base: feature-gated extra_value did NOT bind"; rm -rf "$wd"; return
+  fi
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (inspector feature 'extra' propagated to git dep · gated extra_value bind+run=42 · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
 run_selfref_miri_proof() {
   local base=selfref-builder-proof
   # Sibling of $FIXROOT (a standalone proof crate, not a sky fixture).
@@ -1371,6 +1409,7 @@ for n in "${FIXTURES[@]}"; do
     97-ffi-numeric-param-coerce) run_numeric_param_coerce ;;
     104-ffi-owned-query-builder) run_owned_query_builder ;;
     105-ffi-generic-struct-accessor) run_generic_struct_accessor ;;
+    106-ffi-feature-propagation) run_feature_propagation ;;
     selfref-builder-proof)    run_selfref_miri_proof ;;
     *)                        run_basic "$n" ;;
   esac

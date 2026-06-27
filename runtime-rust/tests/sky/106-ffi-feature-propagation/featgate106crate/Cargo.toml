@@ -1,0 +1,12 @@
+[package]
+name = "featgate106crate"
+version = "0.1.0"
+edition = "2021"
+
+# Part B (#100): `extra` gates the `extra_value` API. The crate has NO `full`
+# feature, so the inspector's #89 visibility logic injects ALL features (= `extra`)
+# to maximise the bound surface → it SEES + binds `extra_value`. The generated
+# project's Cargo.toml must therefore ALSO enable `extra` (feature propagation) or
+# the auto-bound `extra_value` wrapper fails to compile (E0425 unresolved fn).
+[features]
+extra = []

@@ -451,6 +451,17 @@ struct PkgInfo {
     // the Go inspector and for any crate whose `cargo metadata` could not run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     transitive_deps: Vec<TransitiveDep>,
+    // [#100 Part B] The EFFECTIVE feature set the rustdoc introspection actually
+    // SUCCEEDED with — i.e. the set the bound wrappers were generated against.
+    // For a no-`full`-feature crate the #89 visibility logic injects ALL features,
+    // so the wrappers reference feature-gated APIs (e.g. firestore `caching`); the
+    // generated `[dependencies]` must enable the SAME set or those types vanish
+    // (E0412/E0433/E0405/E0599 — the firestore #73/#100 dominant class). Empty when
+    // rustdoc ran on DEFAULT features (no injection, or the injected set was dropped
+    // on the mutually-exclusive-feature fallback) — propagating nothing is then
+    // correct. The Rust codegen merges this into the primary FFI crate's dep line.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    features: Vec<String>,
 }
 
 // ── Entry point ────────────────────────────────────────────────────────
@@ -539,6 +550,7 @@ fn main() {
                     errors: vec![format!("manifest parse error: {}", e)],
                     notes: vec![],
                     transitive_deps: vec![],
+                    features: vec![],
                 };
                 println!("{}", serde_json::to_string_pretty(&err).unwrap_or_default());
                 std::process::exit(1);
@@ -599,6 +611,7 @@ fn main() {
                 errors: vec![format!("JSON serialization failed: {}", e)],
                 notes: vec![],
                 transitive_deps: vec![],
+                features: vec![],
             };
             let body = serde_json::to_string_pretty(&err).unwrap_or_else(|_| {
                 // Last-resort hand-rolled JSON so a serialization failure on the
@@ -764,10 +777,11 @@ fn inspect_crate(crate_name: &str, features: &[String], git: Option<&GitSource>)
     // `@` in the slug would mismatch the Haskell copy step's clean-name slug).
     let clean_name = crate_name.split_once('@').map(|(n, _)| n).unwrap_or(crate_name);
     match run_rustdoc(crate_name, features, git) {
-        Ok((json_content, version, transitive_deps)) => match serde_json::from_str::<serde_json::Value>(&json_content) {
+        Ok((json_content, version, transitive_deps, effective_features)) => match serde_json::from_str::<serde_json::Value>(&json_content) {
             Ok(doc) => {
                 let mut pkg = parse_rustdoc(&doc, clean_name, &version);
                 pkg.transitive_deps = transitive_deps;
+                pkg.features = effective_features;
                 pkg
             }
             Err(e) => pkg_error(clean_name, &format!("rustdoc JSON parse error: {}", e)),
@@ -783,7 +797,7 @@ fn inspect_crate(crate_name: &str, features: &[String], git: Option<&GitSource>)
 /// Handles thin re-export facades (e.g. `clap` re-exports `clap_builder`):
 /// if the first rustdoc run produces 0 functions, we scan the JSON for glob
 /// `pub use other_crate::*` re-exports and re-run on the underlying crate.
-fn run_rustdoc(crate_name: &str, features: &[String], git: Option<&GitSource>) -> Result<(String, String, Vec<TransitiveDep>), String> {
+fn run_rustdoc(crate_name: &str, features: &[String], git: Option<&GitSource>) -> Result<(String, String, Vec<TransitiveDep>, Vec<String>), String> {
     // [#70 stripe] Accept a `name@version` spec (mirrors `cargo add name@version`)
     // so a PRERELEASE crate can be requested. Split the version off BEFORE the name
     // charset check; the version is validated separately to its own semver charset.
@@ -884,9 +898,13 @@ edition = "2021"
         write_manifest(&injected)?;
     }
 
-    let (json_content, version) =
+    // [#100 Part B] `effective_features` = the set rustdoc actually SUCCEEDED with.
+    // It is what the generated `[dependencies]` must enable so the bound wrappers'
+    // feature-gated APIs exist. On the mutually-exclusive-feature fallback we drop
+    // to DEFAULT, so effective = [] (propagate nothing — matches what was bound).
+    let (json_content, version, effective_features) =
         match run_rustdoc_package(crate_name, &manifest_str, &target_dir, &safe_name, false) {
-            Ok(r) => r,
+            Ok((j, v)) => (j, v, injected.clone()),
             // A mutually-exclusive injected feature subset can fail the doc build;
             // fall back to default features (the pre-#89 behaviour) before giving up.
             Err(e) if injected_nonempty => {
@@ -896,7 +914,8 @@ edition = "2021"
                     e.lines().next().unwrap_or("").trim()
                 );
                 write_manifest(&[])?;
-                run_rustdoc_package(crate_name, &manifest_str, &target_dir, &safe_name, false)?
+                let (j, v) = run_rustdoc_package(crate_name, &manifest_str, &target_dir, &safe_name, false)?;
+                (j, v, Vec::new())
             }
             Err(e) => return Err(e),
         };
@@ -912,13 +931,13 @@ edition = "2021"
                 run_rustdoc_package(&underlying, &manifest_str, &target_dir, &under_safe, false)
             {
                 if json_has_functions(&under_json) {
-                    return Ok((under_json, under_ver, transitive_deps));
+                    return Ok((under_json, under_ver, transitive_deps, effective_features));
                 }
             }
         }
     }
 
-    Ok((json_content, version, transitive_deps))
+    Ok((json_content, version, transitive_deps, effective_features))
 }
 
 /// Run `cargo +nightly rustdoc --package pkg` and return the JSON content.
@@ -2225,6 +2244,8 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
         notes,
         // Filled in by `inspect_crate` from `run_rustdoc`'s cargo-metadata pass.
         transitive_deps: Vec::new(),
+        // Filled in by `inspect_crate` with the rustdoc-succeeded feature set (#100 Part B).
+        features: Vec::new(),
     }
 }
 
@@ -6376,6 +6397,7 @@ fn pkg_error(name: &str, msg: &str) -> PkgInfo {
         errors: vec![msg.into()],
         notes: vec![],
         transitive_deps: vec![],
+        features: vec![],
     }
 }
 

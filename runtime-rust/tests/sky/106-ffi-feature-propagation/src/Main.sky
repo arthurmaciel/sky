@@ -1,0 +1,46 @@
+module Main exposing (main)
+
+-- 106-ffi-feature-propagation: #100 Part B — FFI Cargo-feature propagation.
+--
+-- `featgate106crate` gates `extra_value` behind the `extra` Cargo feature. The
+-- inspector auto-discovers `extra` (#89 visibility: no `full` feature ⇒ enable
+-- all) and BINDS `extra_value`. Part B then propagates `extra` into the generated
+-- project's `[dependencies]` line (a GIT dep here — exercises the RustGitDep merge
+-- path) so the auto-bound wrapper actually compiles + runs.
+--
+-- POSITIVE (bind + run end-to-end):
+--   base_value  : Int -> Result Error Int   always-present (default features)
+--   extra_value : Int -> Result Error Int   gated behind `extra` → only links
+--                                            because Part B enabled the feature
+--
+-- WITHOUT Part B the generated git-dep line stays bare → `extra_value` references
+-- a fn absent from the default-feature build → cargo-fail (E0425). With Part B it
+-- builds and `extra_value 0 == 42`.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Featgate106crate as C
+import Std.Log exposing (println)
+
+
+checkFeatureGated : Task Error ()
+checkFeatureGated =
+    case ( C.base_value 0, C.extra_value 0 ) of
+
+        ( Ok base, Ok extra ) ->
+            if base == 10 && extra == 42 then
+                Task.succeed ()
+
+            else
+                Task.fail
+                    (Error.unexpected
+                        ("UNEXPECTED base=" ++ String.fromInt base ++ " extra="
+                            ++ String.fromInt extra))
+
+        _ ->
+            Task.fail (Error.unexpected "featgate106crate binding call failed")
+
+
+main : Task Error ()
+main =
+    checkFeatureGated |> Task.andThen (\_ -> println "[ALL OK]")

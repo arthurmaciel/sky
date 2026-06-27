@@ -1491,6 +1491,15 @@ emitRustKernelJson moduleName kernelName pkg =
                 ",\n  \"transitiveDeps\": [\n"
                 ++ intercalate ",\n" (map transDepEntry transDeps)
                 ++ "\n  ]"
+        -- #100 Part B: re-emit the inspector's effective crate feature set as a
+        -- top-level `features` array. The Rust codegen (`Project.readPkgFeatures`)
+        -- merges it into the primary FFI crate's `[dependencies]` line. Empty array
+        -- omitted (Go target / default-feature build) → byte-identical output.
+        feats = _pkgFeatures pkg
+        featuresField
+            | null feats = ""
+            | otherwise =
+                ",\n  \"features\": [" ++ intercalate ", " (map jsonQuote feats) ++ "]"
     in unlines
         [ "{"
         , "  \"moduleName\": " ++ jsonQuote moduleName ++ ","
@@ -1498,7 +1507,7 @@ emitRustKernelJson moduleName kernelName pkg =
         , "  \"package\": " ++ jsonQuote (_pkgPath pkg) ++ ","
         , "  \"functions\": ["
         , entries
-        , "  ]" ++ transDepsField
+        , "  ]" ++ transDepsField ++ featuresField
         , "}"
         ]
   where

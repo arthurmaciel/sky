@@ -22,6 +22,11 @@ data RustDepSpec = RustVersion { _rvVersion :: String, _rvFeatures :: [String] }
                      , _gitRev    :: Maybe String
                      , _gitBranch :: Maybe String
                      , _gitTag    :: Maybe String
+                     , _gitFeatures :: [String]
+                       -- ^ #100 Part B: user-declared sky.toml features, UNIONed at
+                       -- codegen with the inspector's auto-discovered effective set.
+                       -- A git-sourced FFI crate has feature-gated APIs too; the
+                       -- generated Cargo.toml must enable them (else E0412/E0433…).
                      }
     deriving (Show, Eq)
 
@@ -54,7 +59,7 @@ parseInlineTable s =
                 in map stripQuotes (splitOn ',' inner2)
             _ -> []
     in case gitUrl of
-        Just url -> RustGitDep url rev branch tag
+        Just url -> RustGitDep url rev branch tag features
         Nothing  -> case version of
             Just v  -> RustVersion v features
             Nothing -> RustVersion s []  -- fallback: treat as literal version

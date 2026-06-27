@@ -1401,8 +1401,8 @@ regenMissingRustBindings deps = do
             let nameSpec = if not (null ver) && ver /= "*" then name ++ "@" ++ ver else name
             r <- RustFfi.runRustInspector nameSpec feats
             handleInspectorResult name r
-        RustGitDep url mr mb mt -> do
-            r <- RustFfi.runRustInspectorGit name url mr mb mt []
+        RustGitDep url mr mb mt feats -> do
+            r <- RustFfi.runRustInspectorGit name url mr mb mt feats
             handleInspectorResult name r
 
     -- [WALL-G #84] Build the JSON manifest from every dep (with its own version /
@@ -1423,11 +1423,12 @@ regenMissingRustBindings deps = do
             let nm = if not (null ver) && ver /= "*" then name ++ "@" ++ ver else name
             in Aeson.object $ ["name" .= nm]
                 ++ (if null feats then [] else ["features" .= feats])
-        RustGitDep url mr mb mt ->
+        RustGitDep url mr mb mt feats ->
             Aeson.object $ ["name" .= name, "git" .= url]
                 ++ maybe [] (\r -> ["rev" .= r]) mr
                 ++ maybe [] (\b -> ["branch" .= b]) mb
                 ++ maybe [] (\t -> ["tag" .= t]) mt
+                ++ (if null feats then [] else ["features" .= feats])
 
     handleInspectorResult name result = case result of
         Left err ->

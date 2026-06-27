@@ -14,7 +14,7 @@ module Sky.Generate.Rust.Project
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Char as Char
-import Data.List (isInfixOf, stripPrefix, isSuffixOf, partition)
+import Data.List (isInfixOf, stripPrefix, isSuffixOf, partition, nub)
 import Control.Monad (when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -264,6 +264,11 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
     -- the map — e.g. a private inner item the inspector never modelled) is DROPPED
     -- (coverage-drop) rather than left to emit an unresolvable / `"*"` dep.
     transMap <- readTransitiveDepMap
+    -- #100 Part B: merge the inspector's effective per-crate feature set into the
+    -- user's dep specs, so feature-gated APIs the wrappers reference actually
+    -- exist at build time. Bare/absent → unchanged.
+    pkgFeatMap <- readPkgFeatures
+    let rustDepsMerged = mergePkgFeatures pkgFeatMap rustDeps
     let directDepIdents = [ n | (n, _) <- rustDeps, not (null n) ]
         coveredIdents = directDepIdents ++ RustBuilder.stdlibEmittedCrateNames
         -- Classify ONE wrapper: resolve its scanned external crates; the wrapper
@@ -283,7 +288,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         putStrLn $ "   [ffi] WALL-B coverage-drop: wrapper " ++ kn ++ "." ++ ref
             ++ " references a transitive crate cargo metadata could not resolve")
         droppedWrappers
-    writeFileIfChanged cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver sqlxTls rustDeps (Toml._liveStore config) resolvedTransitiveCrates)
+    writeFileIfChanged cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver sqlxTls rustDepsMerged (Toml._liveStore config) resolvedTransitiveCrates)
     putStrLn $ "   Wrote " ++ cargoTomlPath
     -- Copy Rust FFI binding files into sky-out/rust/src/, REACHABILITY-FILTERED
     -- (S4 FFI tree-shake). Slugs must match what generateRustBindings writes
@@ -616,6 +621,105 @@ readTransitiveDepMap = do
     parseDep _ = Nothing
     str (Aeson.String t) = Just (T.unpack t)
     str _                = Nothing
+
+
+-- | #100 Part B: read the per-crate EFFECTIVE feature set from every cached Rust
+-- kernel.json (`.skycache/ffi/rust/*.kernel.json` top-level `features` array),
+-- keyed by the kernel.json `package` field — which is exactly the crate's
+-- `[dependencies]` key (e.g. `firestore`). The inspector recorded the feature
+-- set its rustdoc introspection SUCCEEDED with, i.e. the set the emitted wrappers
+-- reference (a no-`full`-feature crate gets ALL features injected by #89). The
+-- generated dep line must enable the SAME set or those feature-gated APIs vanish
+-- (E0412/E0433/E0405/E0599 — the firestore #73/#100 dominant class). Returns
+-- `[(packageName, [features])]`. Empty when the cache dir is absent or no
+-- kernel.json carries the field (Go target, default-feature build, legacy
+-- caches) → nothing propagated, the dep line stays bare (byte-identical to
+-- pre-#100 output). SOUNDNESS (guardian-reviewed #100): a `features` array is only
+-- present when rustdoc — which expands macros + type-checks the crate under that
+-- feature set — SUCCEEDED with it. The standard feature-exclusion idiom,
+-- `compile_error!` gated on `#[cfg(all(feature="a", feature="b"))]`, fires during
+-- rustdoc macro expansion → the inspector falls back to default features and emits
+-- NO `features` key. So every propagated set is free of the `compile_error!`-class
+-- conflict. Residual divergences that pass rustdoc but break a real `cargo build`
+-- (native link-symbol collision between two additive features, a `cfg(doc)`-hidden
+-- guard, a monomorphisation-time assert) are all FAIL-CLOSED — a loud cargo error,
+-- never a silent miscompile — and are a strict subset of crates whose wrappers
+-- already could not build without the features (pre-#100 was a hard cargo-fail
+-- there too). Note: features are propagated per-crate, NOT DCE-filtered — a
+-- tree-shaken project still enables the crate's full injected set.
+readPkgFeatures :: IO [(String, [String])]
+readPkgFeatures = do
+    let ffiDir = ".skycache/ffi/rust"
+    exists <- doesDirectoryExist ffiDir
+    if not exists
+        then pure []
+        else do
+            entries <- listDirectory ffiDir
+            let jsons = filter (".kernel.json" `isSuffixOf`) entries
+            perFile <- mapM (readOne . (ffiDir </>)) jsons
+            pure [ x | Just x <- perFile ]
+  where
+    readOne :: FilePath -> IO (Maybe (String, [String]))
+    readOne path = do
+        -- Guardian NIT1: tolerate a kernel.json deleted between listDirectory and
+        -- here (concurrent rebuild) — fail-safe to no-features rather than abort.
+        eBytes <- Control.Exception.try (BS.readFile path)
+                    :: IO (Either Control.Exception.SomeException BS.ByteString)
+        case eBytes of
+          Left _      -> pure Nothing
+          Right bytes ->
+            case Aeson.decodeStrict bytes :: Maybe Aeson.Value of
+              Just (Aeson.Object o) ->
+                  let pkgName = case KeyMap.lookup "package" o of
+                          Just (Aeson.String t) -> T.unpack t
+                          _                     -> ""
+                      feats = case KeyMap.lookup "features" o of
+                          Just (Aeson.Array arr) ->
+                              [ T.unpack t | Aeson.String t <- Foldable.toList arr ]
+                          _ -> []
+                  in pure $ if null pkgName || null feats
+                                then Nothing
+                                else Just (pkgName, feats)
+              _ -> pure Nothing
+
+
+-- | #100 Part B: merge each crate's inspector-discovered effective feature set
+-- into its user-declared sky.toml dep spec. The user's explicit
+-- `features = [...]` is UNIONed (user features first, then inspector's, deduped)
+-- so an explicit sky.toml feature is never dropped — only augmented. Only a
+-- crates.io `RustVersion` dep takes features; a git dep keeps its spec untouched
+-- (the inspector keys features on the published crate name, which a git dep need
+-- not match). A crate absent from `featMap` keeps its spec verbatim → bare deps
+-- stay bare (byte-identical to pre-#100 output).
+mergePkgFeatures
+    :: [(String, [String])]
+    -> [(String, Toml.RustDepSpec)]
+    -> [(String, Toml.RustDepSpec)]
+mergePkgFeatures featMap = map go
+  where
+    go (name, Toml.RustVersion ver userFeats) =
+        case lookup name featMap of
+            -- Guardian Q6/NIT2: inspector features come from the crate's own
+            -- `cargo metadata` feature list (less-trusted than user sky.toml input).
+            -- Fail-SAFE-DROP any that isn't a valid Cargo feature name rather than
+            -- letting a malformed name (control byte, quote) reach the emit-time
+            -- `error` and abort the build / write a partial manifest. User-declared
+            -- features keep the strict emit gate (they're the user's own input).
+            Just inspFeats ->
+                (name, Toml.RustVersion ver (nub (userFeats ++ filter validCargoFeature inspFeats)))
+            Nothing        -> (name, Toml.RustVersion ver userFeats)
+    -- A git-sourced FFI crate gets the same treatment: a git dep can have
+    -- feature-gated APIs too, and the inspector auto-discovers them regardless of
+    -- dep source. Same fail-safe charset filter + user-features-first union.
+    go (name, Toml.RustGitDep url mr mb mt userFeats) =
+        case lookup name featMap of
+            Just inspFeats ->
+                (name, Toml.RustGitDep url mr mb mt (nub (userFeats ++ filter validCargoFeature inspFeats)))
+            Nothing        -> (name, Toml.RustGitDep url mr mb mt userFeats)
+    -- Cargo feature-name charset: `[A-Za-z0-9_+.-]`, non-empty.
+    validCargoFeature :: String -> Bool
+    validCargoFeature f =
+        not (null f) && all (\c -> Char.isAlphaNum c || c `elem` ("_+.-" :: String)) f
 
 
 -- | Read a UTF-8 text file (locale-independent), returning "" if absent.
