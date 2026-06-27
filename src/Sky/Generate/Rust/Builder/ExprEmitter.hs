@@ -1778,8 +1778,12 @@ exprToRustInner ctx e = case e of
             closure =
                 if ctorArity == 0
                     then "{ let __c = " ++ ctorStr ++ "; move |_p: Vec<String>| __c.clone() }"
+                    -- Bounds-safe: a route whose pattern captures fewer `:params`
+                    -- than the Page ctor's arity must NOT panic. `.get(i).cloned()`
+                    -- yields "" for a missing positional capture (Sky route params
+                    -- are always String), degrading gracefully instead of OOB.
                     else "move |__p: Vec<String>| " ++ ctorStr ++ "("
-                            ++ intercalate ", " ["__p[" ++ show i ++ "].clone()" | i <- [0 .. ctorArity - 1]]
+                            ++ intercalate ", " ["__p.get(" ++ show i ++ ").cloned().unwrap_or_default()" | i <- [0 .. ctorArity - 1]]
                             ++ ")"
         in "route::Route::new(&(" ++ patternStr ++ "), " ++ closure ++ ")"
     Can.Call (Ann.At _ (Can.VarTopLevel mdl "onSubmit")) [handlerArg@(Ann.At hregion _)]
