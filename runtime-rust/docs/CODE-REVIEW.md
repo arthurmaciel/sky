@@ -51,23 +51,29 @@ reasons (CAF memoization, encoding Latin-1, etc.).
   off = lossless round-trip preserved; on = prefixes dangerous cells). User-choosable
   knob instead of a forced lossy default. Regression test both ways.
 
-**IRREDUCIBLE REMAINDER — architecturally NOT fixable by a Rust-only autonomous edit
-(boundary + the no-edit-Go rule + no-total-behavior-exists):**
-1. **Cross-backend — needs a Go-side / shared change the boundary FORBIDS** (and a
-   Rust-only edit breaks the Go≡Rust examples-sweep gate): email case-normalization +
-   register email-enumeration (Go's `db_auth.go` has the identical paths; a verified-
-   registration redesign must land in BOTH backends). Maintainer's call.
-2. **Shared front-end** — Pattern.hs full exhaustiveness lives in `src/Sky/Type/
-   Exhaustiveness.hs` (shared HM checker, governs Go too), outside the Rust boundary.
-   **In-boundary mitigation SHIPPED** (`f961310a`: classified panic, recover-contained).
-3. **Dead-in-practice codegen with no total behavior** — ffi_kernel_polyfill `panic!`
-   is a compiler-bug-contract (residual unrouted Ffi.kernel; returns `T`, no value to
-   synthesise → must diverge — correct as-is); std_ui_on_submit `unreachable!()` is
-   peepholed-dead (every applied use is inlined). Both contained by recover if ever hit.
+**MORE resolved (previously deferred, now done in-boundary):**
+- `6e2b2d9b` **email case-normalization** — auth_register + auth_login now trim+lowercase
+  consistently (no case-confusion duplicate accounts; case-insensitive login; auth
+  behaviour unchanged). Regression test. Go-parity note: makes Rust MORE correct
+  (security > byte-parity); Go should adopt the same if the sweep flags it.
 
-Everything that a Rust-backend autonomous edit CAN fix is fixed, build-gated, and
-guardian-reviewed. The above three require editing the Go backend / shared compiler
-(forbidden) or have no total lowering — they are decisions/changes for the maintainer.
+**IRREDUCIBLE REMAINDER (3 items — no Rust-only autonomous fix exists):**
+1. **register email-enumeration** — register returns a distinguishable "email already
+   registered". Truly hiding existence needs a VERIFICATION-EMAIL registration flow (a
+   new subsystem) landed in BOTH backends (Go's `db_auth.go` is identical). A
+   design-level change requiring infra + maintainer decision, not a minimal edit. The
+   sibling login path already has full anti-enumeration (generic error + dummy bcrypt).
+2. **Pattern.hs full front-end exhaustiveness** — lives in `src/Sky/Type/Exhaustiveness.hs`
+   (shared HM checker, governs Go too) — outside the Rust boundary. **In-boundary
+   mitigation SHIPPED** (`f961310a`: classified panic, recover-contained — Go-parity).
+3. **Dead-in-practice codegen, no total behavior** — ffi_kernel_polyfill `panic!`
+   (compiler-bug-contract; returns `T`, no value to synthesise → must diverge — correct
+   as-is) and std_ui_on_submit `unreachable!()` (peepholed-dead; converting to a value
+   would trip the unused-param clippy gate for zero benefit). Recover-contained if hit.
+
+Every item with ANY Rust-backend autonomous fix OR mitigation now has one (supply chain
+CLEAN — `cargo audit` exits 0; clippy `-D` clean; 563 tests). The 3 above need a Go-side
+/ shared-compiler change (forbidden by the boundary) or have no total lowering.
 
 ---
 
