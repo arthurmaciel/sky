@@ -28,7 +28,7 @@ import Sky.Build.Rust.FfiInstance
     , closureDropReason
     , gateClosureArg, gateClosureArgNames
     )
-import Sky.Build.Rust.Ffi (translateRustRet, cargoProfilePanicIsUnwind)
+import Sky.Build.Rust.Ffi (translateRustRet, cargoProfilePanicIsUnwind, numSaturate)
 import Sky.Generate.Rust.Builder.ExprEmitter (mkIndirectClosureDropDiag)
 
 
@@ -125,6 +125,26 @@ spec = do
             decl "[u64; 4]" `shouldBe` "Vec<i64>"
             body "[u64; 4]" "v"
                 `shouldBe` "v.into_iter().map(|x| (x).min(i64::MAX as u64) as i64).collect::<Vec<_>>()"
+
+    describe "#82 numSaturate (param-width SATURATING coercion, no silent wraparound)" $ do
+        it "signed narrowing clamps into [MIN,MAX] then lossless `as` (never wraps)" $ do
+            numSaturate "i8"  "a" `shouldBe` "(a).clamp(i8::MIN as i64, i8::MAX as i64) as i8"
+            numSaturate "i32" "a" `shouldBe` "(a).clamp(i32::MIN as i64, i32::MAX as i64) as i32"
+        it "unsigned narrowing clamps into [0,MAX] then lossless `as`" $ do
+            numSaturate "u8"  "a" `shouldBe` "(a).clamp(0, u8::MAX as i64) as u8"
+            numSaturate "u32" "a" `shouldBe` "(a).clamp(0, u32::MAX as i64) as u32"
+        it "u64/u128 saturate negatives to 0; i128 pure widen" $ do
+            numSaturate "u64"  "a" `shouldBe` "(a).max(0) as u64"
+            numSaturate "u128" "a" `shouldBe` "(a).max(0) as u128"
+            numSaturate "i128" "a" `shouldBe` "(a) as i128"
+        it "platform-width usize/isize via try_from (32-bit-correct, total)" $ do
+            numSaturate "usize" "a" `shouldBe` "usize::try_from((a).max(0)).unwrap_or(usize::MAX)"
+            numSaturate "isize" "a"
+                `shouldBe` "isize::try_from(a).unwrap_or_else(|_| if (a) < 0 { isize::MIN } else { isize::MAX })"
+        it "f32 precision-lossy cast; f64/i64 identity (no cast)" $ do
+            numSaturate "f32" "a" `shouldBe` "(a) as f32"
+            numSaturate "f64" "a" `shouldBe` "a"
+            numSaturate "i64" "a" `shouldBe` "a"
 
     describe "skyTypeToRustClosed (closed set)" $ do
         it "maps every primitive" $ do

@@ -22,6 +22,7 @@ module Sky.Build.Rust.Ffi
     , wrapperEndSentinel     -- :: String
     , wrapperSentinelPrefix  -- :: String
     , translateRustRet       -- :: String -> (String, String -> String)  (#22 — exposed for unit tests)
+    , numSaturate            -- :: String -> String -> String  (#82 — exposed for unit tests)
     , genericHasTraitQualifier  -- :: FnInfo -> Bool  (WALL-D — exposed for unit tests)
     , cargoProfilePanicIsUnwind  -- :: String -> Bool  (#28 B2 — closure-wrapper catch_unwind guard)
     ) where
@@ -337,6 +338,49 @@ isNumericRust t = t `elem`
     [ "i8", "i16", "i32", "i64", "i128"
     , "u8", "u16", "u32", "u64", "u128"
     , "isize", "usize", "f32", "f64" ]
+
+-- | [#82] SATURATING coercion of a Sky `Int`(i64) / `Float`(f64) call-site value
+-- `e` into a foreign numeric param of width `raw`. The PARAM-side sibling of
+-- `translateRustRet`'s return saturation (#16): a caller-supplied out-of-range
+-- value clamps into the target's representable range — TOTAL, no panic, no silent
+-- wraparound (CLAUDE.md "no silent numeric coercion"). The single source of every
+-- SCALAR numeric param/field/ctor-arg cast (guardian #82 B8): `argCall` (method
+-- args), `setValExpr` (field setters), `ctorArgOwned` (enum ctors) — each top-level
+-- + its Option<numeric> arm — all route here. (A `Vec<numeric>` element write in a
+-- setter/ctor still truncates per-element — tracked separately; a method-arg
+-- Vec<numeric> mismatch is a LOUD E0308, fail-safe.) `e` must be a side-effect-free
+-- expr (a bound local) — the `isize` arm evaluates it more than once.
+--
+-- Platform-correctness BY CONSTRUCTION (guardian #82 Q2): `usize`/`isize` are
+-- platform-width, so they route through `try_from` (a bare `as` would truncate on
+-- 32-bit, which CI — all 64-bit — can never catch). `unwrap_or`/`unwrap_or_else`
+-- are clippy-clean (no unwrap/expect/panic).
+numSaturate :: String -> String -> String
+numSaturate raw e = case raw of
+    "f32"   -> par ++ " as f32"                              -- precision-lossy, total
+    "f64"   -> e                                             -- identity
+    "i64"   -> e                                             -- identity
+    -- signed narrowing: clamp into [MIN, MAX] of the target, then a lossless `as`.
+    t | t `elem` ["i8", "i16", "i32"]
+            -> par ++ ".clamp(" ++ t ++ "::MIN as i64, " ++ t ++ "::MAX as i64) as " ++ t
+    -- unsigned narrowing: clamp into [0, MAX], then a lossless `as`.
+      | t `elem` ["u8", "u16", "u32"]
+            -> par ++ ".clamp(0, " ++ t ++ "::MAX as i64) as " ++ t
+    -- u64: every non-negative i64 fits u64; negatives saturate to 0.
+      | t == "u64"  -> par ++ ".max(0) as u64"
+    -- u128 / i128: WIDER than i64. i128 is a pure sign-preserving widen; u128
+    -- saturates negatives to 0 (a bare `as u128` would sign-extend -1 to ~3.4e38).
+      | t == "i128" -> par ++ " as i128"
+      | t == "u128" -> par ++ ".max(0) as u128"
+    -- usize / isize: PLATFORM-WIDTH → try_from (32-bit-correct by construction).
+      | t == "usize"
+            -> "usize::try_from(" ++ par ++ ".max(0)).unwrap_or(usize::MAX)"
+      | t == "isize"
+            -> "isize::try_from(" ++ e ++ ").unwrap_or_else(|_| if "
+               ++ par ++ " < 0 { isize::MIN } else { isize::MAX })"
+      | otherwise -> par ++ " as " ++ raw                    -- unreachable; total fallback
+  where
+    par = "(" ++ e ++ ")"
 
 
 -- | True when the given Rust type string is a `Copy` primitive, so a field
@@ -912,7 +956,7 @@ emitRustFile kernelName pkg =
                             in case inner of
                                  "&str"    -> opt ++ ".as_deref()"
                                  "&String" -> opt ++ ".as_ref()"
-                                 _ | isNumericRust inner       -> opt ++ ".map(|x| x as " ++ inner ++ ")"
+                                 _ | isNumericRust inner       -> opt ++ ".map(|x| " ++ numSaturate inner "x" ++ ")"
                                    | "&" `isPrefixOf` inner     -> opt ++ ".as_ref()"  -- Option<&T> borrowed opaque
                                    | otherwise                  -> opt   -- String/bool/owned opaque: identity
                         -- [#47(a)] serde-bound param: Sky String → serde_json::Value.
@@ -934,8 +978,14 @@ emitRustFile kernelName pkg =
                         | declTy == "String" && rawTy == "&str" -> base ++ ".as_ref()" -- Sky String → &str/&Path/&OsStr via AsRef
                         | declTy == "String" -> "&" ++ base          -- Sky String → &str / &String (borrowed: &base)
                         | null rawTy || rawTy == declTy -> base      -- same type, pass through
+                        -- [#82] A Sky `Int`(i64)/`Float`(f64) → a NARROWER / unsigned /
+                        -- wider foreign numeric width. SATURATING coercion (mirrors the
+                        -- return side `translateRustRet` #16) — NEVER a bare `as` truncate:
+                        -- a caller-supplied out-of-range value clamps into the target's
+                        -- range (total, no panic, no silent wraparound — CLAUDE.md "no
+                        -- silent numeric coercion"). All sites route through `numSaturate`.
                         | isNumericRust rawTy && (declTy == "i64" || declTy == "f64")
-                            -> base ++ " as " ++ rawTy               -- narrowing cast (e.g. i64 → u32)
+                            -> numSaturate rawTy base
                         | otherwise -> base                          -- opaque: pass through unchanged
             callArgs = intercalate ", " (map argCall [0..nParams - 1])
             -- [#47(a)] When the raw return type is `serde_json::Value` the callee
@@ -1153,11 +1203,11 @@ emitRustFile kernelName pkg =
                             let inner = trimStr innerRaw
                                 opt   = "sky_maybe_to_option(" ++ base ++ ")"
                             in if isNumericRust inner
-                               then opt ++ ".map(|x| x as " ++ inner ++ ")"
+                               then opt ++ ".map(|x| " ++ numSaturate inner "x" ++ ")"  -- [#82] saturating
                                else opt   -- String/bool/char/owned opaque inner: identity
                         | null setFieldRawTy || setFieldRawTy == setValRust -> base
                         | isNumericRust setFieldRawTy && (setValRust == "i64" || setValRust == "f64")
-                            -> base ++ " as " ++ setFieldRawTy   -- narrowing cast
+                            -> numSaturate setFieldRawTy base   -- [#82] SATURATING (was truncating `as`)
                         | otherwise -> base                      -- opaque / matching: identity
             -- Total-by-construction guard (mirrors the getter's): a setter needs
             -- a value param, a real field name, and a nameable receiver type.
@@ -1219,12 +1269,12 @@ emitRustFile kernelName pkg =
                             let inner = trimStr innerRaw
                                 opt   = "sky_maybe_to_option(" ++ base ++ ")"
                             in if isNumericRust inner
-                               then opt ++ ".map(|x| x as " ++ inner ++ ")"
+                               then opt ++ ".map(|x| " ++ numSaturate inner "x" ++ ")"  -- [#82] saturating
                                else opt
                         | declTy == "String" -> base                -- owned String
                         | null rawTy || rawTy == declTy -> base
                         | isNumericRust rawTy && (declTy == "i64" || declTy == "f64")
-                            -> base ++ " as " ++ rawTy
+                            -> numSaturate rawTy base   -- [#82] SATURATING (was truncating `as`)
                         | otherwise -> base
             ctorArgs = map ctorArgOwned [0 .. nParams - 1]
             -- Variant construction expression, dispatched on variant KIND (R5):

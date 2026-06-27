@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain 94-ffi-inherent-self-output 95-ffi-inherent-self-output-async 96-ffi-external-trait-xcrate)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain 94-ffi-inherent-self-output 95-ffi-inherent-self-output-async 96-ffi-external-trait-xcrate 97-ffi-numeric-param-coerce)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -1184,6 +1184,43 @@ run_external_trait_xcrate() {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 97-ffi-numeric-param-coerce — #82: SATURATING numeric param-width coercion on the
+# regular inherent path. Sky Int(i64)/Float(f64) → foreign usize/u32/f32 params,
+# clamped into the target range (NEVER silent `as` wraparound). argCall→numSaturate.
+# POSITIVE: widen(5,3,2.0)=20; echo_u32(5_000_000_000) SATURATES to 4294967295.
+# ─────────────────────────────────────────────────────────────────────────────
+run_numeric_param_coerce() {
+  local base=97-ffi-numeric-param-coerce
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+  [ -f "$src/setup.sh" ]     || { _fail "$base (no setup.sh)"; return; }
+  bash "$src/setup.sh" >/tmp/ffi-fixture-"$base".setup.log 2>&1 || {
+    _fail "$base (setup.sh failed)"; return; }
+  local crateDir="$HOME/.cache/sky/$base-crate"
+  [ -d "$crateDir/.git" ] || { _fail "$base (expected staged crate at $crateDir)"; return; }
+  local wd; wd="$(mktemp -d "${TMPDIR:-/tmp}/ffi-fixture-$base.XXXXXX")" || { _fail "$base (mktemp)"; return; }
+  mkdir -p "$wd/src"; cp -r "$src/src/." "$wd/src/" 2>/dev/null || true
+  cp "$src/sky.toml" "$wd/sky.toml" || { _fail "$base (cp sky.toml)"; rm -rf "$wd"; return; }
+  local escC; escC="$(printf 'file://%s' "$crateDir" | sed -e 's/[\/&]/\\&/g')"
+  sed -i -E "s|file://[^\"]*/$base-crate|$escC|g" "$wd/sky.toml" || { _fail "$base (sed)"; rm -rf "$wd"; return; }
+  local bin; bin="$(SKY_DCE=0 build_fixture "$wd")" || { _fail "$base (build failed — numeric param coerce cargo-fail?)"; rm -rf "$wd"; return; }
+  local skyi="$wd/.skycache/ffi/rust/numparam-crate.skyi"
+  if ! rg -q 'widen_from_calc : Calc -> Int -> Int -> Float -> Result Error Int' "$skyi" 2>/dev/null; then
+    _fail "$base: widen(usize,u32,f32) did NOT bind (#82 param coerce broken)"; rm -rf "$wd"; return
+  fi
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (usize/u32/f32 params SATURATING-coerce; echo_u32 5e9 clamps to u32::MAX not wrap · SKY_DCE=0 cargo-clean · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
 # ── Drive ────────────────────────────────────────────────────────────────────
 FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -1209,6 +1246,7 @@ for n in "${FIXTURES[@]}"; do
     94-ffi-inherent-self-output) run_inherent_self_output ;;
     95-ffi-inherent-self-output-async) run_inherent_self_output_async ;;
     96-ffi-external-trait-xcrate) run_external_trait_xcrate ;;
+    97-ffi-numeric-param-coerce) run_numeric_param_coerce ;;
     *)                        run_basic "$n" ;;
   esac
 done

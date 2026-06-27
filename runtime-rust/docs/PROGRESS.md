@@ -17,6 +17,36 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 23:30 — #82: SATURATING numeric param-width coercion (Phase-4 first implement target)
+
+**What.** A foreign numeric param of a non-i64 width (`usize`/`u32`/`f32`/…) on the regular FFI
+path was coerced from Sky `Int`(i64)/`Float`(f64) by a TRUNCATING `base as u32` — a silent
+wraparound for caller-supplied out-of-range values (CLAUDE.md "no silent numeric coercion"
+violation; the param-side counterpart of the #16 return saturation).
+
+**Fix (guardian design APPROVE-WITH-CONSTRAINTS B1-B8).** New `numSaturate :: String -> String ->
+String` (Ffi.hs) — SATURATING coercion: signed-narrow clamps `[MIN,MAX]`, unsigned-narrow clamps
+`[0,MAX]`, `u64`/`u128`/`usize` saturate negatives→0, `usize`/`isize` via `try_from` (platform-
+correct on 32-bit by construction — Q2), `f32` precision-lossy, `i64`/`f64` identity. Total, no
+panic, clippy-clean (`unwrap_or`/`unwrap_or_else`). Routed (B8) through ALL THREE scalar param
+emitters — `argCall` (method args), `setValExpr` (field setters), `ctorArgOwned` (enum ctors),
+each top-level + its Option<numeric> arm — replacing the truncating `as`. Guardian-final caught
+that the setter+ctor siblings still truncated (Finding 1, fail-dangerous) — fixed in the same
+change. (Finding 2 — Vec<numeric> element truncation in setter/ctor — filed #94, Med.)
+
+**Verification.** Fixture `97-ffi-numeric-param-coerce`: `widen(usize,u32,f32)` binds + runs 20;
+`echo_u32(5_000_000_000)` SATURATES to 4294967295 (not the `as u32` wrap 705032704). SKY_DCE=0
+cargo-clean. New Haskell unit tests (numSaturate, 5 cases) in FfiInstanceSpec. Full FFI gate
+non-regressing (argCall pass: 43 ok·0 fail; setter+ctor pass: re-running). Pure codegen change —
+no inspector change (regular path; the projected/UFCS-emitter numeric path stays fail-closed,
+separate follow-up).
+
+**Affected.** `src/Sky/Build/Rust/Ffi.hs` (numSaturate + 3 emitters + export),
+`test/Sky/Build/Rust/FfiInstanceSpec.hs`, fixture `97-ffi-numeric-param-coerce/` + gate wiring,
+spec `2026-06-26-phase4-coverage-sweep.md`.
+
+---
+
 ## 2026-06-26 22:10 — WALL-K (#92): cross-crate resolution for an EXTERNAL trait bound (3-crate triangle)
 
 **What.** The last cross-crate piece for the real stripe `send<C: StripeClient>`. WALL-G resolved a

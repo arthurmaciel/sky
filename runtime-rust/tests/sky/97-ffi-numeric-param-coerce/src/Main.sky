@@ -1,0 +1,36 @@
+module Main exposing (main)
+
+-- #82 — numeric param-width coercion (SATURATING) on the regular inherent path.
+-- `widen` mixes usize/u32/f32 params; `echo_u32` proves SATURATION (a Sky Int >
+-- u32::MAX clamps to u32::MAX, never wraps).
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Numparam_crate as C
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    case C.new_from_calc 10 of
+        Ok calc ->
+            -- widen(n=5, w=3, x=2.0) = base(10) + 5 + 3 + 2 = 20.
+            case C.widen_from_calc calc 5 3 2.0 of
+                Ok w ->
+                    -- echo_u32 with 5_000_000_000 (> u32::MAX) saturates to 4294967295.
+                    case C.echo_u32_from_calc calc 5000000000 of
+                        Ok sat ->
+                            if w == 20 && sat == 4294967295 then
+                                println "numparam widen=20 sat=4294967295 [ALL OK]"
+
+                            else
+                                println ("UNEXPECTED widen=" ++ String.fromInt w ++ " sat=" ++ String.fromInt sat)
+
+                        Err e ->
+                            println ("echo-failed: " ++ Error.toString e)
+
+                Err e ->
+                    println ("widen-failed: " ++ Error.toString e)
+
+        Err e ->
+            println ("new-failed: " ++ Error.toString e)
