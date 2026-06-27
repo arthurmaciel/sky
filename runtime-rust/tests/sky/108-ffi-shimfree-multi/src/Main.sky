@@ -1,0 +1,45 @@
+module Main exposing (main)
+
+-- Multi-crate SHIM-FREE proof: four real crates.io crates bound DIRECTLY by
+-- auto-FFI (no wrappers), each exercised through one bound entry point, all in a
+-- single cargo-clean build.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Serde_json as Json
+import Rust.Url as Url
+import Rust.Csv as Csv
+import Rust.Chrono as Chrono
+import Std.Log exposing (println)
+
+
+isOk : Result e a -> Bool
+isOk r =
+    case r of
+
+        Ok _ ->
+            True
+
+        Err _ ->
+            False
+
+
+check : Task Error ()
+check =
+    let
+        jsonOk = isOk (Json.default ())
+        urlOk = isOk (Url.new_opaque_from_origin ())
+        csvOk = isOk (Csv.new_from_position ())
+        chronoOk = isOk (Chrono.from_num_days_from_ce_from_naiveDate 1)
+    in
+        if jsonOk && urlOk && csvOk && chronoOk then
+            Task.succeed ()
+
+        else
+            Task.fail
+                (Error.unexpected "a shim-free crate binding returned Err")
+
+
+main : Task Error ()
+main =
+    check |> Task.andThen (\_ -> println "[ALL OK]")

@@ -1173,9 +1173,16 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore resolvedTransitiveCrates = 
     -- P5-T4b: the live SessionStore trait is `#[async_trait]` — pull the crate
     -- whenever the project uses Sky.Live.
     [ cargoDependencyFor "async-trait" | needsLive, "async-trait" `notElem` userDepNames ] ++
-    [ cargoDependencyFor "serde_json"
-    , cargoDependencyFor "sha2"
-    ] ++
+    -- serde_json + sha2 are runtime-unconditional (core.rs uses serde_json::Value;
+    -- crypto uses sha2), but MUST still skip a user-declared FFI dep of the same
+    -- name or Cargo errors on a duplicate key (mirrors the serde/redis/stdlib
+    -- guards below + above). A user `serde_json`/`sha2` line (bare or
+    -- feature-propagated) supersedes and still satisfies the runtime's needs
+    -- (default features cover core.rs's Value/to_string/from_str). Without this
+    -- guard, `sky add serde_json` (or sha2) — both common FFI targets — duplicate-
+    -- keys the manifest. Pre-existing; surfaced by the #100 10-crate shim-free proof.
+    [ cargoDependencyFor "serde_json" | "serde_json" `notElem` userDepNames ] ++
+    [ cargoDependencyFor "sha2" | "sha2" `notElem` userDepNames ] ++
     -- serde must be UNCONDITIONAL: core.rs's SkyMaybe/SkyResult derive
     -- serde::Serialize/Deserialize (so a Sky.Live model with a `Maybe`/`Result`
     -- field serialises), and core.rs is compiled in every project — not just
