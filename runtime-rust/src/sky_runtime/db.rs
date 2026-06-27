@@ -39,9 +39,13 @@ fn sky_err<E: From<String> + Send>(e: &sqlx::Error) -> E {
 /// derived from the configured `DbRow` so the helpers stay driver-agnostic.
 type DbDatabase = <DbRow as sqlx::Row>::Database;
 
-/// A dedicated transaction connection, shared across the body via `Arc<Mutex<..>>`
+/// A dedicated sqlx `Transaction`, shared across the body via `Arc<Mutex<..>>`
 /// so re-entrant body ops serialise on it (sqlx connections are `&mut`-exclusive).
-type TxnConn = std::sync::Arc<tokio::sync::Mutex<sqlx::pool::PoolConnection<DbDatabase>>>;
+/// Using a `Transaction` (not a bare `PoolConnection` + raw `BEGIN`) is
+/// load-bearing for CANCELLATION SAFETY: its `Drop` rolls back, so a body future
+/// dropped mid-transaction (timeout / `select!` / task abort) can never return an
+/// OPEN transaction to the pool for the next checkout to inherit.
+type TxnConn = std::sync::Arc<tokio::sync::Mutex<sqlx::Transaction<'static, DbDatabase>>>;
 
 tokio::task_local! {
     /// Present (Some) for the dynamic extent of a `withTransaction` body — holds
@@ -1307,20 +1311,15 @@ pub fn db_with_transaction<E: Send + From<String> + 'static, A: Send + 'static>(
             return body(conn).await;
         }
 
-        // Acquire ONE dedicated connection; it returns to the pool when `tx_conn`
-        // drops at the end of this async block (every path below).
-        let tx_conn: TxnConn = match conn.acquire().await {
-            Ok(c)  => std::sync::Arc::new(tokio::sync::Mutex::new(c)),
+        // Begin a real sqlx Transaction (BEGIN is issued by `begin()`); its Drop
+        // rolls back, so dropping the body future mid-transaction can't leak an
+        // open txn onto a pooled connection. Held in Arc<Mutex<..>> so re-entrant
+        // body ops serialise on it.
+        let tx = match conn.begin().await {
+            Ok(t) => t,
             Err(e) => return SkyResult::Err(sky_err(&e)),
         };
-
-        // BEGIN on the held connection.
-        {
-            let mut guard = tx_conn.lock().await;
-            if let Err(e) = sqlx::query("BEGIN").execute(&mut **guard).await {
-                return SkyResult::Err(sky_err(&e));
-            }
-        }
+        let tx_conn: TxnConn = std::sync::Arc::new(tokio::sync::Mutex::new(tx));
 
         // Run the body inside the task-local scope so every body DB op routes to
         // `tx_conn`. The body still receives the pool by value (its `Db` arg) —
@@ -1333,18 +1332,33 @@ pub fn db_with_transaction<E: Send + From<String> + 'static, A: Send + 'static>(
             )
             .await;
 
-        match outcome {
-            SkyResult::Ok(a) => {
-                let mut guard = tx_conn.lock().await;
-                if let Err(e) = sqlx::query("COMMIT").execute(&mut **guard).await {
-                    return SkyResult::Err(sky_err(&e));
-                }
-                ok_res(a)
+        // Reclaim sole ownership to finish via the TYPED commit/rollback (which
+        // consume the Transaction and keep its Drop-state consistent — a raw COMMIT
+        // string would leave the wrapper thinking the txn is open → a redundant
+        // ROLLBACK on Drop). The scope's clone is released when the scoped future
+        // above completes, and tokio task-locals don't propagate into spawned
+        // tasks, so the strong count is 1 here.
+        let tx = match std::sync::Arc::try_unwrap(tx_conn) {
+            Ok(m) => m.into_inner(),
+            // Structurally unreachable (no clone escapes). Fail closed: our handle
+            // is dropped here, rolling the txn back, and we report rather than
+            // committing a transaction we don't solely own.
+            Err(_) => {
+                return SkyResult::Err(
+                    "withTransaction: transaction still referenced at completion"
+                        .to_string()
+                        .into(),
+                )
             }
+        };
+        match outcome {
+            SkyResult::Ok(a) => match tx.commit().await {
+                Ok(()) => ok_res(a),
+                Err(e) => SkyResult::Err(sky_err(&e)),
+            },
             SkyResult::Err(e) => {
-                let mut guard = tx_conn.lock().await;
-                // Best-effort rollback; the body's Err is the reported error.
-                let _ = sqlx::query("ROLLBACK").execute(&mut **guard).await;
+                // Best-effort deterministic rollback; the body's Err is reported.
+                let _ = tx.rollback().await;
                 SkyResult::Err(e)
             }
         }
@@ -1999,6 +2013,56 @@ mod tests {
     // different connections → the INSERT autocommitted on its own connection →
     // this assert would find the row present (FAIL). With task-local routing all
     // three run on one connection → row absent (PASS).
+    #[tokio::test]
+    async fn test_with_transaction_cancellation_rolls_back() {
+        // CANCELLATION SAFETY regression: a body future DROPPED mid-transaction
+        // (here via task abort) must NOT leak an open txn onto the pooled
+        // connection — the next checkout would otherwise inherit it. 1-conn pool
+        // forces reuse of the exact connection the cancelled txn ran on.
+        let (db, path) = fresh_file_db(1).await;
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let started2 = started.clone();
+        let dbc = db.clone();
+        let handle = tokio::spawn(async move {
+            let _: SkyResult<String, i64> = db_with_transaction(dbc, move |c| {
+                let started2 = started2.clone();
+                Box::pin(async move {
+                    let mut row = HashMap::new();
+                    row.insert("title".to_string(), "cancelled".to_string());
+                    let _: SkyResult<String, i64> = db_insert_row(c, "todos".into(), row).await;
+                    started2.notify_one(); // INSERT is in the open txn — signal, then hang
+                    std::future::pending::<()>().await; // dropped by abort below
+                    SkyResult::Ok(0)
+                })
+            })
+            .await;
+        });
+        started.notified().await;
+        handle.abort();
+        let _ = handle.await;
+
+        // Reused connection must NOT be poisoned by an inherited open txn.
+        let r: SkyResult<String, i64> = db_with_transaction(db.clone(), |c| {
+            Box::pin(async move {
+                let mut row = HashMap::new();
+                row.insert("title".to_string(), "after".to_string());
+                db_insert_row(c, "todos".into(), row).await
+            })
+        })
+        .await;
+        assert!(matches!(r, SkyResult::Ok(_)), "post-cancel txn must succeed on the reused connection: {:?}", r);
+        // The cancelled INSERT must have rolled back on drop (fold to a count to
+        // avoid a panic!-form assertion — the risk-precheck flags raw panic!).
+        let cancelled_count = match db_find_many_by_field::<String>(
+            db.clone(), "todos".into(), "title".into(), "cancelled".into()).await {
+            SkyResult::Ok(v) => v.len(),
+            SkyResult::Err(_) => usize::MAX,
+        };
+        assert_eq!(cancelled_count, 0, "cancelled INSERT must roll back on drop");
+        db.close().await;
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[tokio::test]
     async fn test_with_transaction_rollback_real_on_multiconn_pool() {
         let (db, path) = fresh_file_db(5).await;
