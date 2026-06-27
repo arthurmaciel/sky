@@ -17,6 +17,16 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 01:40 — #80: WALL-C std::collections root-collapse gated on a root-reexport allowlist
+
+**What.** WALL-C (#76) rule 2 collapsed ANY `std::collections::<private>::Type` → `std::collections::Type`,
+but only the 7 containers + `TryReserveError` are re-exported at the `std::collections` ROOT — a non-root
+type (`hash_map::Entry`/`RandomState`/`Iter`/`OccupiedEntry`) → `std::collections::Entry` = E0432
+(type-checks but cargo-fails). New `is_std_collections_root_reexport` allowlist gates the collapse;
+non-root collections types fail-closed-drop (sound > a wrong path). The 7 containers + `TryReserveError`
+(guardian completeness finding) still collapse → no regression. Unit-tested (`cargo test wallc` 5/5,
+both directions). Guardian final CLEAN. Inspector-internal, no embed/fixture needed. Commit `2a4ca955`.
+
 ## 2026-06-27 01:15 — #95 follow-up: skyi Sky-surface type must be Int/Float (not leaked width) + C6 fixture 99
 
 **What.** The C6 negative-fixture probe surfaced a #95 leak: preserving the foreign numeric width in the
