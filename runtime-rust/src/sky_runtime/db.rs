@@ -470,6 +470,19 @@ fn max_pool_connections() -> u32 {
         .unwrap_or(16)
 }
 
+/// Upper bound on DISTINCT cached pools (one per URL). Without this, code that
+/// connects to many distinct URLs accumulates live pools forever (memory +
+/// connection-handle DoS). At the cap, a new URL is served by a freshly-built,
+/// UNCACHED pool — still fully functional, just rebuilt per connect for that URL.
+/// Env SKY_DB_MAX_POOLS; default 32 (far above the typical 1–2 DBs per app).
+fn max_db_pools() -> usize {
+    std::env::var("SKY_DB_MAX_POOLS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(32)
+}
+
 /// Build one configured pool. SQLite (file, not `:memory:`) gets WAL — concurrent
 /// readers alongside a single writer — plus a `busy_timeout` so lock contention
 /// WAITS (sound) instead of erroring with `SQLITE_BUSY`. Without WAL a shared pool
@@ -507,6 +520,15 @@ async fn connect_cached<E: Send + From<String> + 'static>(url: String) -> SkyRes
         SkyResult::Ok(pool) => {
             if url_is_cacheable(&url) {
                 let mut g = pool_cache().lock().unwrap_or_else(|e| e.into_inner());
+                // Another task may have inserted during the lock-free build → reuse it.
+                if let Some(existing) = g.get(&url) {
+                    return ok_res(existing.clone());
+                }
+                // Bound the cache: at cap, return the freshly-built pool UNCACHED
+                // (functional; just not memoised) rather than growing without limit.
+                if g.len() >= max_db_pools() {
+                    return ok_res(pool);
+                }
                 ok_res(g.entry(url).or_insert(pool).clone())
             } else {
                 ok_res(pool)
