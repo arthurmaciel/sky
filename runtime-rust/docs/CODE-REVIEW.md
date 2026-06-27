@@ -57,7 +57,14 @@ reasons (CAF memoization, encoding Latin-1, etc.).
   behaviour unchanged). Regression test. Go-parity note: makes Rust MORE correct
   (security > byte-parity); Go should adopt the same if the sweep flags it.
 
-**IRREDUCIBLE REMAINDER (3 items — no Rust-only autonomous fix exists):**
+**⏸️ USER DECISION 2026-06-27 — ACCEPTED RESIDUE (boundary preserved).** Asked
+whether to lift the Rust-backend boundary to fix the 3 below (edit runtime-go /
+shared src/Sky/Type) or build a verification subsystem, the maintainer chose
+**keep the boundary; accept the residue.** So these 3 are an explicit, accepted
+state — NOT open defects — each contained/mitigated as noted. Re-open only if the
+boundary is later expanded.
+
+**IRREDUCIBLE REMAINDER (3 items — no Rust-only autonomous fix exists; user-accepted):**
 1. **register email-enumeration** — register returns a distinguishable "email already
    registered". Truly hiding existence needs a VERIFICATION-EMAIL registration flow (a
    new subsystem) landed in BOTH backends (Go's `db_auth.go` is identical). A
