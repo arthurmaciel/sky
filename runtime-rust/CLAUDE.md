@@ -546,6 +546,26 @@ log** — hold it to the same bar as a code review:
   drop via scope-glue). Guardian ruling: REJECT-FOR-NOW until covariance is
   verifiable. Don't reach for `transmute`-based self-ref codegen on the lifetime-drop
   class; the owned-API bind above is the answer.
+- **FFI feature propagation: a feature-gated foreign API only BINDS if the generated
+  dep ENABLES that feature.** The inspector (#89) injects features for rustdoc API
+  visibility (no-`full`-feature crate ⇒ enable ALL), so it binds feature-gated APIs
+  (firestore `caching`, …) — but a BARE generated dep line builds them on default
+  features ⇒ the types vanish ⇒ E0412/E0433/E0405/E0599. This was firestore's
+  DOMINANT `SKY_DCE=0` class (124→10 once propagated). Fix (#100 Part B): inspector
+  records the EFFECTIVE feature set rustdoc SUCCEEDED with (`PkgInfo.features` →
+  kernel.json), codegen UNIONs it into the user's sky.toml dep spec
+  (`readPkgFeatures`/`mergePkgFeatures` in `Project.hs`) for BOTH crates.io
+  (`RustVersion`) AND git (`RustGitDep._gitFeatures`) deps. SOUNDNESS keystone: every
+  propagated set is one rustdoc (macro-expand + type-check) accepted ⇒ free of the
+  `compile_error!(cfg(all(a,b)))`-class feature conflict (that idiom fails rustdoc ⇒
+  inspector's existing fallback drops to default ⇒ `effective=[]`); residual
+  rustdoc-vs-cargo divergences (native link-symbol clash, `cfg(doc)`-hidden guard)
+  are all FAIL-CLOSED (loud cargo error). Inspector features are TRIPLE-gated (cargo
+  charset + `jsonQuote` + `validCargoFeature` fail-safe-drop at merge + `validTomlStr`
+  at emit) ⇒ can't inject TOML nor reach the emit-time `error`; user-declared sky.toml
+  features keep the strict emit gate. Missing kernel.json / Go target / no features ⇒
+  byte-identical bare dep. This is THE general unlock for any feature-gated complex
+  crate. Proof: fixture `106-ffi-feature-propagation`.
 
 ### Pitfalls
 - **`Clone` ≠ `Send` — async FFI gates must use a TIGHTER predicate than sync FFI
