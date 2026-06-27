@@ -101,11 +101,14 @@ guardian for code; bash -n / py_compile for scripts) then commits.
 
 **Dispositioned (➖ no-defect, analysed):** ModuleEmitter nullary-Task memoization "freezes Time/Random" — this is CORRECT CAF semantics (a top-level `x = <task>` is a value evaluated once per Sky/Elm referential transparency; NOT memoizing would yield different values per reference, violating RT). Not a defect.
 
-**Remaining codegen `.hs` tail (LOW + 1 MED; each needs cabal + per-shape example verify):**
-- Pattern.hs tuple-arg-with-non-trivial-sub-pattern binding drop (MED correctness, delicate pattern-lowering); `unreachable!()` for refutable arg patterns (dead-in-practice — all real uses peepholed; contained by recover if reached).
-- ModuleEmitter std_ui_on_submit `unreachable!()` (dead-in-practice — applied uses peepholed).
-- Emitter.hs db_format_sql `?`-inside-string-literal (LOW); Cargo.toml version validation (LOW); Naming `user_` collision, TypeEmitter bare-`any`, TypeRenderer generic-order (LOW).
-- Guardian follow-ups: extend html `MAX_HTML_DEPTH` to style_inject/HtmlToVNode/diffTrees; server.rs `Vary` insert can clobber a handler-set Vary.
+| `eae1fff0` | **codegen MED** Pattern.hs tuple-arg non-trivial-sub-pattern binding drop → destructure-prelude route + Maybe/Result arg-pattern ctor bridge (`SkyMaybe`/`SkyResult`, fixes standalone `f (Just x)` too) | ✅ cabal + run-verified (`("x",Just 5)`→"x5") |
+
+**Codegen MED tier COMPLETE** (div-by-zero, tuple-binding + Maybe/Result pattern bridge, Live.route OOB, rustfmt locale, console `--backend`).
+
+**Remaining = codegen LOW residue + out-of-boundary only:**
+- codegen LOW (low-value; each needs cabal + example verify): Emitter.hs db_format_sql `?`-inside-string-literal, Cargo.toml/SKY_DB_URL version-string escaping, ffi_kernel_polyfill `panic!`; Naming `user_` collision; TypeEmitter bare-`any`; TypeRenderer generic-order; `unreachable!()` for refutable arg patterns + std_ui_on_submit (BOTH dead-in-practice — all applied uses peepholed; contained by recover if ever reached; the real fix is the out-of-boundary front-end exhaustiveness gate).
+- Guardian follow-ups (LOW): extend html `MAX_HTML_DEPTH` to style_inject/HtmlToVNode/diffTrees; server.rs `Vary` insert clobber.
+- **OUT OF RUST BOUNDARY (need user / Go-side decision):** Pattern.hs HIGH front-end exhaustiveness; register email-enumeration; email case-normalization; CSV formula-injection policy; email SES/SendGrid attachments (feature); rsa Marvin (no upstream fix).
 3. **CROSS-BACKEND / OUT-OF-RUST-BOUNDARY (signalled to user — a Rust-only change breaks Go≡Rust parity AND half-fixes):** register email-existence enumeration (Go has the same path); email case-normalization; Pattern.hs HIGH front-end exhaustiveness. **email SES/SendGrid attachments** (completeness feature). **CSV formula-injection** (policy: no lossless mitigation — orchestrator/user must choose sanitize policy). rsa Marvin (no upstream fix).
 
 **Guardian follow-ups (filed):** extend html `MAX_HTML_DEPTH` to style_inject/HtmlToVNode/diffTrees passes; jwt.rs new ≥32-byte HS256 floor is a behavior change (a short-secret `Jwt.*` caller now Errs — RFC 7518-correct, surfaced); server.rs `Vary` insert can clobber a handler-set Vary.
