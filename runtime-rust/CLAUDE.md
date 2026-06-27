@@ -744,6 +744,37 @@ log** — hold it to the same bar as a code review:
   `synthesiseGenericWrapper`) is a SEPARATE pipeline that needed the same fidelity.
   General rule: codegen can only coerce what the inspector lets it SEE; a green
   `sky build` that cargo-fails on a numeric width is the tell.
+- **A move-only Rust value bound once in Sky and referenced ≥2 times can't use the
+  clone-capture strategy — RE-THUNK it.** A Sky `Task` is a re-runnable lazy thunk
+  on Go, but lowers to `SkyTask = Pin<Box<dyn Future + Send>>` on Rust — move-only,
+  NOT `Clone`. The codegen's per-closure capture-prelude (`let x = x.clone();`)
+  assumes every captured free var is `Clone`; for a `let`-bound Task used in ≥2
+  non-discard closures it emits `cleanup.clone()` → E0599. Fix (#96): lower the
+  binding to a `Fn() -> SkyTask` closure that REBUILDS the future on demand and
+  CALL it at every read site (`cleanup()`, via `ecThunkVars` + `varLocalRead` at
+  ALL VarLocal emit sites — there are FOUR: argToRustString, exprToRustInner, and
+  TWO in substVar). This matches Go's re-runnable-thunk semantics (each reference
+  re-runs the effect; mutually-exclusive branches → runs at most once). The thunk
+  closure is `Clone`+`Send`+`Sync` because it captures only `Clone` Sky values.
+  Gate it DISJOINT from the existing single-use-move (c==1) and Arc-all-discard
+  (`allUsesDiscarded`, placed FIRST) arms via `c>=2 && not (allUsesDiscarded …)`.
+- **Annotating a generic closure param with the enclosing fn's SOLE generic is
+  sound — Sky doesn't generalise local `let`s.** A closure param whose solver
+  region type is a bare `TVar` (e.g. a generic `result : a` captured through a
+  nested `Task.andThen` closure) is emitted un-annotated → E0282; the solver
+  alpha-renames (`a`→`c`) so it won't name-match the header generic. Fix (#96):
+  when the fn has exactly ONE generic, annotate the bare-tvar param with it
+  (`useType`'s `[only] <- ecGenParams` arm). SOUND because (1) Sky emits
+  `T.CLet [] []` for local lets — no local generalisation — so a one-generic fn
+  body has exactly one logical tvar; (2) one zonked type per var ⇒ a param's
+  use-regions are uniformly bare (genuinely free → instantiating to the generic is
+  always rustc-accepted) or uniformly concrete (the concrete arm fires first); (3)
+  Rust-CONCRETE positions map to `TType`/`Value`, never a bare `TVar`
+  (`FfiTypeResolve.hs`), and the header bound set
+  `Clone+PartialEq+Debug+Send+Sync+'static` is a superset of any op on a free
+  value. Guardian-confirmed; no tightening needed. Both gaps were Go-parity bugs
+  (Go built the program); regression fixtures `101-task-rethunk` +
+  `102-task-rethunk-free-tvar`.
 - Known unfixed codegen/runtime gaps:
   `2026-06-15-skyshop-rs-codegen-gaps.md` (unconstrained-`Result`→`i64`;
   `Dict.union`/`List.sortBy` absences).
