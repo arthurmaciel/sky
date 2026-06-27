@@ -17,6 +17,32 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-26 23:55 — #94: SATURATING Vec<numeric> element coercion (field-setter + enum-ctor)
+
+**What.** The two `Vec<numeric>` element emit sites — `setValExpr` (field setter) and
+`ctorArgOwned` (enum ctor) in `src/Sky/Build/Rust/Ffi.hs` — wrote `x as <elem>` per element.
+For an int→int-narrowing element (Sky `List Int` = `Vec<i64>` → foreign `Vec<u32>`) that WRAPS
+— the banned silent coercion. Now the int→int element routes through the #82 `numSaturate`
+helper (saturating clamp, total); a FLOAT-source element keeps bare `as` (gated on the carried
+`ElemGeneral _ "Float"` classification — guardian's typed-proof form, replacing an initial
+substring test), because Rust float→int `as` is already saturating (≥1.45) and numSaturate's
+i64-literal clamps assume an i64 element.
+
+**Why.** Guardian "Finding 2" from #82. The inspector fail-closes a narrowing field SETTER
+(`setter_narrowing` drop), so the reachable Vec-narrow site is the enum ctor (gates on
+closed-set eligibility, not losslessness); fixed both symmetrically for correctness-in-depth.
+
+**Proof.** Fixture 97 extended with `Pack::Nums(Vec<u32>)`: Sky `[5_000_000_000, 7, 100]` →
+ctor emits `.map(|x| (x).clamp(0, u32::MAX as i64) as u32)`, runs → per-element saturates to
+4294967295 (`packTotal=4294967402`), never wraps. `numSaturate` unit tests 5/5. Guardian
+final review CLEAN (improvement applied: typed `elemSky` classification, no substring).
+
+**Affected.** `src/Sky/Build/Rust/Ffi.hs`, `test/Sky/Build/Rust/FfiInstanceSpec.hs`,
+`runtime-rust/tests/sky/97-ffi-numeric-param-coerce/{numparam-crate/src/lib.rs,src/Main.sky}`.
+Commit `6f9af154`.
+
+---
+
 ## 2026-06-26 23:30 — #82: SATURATING numeric param-width coercion (Phase-4 first implement target)
 
 **What.** A foreign numeric param of a non-i64 width (`usize`/`u32`/`f32`/…) on the regular FFI
