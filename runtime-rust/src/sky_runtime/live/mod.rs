@@ -292,7 +292,8 @@ fn dev_console_banner(base: &str) -> String {
 // ─── live_app: axum mount + per-session TEA driver over SSE ─────────────────
 
 use crate::sky_runtime::tea::{SkyCmd, SkySub};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::mpsc::{self, Sender, Receiver};
 
 /// Per-session live state behind an `Arc<Mutex<…>>`. `index` / `last_view` are
@@ -383,6 +384,12 @@ struct LiveState<Model, Msg, FInit, FUpdate, FView, FSubs> {
     /// BEFORE calling `init`. `live_app` returns empty; `live_app_routed`
     /// captures the route table.
     param_resolver: ParamResolver,
+    /// Live driver count for admission control. Each spawned `drive_session`
+    /// holds a `SessionSlot` that decrements this on exit; a cookieless GET that
+    /// would push it past `max_sessions()` is rejected (503) instead of minting
+    /// an unbounded number of sessions. Decremented ONLY via `SessionSlot::drop`,
+    /// so the leak fix (mortal driver) and this cap share one mechanism.
+    session_count: Arc<AtomicUsize>,
 }
 
 // Manual Clone — derive would demand Clone on the closures (they're behind Arc).
@@ -398,7 +405,30 @@ impl<Model, Msg, FInit, FUpdate, FView, FSubs> Clone
             subs: self.subs.clone(),
             route_resolver: self.route_resolver.clone(),
             param_resolver: self.param_resolver.clone(),
+            session_count: self.session_count.clone(),
         }
+    }
+}
+
+/// Max concurrent live-session drivers (admission control). 0 = unlimited
+/// (opt-out). Default 50_000 — far above any single-instance real load, low
+/// enough to bound memory under a session-creation flood. Env SKY_LIVE_MAX_SESSIONS.
+fn max_sessions() -> usize {
+    std::env::var("SKY_LIVE_MAX_SESSIONS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(50_000)
+}
+
+/// RAII admission slot: decrements `LiveState::session_count` exactly once when
+/// the owning `drive_session` task exits (any path). Paired 1:1 with the
+/// `fetch_add` reservation at the session-create site — the ONLY decrement.
+struct SessionSlot {
+    count: Arc<AtomicUsize>,
+}
+impl Drop for SessionSlot {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -491,7 +521,12 @@ fn spawn_subs<Msg: Clone + Send + 'static>(
 // satisfy the 7-arg heuristic would add indirection without clarifying anything.
 #[allow(clippy::too_many_arguments)]
 async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
-    entry: Arc<Mutex<SessionEntry<Model, Msg>>>,
+    // WEAK ref: the driver must NOT keep the session alive. The strong holders are
+    // the store map (until TTL evict) and any open SSE connection (pins the entry
+    // for the connection lifetime — see sse_handler). When BOTH release, the entry
+    // drops and the driver exits (tick `upgrade()` → None), closing the leak where
+    // a strong-Arc + own-msg_tx made `recv()` never return None → immortal task.
+    entry: Weak<Mutex<SessionEntry<Model, Msg>>>,
     mut msg_rx: Receiver<Msg>,
     msg_tx: Sender<Msg>,
     update: Arc<FUpdate>,
@@ -499,6 +534,8 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
     subs: Arc<FSubs>,
     store: Arc<dyn store::SessionStore<Model, Msg>>,
     sid: String,
+    // Admission-control slot: decrements LiveState::session_count on driver exit.
+    _slot: SessionSlot,
 ) where
     // PartialEq: the `noop` signal compares old vs new Model by structural
     // equality. Generated Model structs always derive PartialEq.
@@ -519,14 +556,44 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
     // loaded session. Wrapped in the session-sid scope so SkipOrigin filtering
     // binds the right owner.
     {
-        let model0 = { entry.lock().unwrap_or_else(|e| e.into_inner()).model.clone() };
+        // Upgrade transiently; if the session is already gone there is nothing to drive.
+        let Some(strong) = entry.upgrade() else {
+            return;
+        };
+        let model0 = { strong.lock().unwrap_or_else(|e| e.into_inner()).model.clone() };
         pubsub::with_session_sid(sid.clone(), || {
             spawn_subs(subs(model0), &msg_tx, &mut sub_handles)
         });
     }
-    while let Some(msg) = msg_rx.recv().await {
+    // Periodic liveness check: the driver holds only a Weak ref, but it also holds
+    // its own `msg_tx` clone, so `recv()` alone never returns None. The tick
+    // upgrades the Weak — once the store has evicted the session AND no SSE
+    // connection pins it, `upgrade()` returns None and the driver exits (freeing
+    // the entry, the channel, and the admission slot). 30 s bounds a dead driver's
+    // lifetime to one interval past eviction.
+    let mut liveness = tokio::time::interval(std::time::Duration::from_secs(30));
+    liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let msg = tokio::select! {
+            maybe = msg_rx.recv() => match maybe {
+                Some(m) => m,
+                None => break,
+            },
+            _ = liveness.tick() => {
+                if entry.upgrade().is_none() {
+                    break;
+                }
+                continue;
+            }
+        };
+        // Upgrade for THIS iteration only; drop `strong` before the next select!
+        // (holding it across the park would re-pin the entry and re-introduce the
+        // leak). None ⇒ the session was evicted between messages ⇒ stop.
+        let Some(strong) = entry.upgrade() else {
+            break;
+        };
         // Clone the model under a short lock, release before update.
-        let model = { entry.lock().unwrap_or_else(|e| e.into_inner()).model.clone() };
+        let model = { strong.lock().unwrap_or_else(|e| e.into_inner()).model.clone() };
         // Msg-handling latency histogram (Go parity: sky_live_msg_seconds{name},
         // msg_logging.go). The `name` label is the BOUNDED Msg variant name
         // (finite cardinality), never a payload — see telemetry::variant_name.
@@ -548,7 +615,7 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
         style_inject::apply_style_injections(&mut tree);
 
         let (patches, seq, sse, noop) = {
-            let mut e = entry.lock().unwrap_or_else(|e| e.into_inner());
+            let mut e = strong.lock().unwrap_or_else(|e| e.into_inner());
             let patches = diff(&e.last_view, &tree);
             // noop (Go parity: oldHash==newHash && cmdIsNone && err==nil). Here
             // `e.model` STILL holds the OLD model (top-of-loop cloned it OUT; the
@@ -589,8 +656,11 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
 
         // Write-through: checkpoint the committed model to the store (a touch
         // for memory; a re-serialize for persistent backends — Go store.Set on
-        // every commit).
-        store.set(&sid, entry.clone()).await;
+        // every commit). Re-inserting an evicted-but-active session with a fresh
+        // last-seen is intended (Go parity): a session that processes a Msg is
+        // alive. `strong` is dropped at the end of this iteration (block scope),
+        // before the next select! park — never held across the await loop.
+        store.set(&sid, strong.clone()).await;
 
         run_cmd(cmd, &msg_tx, &sid);
         pubsub::with_session_sid(sid.clone(), || {
@@ -975,6 +1045,7 @@ where
             // No routing: GET serves the freshly-init'd model unchanged; no params.
             route_resolver: Arc::new(|m, _path| m),
             param_resolver: Arc::new(|_path| crate::sky_runtime::dict::dict_empty()),
+            session_count: Arc::new(AtomicUsize::new(0)),
         };
         serve_live(state).await
     })
@@ -1031,6 +1102,7 @@ where
             subs: Arc::new(subscriptions),
             route_resolver: resolver,
             param_resolver,
+            session_count: Arc::new(AtomicUsize::new(0)),
         };
         serve_live(state).await
     })
@@ -1115,10 +1187,31 @@ where
                     return page_response(&s, &body, &csrf_tok);
                 }
                 Some(store::StoreHit::Cold(m)) => {
+                    // A returning user with a valid sid cookie → not new attack
+                    // volume, so NOT rejected; but count its driver so the slot it
+                    // gets below is paired (decremented on the driver's exit).
+                    st.session_count.fetch_add(1, Ordering::SeqCst);
                     let s = cookie_sid.unwrap_or_else(new_sid);
                     (s, (st.route_resolver)(m, uri.path()), SkyCmd::None)
                 }
                 None => {
+                    // Admission control (cookieless = brand-new session = the
+                    // attack surface). Reserve a slot atomically: fetch_add-then-test
+                    // avoids the load-then-add TOCTOU where N concurrent GETs all
+                    // pass at cap-1. ALWAYS reserve (so the slot built below is
+                    // paired 1:1 with a decrement); only the rejection is gated on
+                    // cap>0 (0 = unlimited opt-out). Over cap → roll back + 503.
+                    let cap = max_sessions();
+                    let reserved = st.session_count.fetch_add(1, Ordering::SeqCst);
+                    if cap > 0 && reserved >= cap {
+                        st.session_count.fetch_sub(1, Ordering::SeqCst);
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            [(axum::http::header::RETRY_AFTER, "2")],
+                            "server at session capacity",
+                        )
+                            .into_response();
+                    }
                     // Build the request context (params from routing — empty when
                     // unrouted) and init a fresh model. The param_resolver is
                     // model-independent, breaking the init↔routing cycle.
@@ -1156,9 +1249,16 @@ where
             }));
             st.store.set(&sid, entry.clone()).await;
 
-            // Spawn the per-session driver (write-through to the store on commit).
+            // The admission slot for this driver (reserved by the Cold/None arm
+            // above); its Drop decrements session_count when the driver exits.
+            let slot = SessionSlot { count: st.session_count.clone() };
+            // Spawn the per-session driver with a WEAK entry ref (the store +
+            // any SSE connection are the strong holders) so the driver is mortal:
+            // it exits once the session is evicted and unconnected, releasing the
+            // slot. The local strong `entry` drops at this handler's return,
+            // leaving the store (+ future SSE) as the only strong holders.
             tokio::spawn(drive_session(
-                entry,
+                Arc::downgrade(&entry),
                 msg_rx,
                 msg_tx.clone(),
                 st.update.clone(),
@@ -1166,6 +1266,7 @@ where
                 st.subs.clone(),
                 st.store.clone(),
                 sid.clone(),
+                slot,
             ));
             // Fire init's Cmd into the loop (None for a cold-restored session).
             run_cmd(cmd0, &msg_tx, &sid);
@@ -1276,10 +1377,19 @@ where
                     crate::sky_runtime::telemetry::metric_add_gauge("sky_live_sessions_active", &[], -1);
                 }
             }
+            // Pin the STRONG entry Arc into the stream state for the connection's
+            // whole life. This is load-bearing: the driver now holds only a Weak
+            // ref, so without this an idle-but-SSE-connected (watch-only) session
+            // — one receiving Cmd.publish / Sub.every broadcasts but sending no
+            // user Msgs, hence never written-through to refresh store last-seen —
+            // would be TTL-evicted, its last strong ref dropped, and its driver
+            // would exit mid-stream. Holding the strong Arc here keeps it (and its
+            // driver) alive exactly as long as the client stays connected; on
+            // disconnect axum drops the body → this Arc releases.
             let body_stream =
-                futures_util::stream::unfold((rx, SessionGauge), |(mut rx, guard)| async move {
+                futures_util::stream::unfold((rx, SessionGauge, entry), |(mut rx, guard, entry)| async move {
                     rx.recv().await.map(|SsePatch(s)| {
-                        (Ok::<_, std::io::Error>(axum::body::Bytes::from(s)), (rx, guard))
+                        (Ok::<_, std::io::Error>(axum::body::Bytes::from(s)), (rx, guard, entry))
                     })
                 });
             match Response::builder()
@@ -1844,5 +1954,50 @@ mod session_lost_body_tests {
             body.contains("session not found"),
             "body must contain the client-probed recovery substring; got {body:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod admission_control_tests {
+    use super::*;
+
+    // Closes the leak/cap coupling: SessionSlot decrements EXACTLY once on drop,
+    // paired 1:1 with the reservation fetch_add — no underflow, no double-count.
+    #[test]
+    fn session_slot_decrements_once_on_drop() {
+        let count = Arc::new(AtomicUsize::new(0));
+        // Simulate a reservation (what the Cold/None arm does).
+        count.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        {
+            let _slot = SessionSlot { count: count.clone() };
+            assert_eq!(count.load(Ordering::SeqCst), 1, "slot construction must not change the count");
+        } // _slot drops here → one decrement
+        assert_eq!(count.load(Ordering::SeqCst), 0, "slot drop must decrement exactly once");
+    }
+
+    // Reserve/drop M >> N times returns to 0 (counter exactness, no leak/underflow).
+    #[test]
+    fn reserve_then_release_balances_to_zero() {
+        let count = Arc::new(AtomicUsize::new(0));
+        for _ in 0..1000 {
+            count.fetch_add(1, Ordering::SeqCst);
+            let _slot = SessionSlot { count: count.clone() };
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    // max_sessions(): env override, default, and the 0=unlimited opt-out.
+    #[test]
+    fn max_sessions_parsing() {
+        std::env::remove_var("SKY_LIVE_MAX_SESSIONS");
+        assert_eq!(max_sessions(), 50_000);
+        std::env::set_var("SKY_LIVE_MAX_SESSIONS", "7");
+        assert_eq!(max_sessions(), 7);
+        std::env::set_var("SKY_LIVE_MAX_SESSIONS", "0");
+        assert_eq!(max_sessions(), 0, "0 = unlimited opt-out");
+        std::env::set_var("SKY_LIVE_MAX_SESSIONS", "garbage");
+        assert_eq!(max_sessions(), 50_000, "unparseable falls back to default");
+        std::env::remove_var("SKY_LIVE_MAX_SESSIONS");
     }
 }
