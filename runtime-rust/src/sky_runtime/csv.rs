@@ -76,6 +76,29 @@ fn parse_delim<E: From<String>>(text: &str, delim: u8) -> SkyResult<E, CsvDoc> {
     SkyResult::Ok(CsvDoc { header, rows })
 }
 
+/// Spreadsheet formula-injection guard (CWE-1236 / OWASP). A cell beginning with
+/// `=`, `+`, `-`, `@`, TAB, or CR is interpreted as a FORMULA by Excel/Sheets when
+/// the CSV is opened — an injection vector for attacker-controlled cell data.
+/// OPT-IN via `SKY_CSV_SANITIZE_FORMULAS` because the only mitigation (prefix the
+/// cell with `'`) is LOSSY: it alters exported data (e.g. `-5` → `'-5`) and breaks
+/// the lossless parse↔encode round-trip. Default OFF preserves round-trip; the
+/// caller opts in when serving CSV to spreadsheet users, accepting the tradeoff.
+fn csv_formula_guard_enabled() -> bool {
+    matches!(
+        std::env::var("SKY_CSV_SANITIZE_FORMULAS").ok().as_deref(),
+        Some("1") | Some("on") | Some("true") | Some("yes")
+    )
+}
+
+fn guard_formula(cell: &str) -> std::borrow::Cow<'_, str> {
+    match cell.as_bytes().first() {
+        Some(b'=') | Some(b'+') | Some(b'-') | Some(b'@') | Some(b'\t') | Some(b'\r') => {
+            std::borrow::Cow::Owned(format!("'{}", cell))
+        }
+        _ => std::borrow::Cow::Borrowed(cell),
+    }
+}
+
 fn encode_delim(doc: &CsvDoc, delim: u8) -> String {
     // flexible(true): a parsed-then-encoded doc may carry ragged rows (row width ≠
     // header width) since the reader is flexible. Without this the writer errors on
@@ -85,9 +108,14 @@ fn encode_delim(doc: &CsvDoc, delim: u8) -> String {
         .delimiter(delim)
         .flexible(true)
         .from_writer(vec![]);
-    let _ = wtr.write_record(&doc.header);
-    for row in &doc.rows {
-        let _ = wtr.write_record(row);
+    let guard = csv_formula_guard_enabled();
+    for row in std::iter::once(&doc.header).chain(doc.rows.iter()) {
+        if guard {
+            let safe: Vec<String> = row.iter().map(|c| guard_formula(c).into_owned()).collect();
+            let _ = wtr.write_record(&safe);
+        } else {
+            let _ = wtr.write_record(row);
+        }
     }
     let bytes = wtr.into_inner().unwrap_or_default();
     String::from_utf8_lossy(&bytes).into_owned()
@@ -164,6 +192,18 @@ pub fn csv_parse_stream_from_file<E: From<String> + Send + 'static>(path: String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formula_guard_is_opt_in() {
+        let doc = CsvDoc { header: vec!["a".into()], rows: vec![vec!["=SUM(A1)".into()]] };
+        // Default OFF: lossless (formula cell emitted verbatim, just CSV-quoted).
+        std::env::remove_var("SKY_CSV_SANITIZE_FORMULAS");
+        assert!(encode_delim(&doc, b',').contains("=SUM(A1)"));
+        // ON: dangerous-leading cell is prefixed with a single quote.
+        std::env::set_var("SKY_CSV_SANITIZE_FORMULAS", "1");
+        assert!(encode_delim(&doc, b',').contains("'=SUM(A1)"));
+        std::env::remove_var("SKY_CSV_SANITIZE_FORMULAS");
+    }
 
     #[test]
     fn parse_then_encode_roundtrip() {
