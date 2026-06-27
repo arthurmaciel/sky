@@ -15,8 +15,459 @@ codebase). One pass, one file at a time.
   ➖ no-defect · ❌ attempted, won't verify — each with a date).
 - A **living ledger**: each re-audit stamps **Last audited** and only re-sweeps
   files changed since their last date. Skill: `sky-rust-backend:principles-audit`.
-- **Latest full re-audit: 2026-06-19** (whole codebase, 131 code/script/skill files) —
+- **Latest full re-audit: 2026-06-27** (whole codebase, swarm; see section below). Prior full: 2026-06-19 (whole codebase, 131 code/script/skill files) —
   see the dated section immediately below for severity summary + high/medium dispositions.
+
+## 2026-06-27 — EXHAUSTIVE full re-audit (swarm: broad 196/196 + specialist lenses)
+
+**Method.** `principles-audit` exhaustive mode, budget=max. Deterministic tier (cargo-audit/deny + secgrep) → broad sweep 1 read-only agent/file over **196 in-boundary files** (112 code + 24 scripts + 60 prose), six principles each → specialist adversarial lenses (injection/authz/crypto-timing/memory-safety+UB/DoS+resource) over ~50 high-risk files. 44.6M subagent tokens, ~4.3 h.
+
+**Caveat — vote phase lost.** The 5-vote adversarial-verify + completeness-critic phases hit the workflow 1000-agent cap AND a session limit before completing (554 vote agents failed). Findings below are therefore **unvoted candidates**, NOT 5-vote-confirmed — EXCEPT the three security/soundness HIGHs marked ✅verified, which the orchestrator re-read against source by hand. Treat unverified HIGH/MED as high-probability-but-unconfirmed; re-verify before fixing.
+
+### Fixes applied — 2026-06-27 (autonomous, guardian-supervised, build-gated)
+
+Each batch: read → fix → clippy `--all-targets --all-features -D warnings` + `cargo test --lib` + minimal example build → `security-soundness-guardian` adversarial final review (blocking) → commit. The guardian BLOCKED and forced a deeper fix twice (html sibling sink → parse-don't-validate `SafeAttrName`; tui Vw/Vh leaves unclamped) — both resolved before commit.
+
+| Commit | Findings fixed | Gate |
+|---|---|:-:|
+| `cc07c1e1` | **HIGH** style_inject.rs XSS strip (case-insens + fixpoint); html.rs `on*`/`srcdoc` XSS on BOTH sinks via `SafeAttrName` (parse-don't-validate); list.rs `sortWith` comparator panic (catch_unwind); file.rs `readFile` unbounded → 512 MiB ceiling | ✅ +5 regression tests |
+| `3d07b4ef` | **HIGH** RUSTSEC-2026-0185 quinn-proto 0.11.14→0.11.15 | ✅ cargo audit |
+| `80334f43` | **HIGH** system.rs env read/write race (UB) → RwLock; tui/layout.rs cell-count DoS clamp (px/vw/vh/fr) + ANSI-injection (Ui.html/paragraph/input value) sanitize_rune | ✅ guardian |
+
+Remaining HIGH: server.rs WS unbounded mpsc; live/mod.rs session leak + admission cap; Pattern.hs `unreachable!()` on refutable arg pattern (codegen); 4 doc-drift. MED/LOW: in progress.
+rsa 0.9.10 (RUSTSEC-2023-0071 Marvin) — no upstream fix; deferred (tracked).
+Filed follow-ups: ~40 process-internal `SKY_*` env reads via read_env_var; render_node recursion depth limit.
+
+### Deterministic tier (supply-chain + secgrep)
+
+- **secgrep timing-oracle: CLEAN** — no `==`/`!=` on secrets; `subtle::ct_eq` used in crypto.rs, live/csrf.rs:205, live/console.rs:103/111/297, server.rs:861.
+- **cargo-deny: bans ok, sources ok.**
+- **cargo-audit:**
+  - 🔴 **HIGH RUSTSEC-2026-0185** `quinn-proto 0.11.14` — remote memory exhaustion (unbounded out-of-order stream reassembly), CVSS 7.5. Fix: upgrade ≥0.11.15 (transitive dep).
+  - 🟠 **MED RUSTSEC-2023-0071** `rsa 0.9.10` — Marvin timing sidechannel, CVSS 5.9. **No fixed upgrade available.** Reachable via RS256 JWT / `crypto.rsaSha256*`. Defer w/ note; track upstream.
+  - 🟡 webview deps `gtk-sys/gdk/atk/glib 0.18.2` unmaintained + `glib VariantStrIter` unsound (RUSTSEC-2024-0429) — `webview` feature-gated; low exposure.
+
+### Severity summary
+
+- Broad sweep: **359 findings** — {'medium': 74, 'low': 212, 'info': 66, 'high': 7}
+- Specialist lenses: **142 findings** — {'low': 69, 'info': 24, 'medium': 40, 'high': 9}
+- Files clean (`—`): **45** / 196
+
+### HIGH findings (severity=high) — unvoted candidates + 3 hand-verified
+
+| File | Lens/principle | Loc | Finding | Suggested fix | Status |
+|---|---|---|---|---|:-:|
+| `runtime-rust/src/sky_runtime/live/style_inject.rs` | broad | strip_style_close, lines 132-134 (consumed by build_mq:143-1 | strip_style_close is an incomplete XSS sanitizer — both case-insensitive and reconstruction bypasses | Make the strip total and case-insensitive AND fixpoint-iterated. E.g. loop: scan a lowercased copy for `</style` and rem | ✅verified |
+| `runtime-rust/plugins/sky-rust-backend/skills/sync-with-upstream/SKILL.md` | broad | Step 5, lines 80, 88, 91-92 (also report template line 219 ' | Step 5 names the wrong Compile.hs dispatch field + constructors (Toml._target/TargetRust/TargetGo do not exist) | Replace `Toml._target` with `Toml._backend config`, `Toml.TargetRust` with `Toml.BackendRust`, and `Toml.TargetGo` with  | ⚠ unvoted |
+| `runtime-rust/src/sky_runtime/list.rs` | broad | list_sort_with, lines 140-147 | list_sort_with feeds an arbitrary user comparator to std sort_by → total-order panic | Do not hand an untrusted comparator to std sort. Either wrap the `sort_by` call in `std::panic::catch_unwind` and fall b | ⚠ unvoted |
+| `runtime-rust/docs/audits/2026-06-19-security-2nd-pass.md` | broad | header line 5-6 vs findings at lines 8-11 (new_sid), 12-14 ( | All 5 header-claimed remediations still presented as live findings in the body — contradicts the doc's own header and the current code | Reconcile the body with the header: mark each of the 5 remediated findings with a per-finding 'FIXED in 30c76bad' annota | ⚠ unvoted |
+| `runtime-rust/src/sky_runtime/html.rs` | broad | is_safe_html_name (L416-421) + attribute emit loop in render | Name gate permits on*/srcdoc attributes — value-escaping does not stop script execution (XSS) | At the render sink, drop attribute keys whose lowercased name begins with `on` (event-handler attrs are never legitimate | ✅verified |
+| `runtime-rust/docs/superpowers/specs/2026-06-22-rust-ffi-typed-surface-parity.md` | broad | Status header, line 3 | Status line says work is unstarted, but S1–S4 are all implemented and have fixtures | Update the status to DONE/SHIPPED (or move the spec to an implemented/archive state) and note the slices landed; the doc | ⚠ unvoted |
+| `runtime-rust/docs/superpowers/specs/2026-06-22-rust-ffi-typed-surface-parity.md` | broad | Confirmed gaps #1, lines 29-34 | Gap #1 (no struct FIELD accessors) is factually false vs the codebase | Rewrite the 'Confirmed gaps' section to reflect that gaps 1-3 are closed, or remove it; fix/remove the stale main.rs lin | ⚠ unvoted |
+| `runtime-rust/src/sky_runtime/tui/layout.rs` | lens:DoS+resource | cells_x/cells_y (lines 44-55), resolve_fixed_w (251-267) / r | Program-controlled px/vw/vh Length resolves to an unbounded cell count → unbounded allocation (OOM) and capacity-overflow panic | Clamp every resolved cell count to a sane bound before it reaches any `.repeat()` or row-fill loop. Concretely, clamp ce | ⚠ unvoted |
+| `runtime-rust/src/sky_runtime/system.rs` | lens:memory-safety+UB | system.rs:12-33 (ENV_MUTATION_LOCK + locked_set_var/locked_r | Env mutator↔reader data race: getenv family bypasses ENV_MUTATION_LOCK → UB (use-after-free in C environ) under Task.parallel | Make the lock cover reads too. Replace the Mutex<()> with a std::sync::RwLock<()>: mutators take .write(), every Sky-ori | ⚠ unvoted |
+| `runtime-rust/src/sky_runtime/file.rs` | lens:DoS+resource | runtime-rust/src/sky_runtime/file.rs:4-11 (file_read_file) | file_read_file has no size cap — unbounded allocation / infinite read → OOM | Mirror the siblings: stat the file first and/or use f.take(DEFAULT_CAP=10*1024*1024).read_to_string(&mut buf), returning | ⚠ unvoted |
+| `runtime-rust/src/sky_runtime/server.rs` | lens:DoS+resource | server.rs:595 (channel), 623-628 (drain loop), 729-767 (prod | Unbounded mpsc outbound queue per WebSocket peer → slow/idle consumer causes unbounded memory growth (OOM) | Replace `unbounded_channel` with a bounded `tokio::sync::mpsc::channel::<WsOut>(N)` (e.g. cap from SKY_LIVE_SSE_BUFFER-s | ⚠ unvoted |
+| `runtime-rust/src/sky_runtime/live/style_inject.rs` | lens:injection | strip_style_close, lines 132-134 (consumed by build_mq:143-1 | strip_style_close is single-pass non-recursive — nested `</style` reconstructs after removal, defeating the only XSS guard on the raw <style> body | Strip to a fixpoint instead of one pass, case-insensitively: `let mut out = s.to_string(); loop { let next = strip_once_ | ✅verified |
+| `runtime-rust/src/sky_runtime/live/style_inject.rs` | lens:injection | strip_style_close, line 133 (`s.replace("</style", "").repla | strip_style_close only handles all-lowercase and all-UPPERCASE `</style`, not mixed case — HTML end-tag matching is case-insensitive, so mixed-case breaks out | Match case-insensitively (the same fixpoint loop suggested for the reconstruction finding closes both): lowercase-scan f | ✅verified |
+| `src/Sky/Generate/Rust/Builder/Pattern.hs` | lens:memory-safety+UB | Pattern.hs:108-115 (elseClause / prelude construction in pat | Codegen emits `unreachable!()` for refutable function-argument patterns; reachable by a well-typed Sky call with a non-matching variant | Do not emit `unreachable!()` on a Sky-reachable path. Two sound options: (1) Close the gap at the front end — gate refut | ✅verified |
+| `runtime-rust/src/sky_runtime/live/mod.rs` | lens:DoS+resource | runtime-rust/src/sky_runtime/live/mod.rs:493-603 (drive_sess | Per-session driver task + SessionEntry are immortal — never reclaimed even after TTL eviction (permanent unbounded leak) | Break the self-reference: have drive_session hold a `Weak<Mutex<SessionEntry>>` and `upgrade()` per iteration (exit the  | ⚠ unvoted |
+| `runtime-rust/src/sky_runtime/live/mod.rs` | lens:DoS+resource | runtime-rust/src/sky_runtime/live/mod.rs:1121-1173 (page han | Unbounded session creation on GET — no global session cap, rate limit, or admission control | Add an admission gate before allocating a session: a configurable max-live-session cap (reject with 503/429 once exceede | ⚠ unvoted |
+
+### MEDIUM findings (compact, unvoted)
+
+- **`runtime-rust/docs/PRINCIPLES.md`**
+  - [broad] Garbled word 'soundnever' breaks the Efficiency sentence — _Efficiency principle (item 4), line 9_ → Replace 'soundnever' with 'soundness, never' so it reads: '...only after security, correct
+  - [broad] Principle numbering skips 6 (Readability mislabeled as 7) — _Numbered list items, lines 3-13 (jump from '5.' at_ → Renumber the Readability principle from '7.' to '6.'
+- **`runtime-rust/docs/analysis/2026-06-22-hot-reload-feasibility.md`**
+  - [broad] view is held as monomorphic Arc<FView>, not Arc<dyn Fn(Model)->Html<Msg>> — _§B 'Current architecture', lines 61-62_ → Reword to: the runtime holds view as a monomorphic Arc<FView> with bound FView: Fn(Model)-
+- **`runtime-rust/docs/analysis/2026-06-22-universal-ffi-arc-feasibility.md`**
+  - [broad] dyn-trait fix mechanism misdescribed — wrong gate fn, and dyn Fn objects are NOT routed to the closure seam — _"Closed 2026-06-23" block, lines 119-126 (esp. 122_ → Rewrite the sentence to: the gate uses `is_dyn_trait_object_including_fn`, dropping ALL dy
+  - [broad] Selective post-hoc update — trait-objects marked Closed but closures/iterators/#22 recommendations left in pre-implementation state — _Recommended order, lines 128-144; Net verdict, lin_ → Add the same 'Closed' annotation (or a top-of-doc status banner) to the closures (#2), ite
+- **`runtime-rust/docs/audits/2026-06-19-security-whole.md`**
+  - [broad] Multiple flagged vulnerabilities are already remediated in current code but the doc carries no status markers (reads as open) — _time.rs section lines 20-26; http_client.rs sectio_ → Add a remediation-status column/marker to each finding (e.g. ✅ fixed in <commit> / ⏸️ open
+- **`runtime-rust/docs/go-rust-parity-audit-2026-06-21.md`**
+  - [broad] Federation ingest [P1] gap contradicts both the batch-1 status and the actual code (prod fails closed) — _Cross-cutting gap "Federation ingest endpoint is O_ → Reconcile the [P1] gap body with the batch-1 finding: restate the gap as "open in DEV only
+  - [broad] Hub tenant-prefix gap double-filed at conflicting severity (P1 vs P0), inflating the P0=9 and 99-domain counts — _"Hub read kernels lack tenant-prefix SQL enforceme_ → Merge into a single entry with one severity, cross-reference from the other subsystem inst
+- **`runtime-rust/docs/superpowers/plans/2026-06-18-readme-docs-overhaul.md`**
+  - [broad] Plan hardcodes a broken anchor into the FFI Reach link — _Task 6 Step 1, line 410 (propagated to README.md:3_ → Change the plan's anchor (line 410) and README.md:322 to `#reach-what-auto-ffi-cancant-cov
+- **`runtime-rust/docs/superpowers/plans/2026-06-19-keep-go-parity-v2.md`**
+  - [broad] scoped-sweep prescribed impl emits TWO 'RUST_EXAMPLES=' lines but its test asserts exactly 1 → plan's own Step 7 would FAIL — _Task 3 Step 6 impl (lines 528-531) vs Step 5 test _ → Update the plan's Step 6 dry-run echo to not repeat the `RUST_EXAMPLES=` token (e.g. match
+- **`runtime-rust/docs/superpowers/specs/2026-06-12-rust-multibackend-entry-model.md`**
+  - [broad] Tenet 3 formula `mainIsTask = usesBackendApp || not usesTaskRun` is stale; the `not usesTaskRun` disjunct was found UNSOUND and removed — _Tenet 3 lines 55-61; Components-touched line 113_ → Update Tenet 3 and the Emitter.hs component bullet to `mainIsTask = usesBackendApp || main
+- **`runtime-rust/docs/superpowers/specs/2026-06-15-skyshop-rs-codegen-gaps.md`**
+  - [broad] G1 marked OPEN but it shipped (commit b8a2e574 + regression fixture 59) — _G1, lines 12-35 (header `## G1 … — OPEN`)_ → Flip G1's header to `FIXED`, note commit b8a2e574 and the regression fixture runtime-rust/
+  - [broad] G2 marked OPEN but dict_union exists with the exact proposed semantics + test — _G2, lines 37-46 (header `## G2 … — OPEN`)_ → Flip G2's header to `FIXED`, point to dict.rs:90 + the test at dict.rs:197, and correct th
+- **`runtime-rust/docs/superpowers/specs/2026-06-15-skyshop-rs-port-plan-B.md`**
+  - [broad] Cited FFI-inspector symbol `inspectGitCrate` does not exist (actual: `runRustInspectorGit`) — _Crate layout & sky.toml referencing section, line _ → Rename the citation to `Sky.Build.Rust.Ffi.runRustInspectorGit` (and note the inspector bi
+- **`runtime-rust/docs/superpowers/specs/2026-06-15-skyshop-rs-port-questions.md`**
+  - [broad] CLI flag `--target rust` is stale and now collides with the real `--target` triple flag — _throughout — lines 5, 49, 87, 89, 106, 246, 469, 4_ → Replace all `--target rust` with `--backend rust` (or note the doc reflects the pre-rename
+- **`runtime-rust/docs/superpowers/specs/2026-06-16-dbdec-subsystem.md`**
+  - [broad] STATUS update wrongly claims DbDec.money stays UNROUTED — it is now routed via codegen wrapper — _STATUS update block, lines 107-112 (also money row_ → Update the STATUS block to state all 7 formerly-remaining kernels (incl. DbDec.money) are 
+  - [broad] Design table describes Decoder as a Box<dyn Fn> type alias; shipped Decoder is a struct {run, fields} — _Validated-design table, line 28 (claims json.rs:7)_ → Mark the line-28 type-alias design as superseded, or update it to the shipped struct `{ ru
+- **`runtime-rust/docs/superpowers/specs/2026-06-22-rust-ffi-typed-surface-parity.md`**
+  - [broad] Stated line counts for inspector and Ffi.hs are far off — _Verified current state, lines 17 and 23_ → Drop the embedded line counts (they bit-rot) or refresh them; better to reference symbols,
+  - [broad] Slices and per-slice designs are framed as future/under-review although shipped — _Slices lines 41-52; S1 'the slice under guardian r_ → Convert the slice descriptions to a post-implementation record (what landed, where) or ann
+- **`runtime-rust/docs/superpowers/specs/2026-06-23-rust-ffi-async-fn-design.md`**
+  - [broad] Send-gate justification is factually wrong: the Sky-coercible set is NOT all Send — _Guardian constraint checklist item 2, line 27 ("(t_ → Correct the parenthetical to state that the coercibility predicate is NOT sufficient for S
+- **`runtime-rust/docs/superpowers/specs/2026-06-25-rust-ffi-firestore-crud-walls-design.md`**
+  - [broad] Status header says WALL 2 only 'guardian-reviewed', but the constrained Approach-B is already shipped in code — _Status header, line 9 (and 'WALL 2 only becomes vi_ → Update the status line to record WALL 2 as SHIPPED (constrained Approach-B via the per-par
+  - [broad] §3, §5-P2 and the Summary table prescribe the BLOCKED classify_param_bound→Ok(None) approach that neither the ruling nor the shipped code uses — _§3 lines 424-465 + 680-710 (§5-P2 Sub-step A) + Su_ → Strike or annotate §3, §5-P2 Sub-step A, and the Summary-table WALL 2 row to point to the 
+- **`runtime-rust/docs/superpowers/specs/2026-06-25-rust-ffi-opaque-handle-and-concrete-impl-master.md`**
+  - [broad] Self-contradictory fixture sketch: `send` is both the positive proof AND dropped-ambiguous — _The fixture (the target), lines 22, 26-27, 30-32_ → Update the sketch so the positive `send` is bound by a single-impl trait (e.g. `Wire`) and
+  - [broad] Stale residual: cross-crate concrete-impl index is listed as unimplemented but has since shipped — _Step 2 lines 55-56; Stripe residual (a) lines 86-8_ → Mark residual (a) and the line 55-56 follow-on as closed (WALL-G #84 / WALL-K #92, fixture
+- **`runtime-rust/docs/superpowers/specs/2026-06-25-rust-ffi-trait-bounded-generic-param-design.md`**
+  - [broad] Status "DESIGN ONLY — no impl" is stale; the mechanism shipped — _Status block, lines 11-12 (also abstract lines 8-9_ → Mark the spec superseded/implemented: replace the Status block with a pointer to the shipp
+  - [broad] Design scope diverged from what shipped: cross-dependency-crate resolution was a declared v1 non-goal but is exactly what WALL-K implemented — _Part A line 33 ("Scan the crate's rustdoc"), Q1 li_ → Update Part A + Non-goals to reflect the cross-crate GLOBAL_XC_IMPLS resolution (WALL-K), 
+- **`runtime-rust/docs/superpowers/specs/2026-06-25-rust-ffi-wall3a-serde-trait-method-design.md`**
+  - [broad] Every source line-number cross-reference is stale (drifted by hundreds of lines) — _Problem/Design/Constraints — lines 9-14, 17-25, 30_ → Either re-anchor each cite by symbol name + current line (cheap: grep the symbol), or repl
+- **`runtime-rust/docs/superpowers/specs/2026-06-26-rust-ffi-wall4-async-trait-desugar-design.md`**
+  - [broad] Every numeric line reference into main.rs is stale (off by ~1000-2000 lines) — _throughout: §1 facts 1/4 (lines 81-100), §2 (114-1_ → Either drop the brittle absolute line numbers in favour of function/symbol names (the doc 
+- **`runtime-rust/docs/superpowers/specs/2026-06-26-rust-ffi-wall5-firestore-ground-ctor-design.md`**
+  - [broad] Spec frames an already-implemented + shipped fix as unimplemented design — _§0 (l.30-48), §3.1 (l.187-218), §3.3 row l.247, §4_ → Add a status header at the top (e.g. 'IMPLEMENTED in da939c23 — design retained for archae
+- **`runtime-rust/docs/superpowers/specs/2026-06-26-wall-f-firebase-crud-design.md`**
+  - [broad] Both main.rs line refs in §"Why each CRUD method DROPS" are wrong (point at unrelated code) — _§"Why each CRUD method currently DROPS", lines 44-_ → Update the two refs to main.rs:1554 (trait_self_concrete) and main.rs:1711 (the non-concre
+- **`runtime-rust/docs/syncing-upstream.md`**
+  - [broad] Broken cross-ref to the thin-seam plan (wrong path prefix) — _Per-release sync verify block, lines 29-30_ → Update the reference to the real location `runtime-rust/superpowers/plans/2026-05-26-upstr
+- **`runtime-rust/plugins/sky-rust-backend/skills/examples-sweep/SKILL.md`**
+  - [broad] Verdict rule omits the cargo-warning gate — "PASS iff no RED row" is wrong — _Verdict section, line 45 ("VERDICT PASS iff no RED_ → Amend the Verdict to: PASS iff no RED row AND no cargo warning past `#![allow]` (the latte
+- **`runtime-rust/plugins/sky-rust-backend/skills/ffi-audit/SKILL.md`**
+  - [broad] Reporting target `docs/runtime-rust/` violates the never-repo-root-docs rule and does not exist — _Interpreting / reporting section, line 89_ → Change the path to `runtime-rust/docs/` (the actual Rust docs root; dated history is conve
+- **`runtime-rust/plugins/sky-rust-backend/skills/informative-naming/SKILL.md`**
+  - [broad] Invents a non-existent "consistency" principle; omits the real "completeness" — _lines 12 and 67 (intro paragraph + "When readabili_ → Replace "consistency" with "completeness" in both places and align the order to security/c
+  - [broad] Procedure mandates Gortex tools that are forbidden / OOM on this repo — _Procedure step 1 (lines 54-58), step 3 (lines 59-6_ → Re-express the procedure in terms of skydex (locate/covers/deps) + rg for candidate discov
+- **`runtime-rust/plugins/sky-rust-backend/skills/keep-go-parity/SKILL.md`**
+  - [broad] Frontmatter description is stale vs the body's v2 chain — _YAML description, line 3 (vs Workflow table lines _ → Rewrite the frontmatter description to summarize the actual 9-phase v2 chain (sync → re-in
+  - [broad] Promised RED-example 'swarm-fix step' has no corresponding phase in the v2 chain — _line 3 (frontmatter), line 18 'the swarm-fix step _ → Add an explicit RED-example swarm-fix phase to the v2 chain table (after phase 5, using sk
+- **`runtime-rust/plugins/sky-rust-backend/skills/prune-archaeology/SKILL.md`**
+  - [broad] 'Entire file, every pass / no section exempt' contradicts the maintainer-owned README boundary — _"Whole-file scope" section, lines 47-65 (esp. 49-5_ → Reword the whole-file-scope section to bound the sweep to the regenerated region (## Getti
+  - [broad] No carve-out for machine-owned AUTOGEN fenced regions — _"Whole-file scope" lines 47-65 and Procedure step _ → Add an explicit exclusion: AUTOGEN:<id> BEGIN..END fenced regions are read-only and must b
+- **`runtime-rust/plugins/sky-rust-backend/skills/push/SKILL.md`**
+  - [broad] Doc claims arthurmaciel/sky is the 'only acceptable target' but the guard is a denylist, not an allowlist — _intro line 8-9; Safety section line 47_ → Reword line 47 to reflect the denylist semantics, e.g. 'The script refuses upstream by nam
+- **`runtime-rust/plugins/sky-rust-backend/skills/quality-audit/SKILL.md`**
+  - [broad] Recommends Gortex for the material-finding sweep, contradicting the repo's skydex-only directive and the documented Gortex-OOM hazard — _step 3 'Assemble the MATERIAL problem list', lines_ → Replace the Gortex tool references with the repo-sanctioned equivalents (skydex queries + 
+- **`runtime-rust/plugins/sky-rust-backend/skills/sync-with-upstream/SKILL.md`**
+  - [broad] Step 6 install command contradicts the settled no-copy-install build rule — _Step 6, lines 116-119_ → Replace the copy-install with `cabal build exe:sky` (and, one-time, `ln -sf "$(cabal list-
+- **`runtime-rust/plugins/sky-rust-backend/skills/update-docs/SKILL.md`**
+  - [broad] Mandated exclusive top-level section list contradicts the actual README — _Step 2 mandated section list, lines 139-160_ → Re-derive the mandated section list from the current README: top-level = Contents, Introdu
+  - [broad] Stale `## Contract` section reference — no such section exists — _Step 2 HARD BOUNDARY (lines 50-55) and section-lis_ → Replace the `## Contract` references with the actual maintainer-owned sections (## Content
+- **`runtime-rust/scripts/alloc-stress.sh`**
+  - [broad] Predictable /tmp filenames + symlink-following cp/redirect (CWE-377/CWE-59) — _top-level BIN_A..BIN_D defs (lines 86-89), build_v_ → Allocate a per-run private dir: `WORK=$(mktemp -d /tmp/alloc-stress.XXXXXX)` (0700) and pl
+  - [broad] SERVER_PIDS populated inside process-substitution subshell never reaches parent; cleanup relies solely on over-broad `pkill -f sky-app` — _run_variant SERVER_PIDS+= (line 132) reached via `_ → Either reap inside run_variant only (it already TERM/KILLs $srv at line 176, so the parent
+- **`runtime-rust/scripts/lib/equiv_normalize_html.py`**
+  - [broad] SVG_COORD 'viewBox' mask is dead — HTMLParser lowercases attr names to 'viewbox' — __emit line 91-92; module const SVG_COORD line 44_ → Store SVG_COORD entries lowercased ('viewbox') — or compare with k.lower(). Since the pars
+- **`runtime-rust/scripts/push.sh`**
+  - [broad] Upstream guard inspects the FETCH url, not the push url — pushurl/multi-url bypass — _GUARD 2/3 + push, lines 45, 53, 94, 97_ → Resolve and check the ACTUAL push target(s): `mapfile -t PUSH_URLS < <(git remote get-url 
+- **`runtime-rust/scripts/rust-equiv.sh`**
+  - [broad] Build-output discovery assumes per-project target dir; breaks (and clobbers) under the mandated exported CARGO_TARGET_DIR — _top-level body, lines 49-51 + 80-82 (cargo build /_ → Isolate per-invocation: prepend the cargo builds with an explicit per-project dir, e.g. `C
+- **`runtime-rust/scripts/rust-perf.sh`**
+  - [broad] Publisher curl loop has no timeout -> wait can hang the harness indefinitely — _probe_broadcast, lines 379-383_ → Add `--max-time 2` (or wrap the whole publisher subshell in `timeout "$SSE_WINDOW_S"`) so 
+- **`runtime-rust/scripts/rust-risk-precheck.py`**
+  - [broad] Test-exemption gate matches on RAW content → `#[test]` in a comment/string disarms the whole guard — _main, line 192 (re.search over `content`)_ → Run the test-attribute detection on the stripped code, not the raw content: move the strip
+- **`runtime-rust/scripts/static-bench.sh`**
+  - [broad] coldstart_ms runs every non-cli binary 5× under timeout 10 then discards the result — _main loop, lines 91-92 and 101-102 (call to coldst_ → Gate the measurement before the expensive call, e.g. `cold_d=""; [ "$shape" = cli ] && col
+- **`runtime-rust/scripts/static-perf.sh`**
+  - [broad] Windows dynamic + go binary sizes silently empty (missing .exe extension) — _main loop, lines 269-271 (dyn) and 307-310 (go)_ → Mirror the static path's fallback for both: e.g. `DYN_BIN="$CARGO_TARGET_DIR/release/sky-a
+- **`runtime-rust/scripts/verify-rust-target.sh`**
+  - [broad] Default relative SKY_BIN breaks inside the per-example `cd` subshell — _step 4 example loop, lines 7 + 30-39 (esp. line 33_ → Canonicalise SKY_BIN to an absolute path once, right after the top-level cd, before it is 
+- **`runtime-rust/src/sky_runtime/auth.rs`**
+  - [lens:DoS+resource] Caller-controlled bcrypt cost clamped to 31 allows astronomically expensive single call (CPU exhaustion) — _auth.rs:42-54 (auth_hash_password_cost, `let clamp_ → Clamp the upper bound to a sane operational ceiling (e.g. `cost.clamp(4, 15)`), or split: 
+  - [lens:DoS+resource] Synchronous bcrypt hash/verify run inside async tasks without spawn_blocking — tokio worker-pool starvation — _auth.rs:212-218 (auth_register execute), auth.rs:2_ → Offload the synchronous KDF work onto the blocking pool: wrap each `bcrypt::hash`/`bcrypt:
+- **`runtime-rust/src/sky_runtime/crypto.rs`**
+  - [lens:memory-safety+UB] RSA sign() panics on small key (Sky-reachable abort in a Result-returning crypto fn) — _crypto.rs:152 (crypto_rsa_sha256_sign)_ → Replace `let signature = signing_key.sign(msg.as_bytes());` with the fallible form: `let s
+- **`runtime-rust/src/sky_runtime/csv.rs`**
+  - [broad] encode silently drops ragged rows (writer not flexible, write errors swallowed) — _encode_delim, lines 60-68_ → Add `.flexible(true)` to the WriterBuilder in encode_delim so ragged rows are emitted verb
+  - [lens:DoS+resource] csv_parse_stream_from_file materializes every row into memory despite "stream" name — unbounded allocation, no size/row cap — _csv.rs:104-125 (csv_parse_stream_from_file)_ → Enforce a configurable upper bound before returning: cap total rows and/or accumulated byt
+- **`runtime-rust/src/sky_runtime/db.rs`**
+  - [broad] Raw BEGIN/COMMIT on a pinned PoolConnection leaks an open transaction on future-cancellation — _db_with_transaction lines 1280-1333 (BEGIN at 1301_ → Use sqlx's `pool.begin()` -> `Transaction` (which issues ROLLBACK on Drop), or wrap the he
+  - [lens:DoS+resource] Unbounded process-global pool_cache — distinct URLs accumulate live connection pools forever (no eviction, no size cap) — _runtime-rust/src/sky_runtime/db.rs:447-517 (pool_c_ → Bound the registry: cap entries (e.g. an LRU keyed by URL with a SKY_DB_MAX_POOLS limit, d
+- **`runtime-rust/src/sky_runtime/email.rs`**
+  - [broad] Attachments silently dropped by SES and SendGrid providers — _send_sendgrid (L223-266), send_ses (L301-324)_ → For SendGrid, append an `attachments` array (objects with `content` base64, `filename`, `t
+  - [lens:DoS+resource] Unbounded HTTP response body read — no size cap on provider response — _email.rs:148 (email_post_json: `let body = resp.te_ → Cap the response body before buffering: stream with `resp.bytes_stream()` and abort once a
+- **`runtime-rust/src/sky_runtime/file.rs`**
+  - [broad] Temp file/dir created with default umask-dependent (world-readable) permissions, unlike Go's 0600/0700 — _make_temp_path lines 233 (create_dir) and 239-243 _ → Set restrictive modes at creation. On Unix use std::os::unix::fs::OpenOptionsExt::mode(0o6
+  - [lens:DoS+resource] Blocking std::fs calls inside async tasks with no timeout — FIFO/slow-mount path blocks a tokio worker thread indefinitely — _runtime-rust/src/sky_runtime/file.rs:4-137 (file_r_ → Run blocking filesystem syscalls via tokio::task::spawn_blocking (or tokio::fs) so they do
+- **`runtime-rust/src/sky_runtime/html.rs`**
+  - [broad] is_url_attr omits `data` — <object data="data:text/html,..."> renders unsanitised (XSS) — _is_url_attr (L426-440); sink in render_into_ctx vi_ → Add "data" to is_url_attr's match (it is navigational/document context, so is_dangerous_ur
+  - [lens:injection] is_safe_html_name accepts inline event-handler attribute names (on*) → DOM-XSS via attacker-controlled attribute name — _is_safe_html_name (html.rs:416-421); used as the a_ → Reject attribute keys whose lowercased form starts with `on` (event handlers) in is_safe_h
+- **`runtime-rust/src/sky_runtime/http_client.rs`**
+  - [lens:authz] SSRF deny-private guard bypassable on redirect hops via DNS rebinding (no per-hop DNS pin) — _http_client.rs:197-214 (redirect Policy::custom in_ → Close the per-hop TOCTOU instead of relying on the URL-level recheck: set redirect policy 
+- **`runtime-rust/src/sky_runtime/http_stream.rs`**
+  - [lens:DoS+resource] CLIENT_STREAMS_MAX cap does not bound active drains; detached sub-drain tasks are uncancellable and uncounted — _http_stream.rs:56-67, 217-257, 189-195_ → Track active drains under the same cap (or a separate bounded counter) and store their Joi
+- **`runtime-rust/src/sky_runtime/jwt.rs`**
+  - [broad] Decode rejects any token carrying an `aud` claim (InvalidAudience), breaking the documented audience feature + Go parity — _jwt_decode_hs256 (lines 37-39) and jwt_decode_rs25_ → These are generic decoders that take no expected-audience argument, so audience membership
+- **`runtime-rust/src/sky_runtime/list.rs`**
+  - [broad] cmp_total is non-transitive on NaN; list_sort/list_sort_by can panic on multi-NaN lists, and the 'NaN unconstructible' comment is false — _cmp_total lines 105-107; list_sort 111-115; list_s_ → Give NaN a deterministic, transitive position (for floats use `f64::total_cmp` semantics: 
+  - [lens:memory-safety+UB] list_sort_with: arbitrary Sky comparator (non-total order) can panic Rust's slice::sort_by — _runtime-rust/src/sky_runtime/list.rs:140-147 (list_ → Do not hand an untrusted comparator to `slice::sort_by`. Replace the body with a hand-roll
+- **`runtime-rust/src/sky_runtime/live/console.rs`**
+  - [broad] console auth gate matches SKY_CONSOLE_AUTH raw/case-sensitively; `OFF`/`Off`/` off ` fails to disable the console — _gate_blocked, lines 146-153_ → Normalize identically to console_auth_mode_label before matching: `let console_auth = std:
+  - [lens:authz] gate_blocked matches SKY_CONSOLE_AUTH case-sensitively and does NOT fail-closed on unknown values, diverging from console_auth_mode_label's normalize+unknown→off contract — _runtime-rust/src/sky_runtime/live/console.rs:145-1_ → Share ONE resolver between the gate and the label. Normalize console_auth the same way as 
+- **`runtime-rust/src/sky_runtime/live/console_proxy.rs`**
+  - [lens:authz] Console child has no independent auth and is reachable on a loopback TCP port — parent admin-token gate is bypassable by any local process — _runtime-rust/src/sky_runtime/live/console_proxy.rs_ → Do not rely solely on the parent gate to protect the child. Either (a) bind the child to a
+  - [lens:DoS + resource exhaustion] Reverse-proxy reqwest client has no connect/request timeout — wedged child causes unbounded in-flight request accumulation — _console_proxy.rs:443-447 (ProxyState init: reqwest_ → Build the client with a bounded connect timeout (and a header/read timeout on reqwest 0.12
+- **`runtime-rust/src/sky_runtime/live/hub.rs`**
+  - [lens:DoS + resource exhaustion] hub_list_services UNION query has NO LIMIT → unbounded result allocation + full triple-table distinct scan — _hub.rs:750-763 (hub_list_services)_ → Add a bounded `... ORDER BY service_name LIMIT <cap>` (e.g. 200, mirroring the hub_read_se
+  - [lens:DoS + resource exhaustion] hub_read_service_stats per-request fan-out amplification (≈200 services × 2 × 10000 rows parsed + sorted) — _hub.rs:657-693 (hub_read_service_stats) + 556-654 _ → Lower STATS_ROW_CAP and/or the service cap; or push the window filter (`time >= since`) an
+- **`runtime-rust/src/sky_runtime/live/hub_exporter.rs`**
+  - [broad] Cleartext-token guard bypassable via unanchored localhost/127.0.0.1 prefix match — _enable_from_env, lines 77-80 (scheme_ok)_ → Parse with `url::Url` (or `reqwest::Url`) and check `url.scheme()=="https"` OR (`scheme=="
+  - [lens:DoS+resource] HTTP push has no timeout — a hung hub wedges the exporter task forever — _runtime-rust/src/sky_runtime/live/hub_exporter.rs:_ → Build the client with explicit caps: `reqwest::Client::builder().timeout(Duration::from_se
+  - [lens:DoS+resource] In-memory batch accumulation buffer (logs/spans) is unbounded between flushes — _runtime-rust/src/sky_runtime/live/hub_exporter.rs:_ → Add a max-entry (and/or max-byte) threshold checked after each push; when `logs.len()`/`sp
+  - [lens:DoS+resource] Retry spool is bounded by batch count (256) but not by bytes; per-batch JSON size is unbounded — _runtime-rust/src/sky_runtime/live/hub_exporter.rs:_ → Track a running byte total of spooled batches and evict oldest until under a `SKY_CONSOLE_
+  - [lens:authz] Loopback allowance is a string prefix → bearer-token leak over cleartext HTTP to attacker host — _runtime-rust/src/sky_runtime/live/hub_exporter.rs:_ → Parse the URL properly instead of prefix-matching the raw string. Use a real URL parser (r
+- **`runtime-rust/src/sky_runtime/live/mod.rs`**
+  - [lens:authz] Session cookie (sky_sid) omits the __Host- prefix the CSRF cookie uses — sibling-subdomain cookie-tossing → session fixation — _runtime-rust/src/sky_runtime/live/mod.rs:646-656 (_ → For a root-mounted app (base empty, cookie_path '/') in cookies_secure() mode, name the se
+- **`runtime-rust/src/sky_runtime/live/push_exporter.rs`**
+  - [lens:DoS+resource] Unbounded accumulator buffer `buf` — bounded channel gives no real backpressure — _runtime-rust/src/sky_runtime/live/push_exporter.rs_ → Cap the accumulator: add a `const MAX_BATCH: usize` (e.g. 8192) and in the push arm `if bu
+  - [lens:DoS+resource] No timeout on the ingest HTTP POST — a stalled parent wedges the exporter task and graceful shutdown — _runtime-rust/src/sky_runtime/live/push_exporter.rs_ → Build the client with explicit caps and a total fallback (no unwrap): `let client = reqwes
+- **`runtime-rust/src/sky_runtime/live/store.rs`**
+  - [lens:DoS + resource exhaustion] No hard cap on session-map size in any store — cookie-less request flood OOMs within the TTL window — _runtime-rust/src/sky_runtime/live/store.rs:49-88 (_ → Add a configurable max-entries cap (e.g. SKY_LIVE_MAX_SESSIONS) to each in-RAM SessionMap 
+  - [lens:authz] Session revocation/logout does not propagate cluster-wide: get() returns a cached Live handle without revalidating the shared store — _runtime-rust/src/sky_runtime/live/store.rs:140-151_ → On a mem_cache hit for the persistent/redis backends, confirm the session still exists in 
+- **`runtime-rust/src/sky_runtime/money.rs`**
+  - [broad] money_allocate drops residue for negative amounts → shares do not sum to input — _money_allocate, line 252 (`let rem_int = remainder_ → Drop the `.max(0)` and distribute the residue toward zero by sign: `let rem_int = remainde
+  - [lens:DoS+resource] Unbounded global FX-rate registry — no entry cap, no eviction, no key-length cap — _money.rs:142-165 (rates() / money_set_rate)_ → In money_set_rate: (1) reject codes longer than a small constant (e.g. > 16 bytes) after t
+- **`runtime-rust/src/sky_runtime/server.rs`**
+  - [broad] Token-bucket rate-limit map never evicts when refill_per_sec==0 (unbounded memory) + O(N) full-map scan per call — _rate_limit_allow (lines 915-931); fixed_window_all_ → Make the eviction predicate idle-time-based and refill-independent: keep an entry only whi
+  - [lens:DoS+resource] No read/write/idle/request timeouts on the HTTP server → slowloris and slow-handler connection exhaustion — _server.rs:469-518 (server_listen / axum::serve)_ → Add `tower_http::timeout::TimeoutLayer::new(Duration::from_secs(N))` (env-overridable) to 
+- **`runtime-rust/src/sky_runtime/ssrf.rs`**
+  - [lens:authz] Redirect-hop DNS rebinding: check_host_not_private validates then discards the vetted IP, leaving cross-host redirect connects unpinned (SSRF to cloud metadata → IAM credential theft) — _runtime-rust/src/sky_runtime/ssrf.rs:196-198 (chec_ → Eliminate the check-then-reconnect TOCTOU on redirect hops: instead of validating with a t
+  - [lens:DoS+resource] Untimed blocking DNS resolution on attacker-influenced host (no timeout; stalls async worker) — _resolve_first_non_private_addr_with_port, line 130_ → Bound the resolution. Move the to_socket_addrs() call off the async path via tokio::task::
+- **`runtime-rust/src/sky_runtime/time.rs`**
+  - [broad] time_add_months / time_add_years: unchecked i64 add overflows on extreme months (debug panic, release silent-wrap) — _time_add_months L148 (`let m = utc.month() as i64 _ → Use saturating arithmetic to match the siblings: `let m = (utc.month() as i64 - 1).saturat
+  - [lens:memory-safety+UB] Integer overflow in time_add_months on caller-controlled `months` (debug panic / release silent-wrong) — also via time_add_years — _time.rs:148 (and 155); reachable from time_add_yea_ → Make the month accumulation total: `let m = (utc.month() as i64 - 1).saturating_add(months
+  - [lens:memory-safety+UB] Integer overflow in time_days_in_month on caller-controlled `year` (debug panic / release silent-wrong) — _time.rs:231_ → Guard or saturate the year bump: `let (ny, nm) = if m == 12 { (y.saturating_add(1), 1) } e
+- **`runtime-rust/src/sky_runtime/tui/layout.rs`**
+  - [broad] Raw `*` on caller-controlled fill portion overflows (debug panic / release huge-alloc) in distribute_col_fill — _distribute_col_fill, line 1765_ → Mirror the sibling: `leftover.saturating_mul(portion(i)) / portion_total` (portion_total >
+  - [broad] Raw `*` on caller-controlled grid `fr` track overflows in render_grid_tracked — _render_grid_tracked, line 1536_ → Use `leftover.saturating_mul((*n).max(0) as usize) / fr_total` (fr_total >= n keeps the qu
+  - [lens:injection] Paragraph / textColumn text bypasses sanitize_rune → ANSI escape injection into the terminal — _render_node Element::Node paragraph/textColumn bra_ → Run every wrapped line through sanitize_rune before building the Run (e.g. wrap_text(&extr
+  - [lens:injection] Ui.html raw content bypasses sanitize_rune → ANSI escape injection — _render_node Element::Raw branch, lines 1108-1122 (_ → Sanitize the extracted text before wrapping (map sanitize_rune over html_text(h) chars), o
+  - [lens:injection] Input value buffer and placeholder render unsanitised → ANSI escape injection via Attr.value / placeholder — _render_input, lines 851-852 (value/placeholder see_ → Sanitize value/placeholder (and the buffer content) through sanitize_rune before emitting 
+  - [lens:DoS+resource] Unbounded recursion in render_node (children + nearby overlays) → stack overflow on deeply nested Element tree — _render_node (1096-1339): recursive child render at_ → Thread a depth counter through render_node (and extract_text/html_text) and stop descendin
+- **`runtime-rust/src/sky_runtime/ws_client.rs`**
+  - [lens:DoS+resource] connectWith cfg.timeout <= 0 disables the handshake timeout entirely → unbounded network wait + FD/task accumulation — _ws_client.rs:191-202 (gate) , ws_client.rs:297-299_ → Floor the handshake timeout instead of disabling it: derive `let to = if timeout_ms > 0 { 
+  - [lens:DoS+resource] 16 MiB max message size × 64-deep broadcast buffer → up to ~1 GiB retained per socket under a lagging subscriber — _ws_client.rs:138 (max_msg = 16 MiB) , ws_client.rs_ → Lower max_message_size/max_frame_size to the documented 1 MiB default (or a configurable c
+- **`src/Sky/Generate/Rust/Builder/ExprEmitter.hs`**
+  - [broad] Route build closure emits raw Vec indexing __p[i] (runtime panic on param/arity mismatch) — _exprToRustInner, Live.route arm, lines 1781-1783_ → Replace raw indexing with bounds-safe access, e.g. `__p.get(i).cloned().unwrap_or_default(
+  - [lens:DoS+resource] Live.route emits raw `__p[i]` Vec indexing — out-of-bounds panic on a route whose pattern captures fewer params than the Page constructor's arity — _ExprEmitter.hs:1772-1784 (Can.Call VarKernel "Live_ → Do not raw-index the runtime Vec. Emit `__p.get(i).cloned().unwrap_or_default()` (String d
+  - [lens:DoS+resource] Integer `//`, `/` and `%` lower to bare Rust operators with no zero-divisor guard — division-by-zero panic in Sky-reachable code — _ExprEmitter.hs:1409-1410 (Binop otherwise arm) + b_ → Route integer `/`, `//`, and `%` through checked runtime kernels (e.g. `sky_int_div(a, b)`
+- **`src/Sky/Generate/Rust/Builder/ModuleEmitter.hs`**
+  - [broad] Nullary Task-binding memoization freezes non-idempotent effects (Time/Random/token) to a constant — _maybeMemoiseNullary, lines 311-324_ → Narrow the predicate so memoization only fires for an explicit allowlist of idempotent ker
+  - [lens:memory-safety+UB] std_ui_on_submit body emits literal unreachable!() — panics on any value-use of Std.Ui.onSubmit that escapes the call-site peephole — _ModuleEmitter.hs:790-794 (tdWrapped: `| ecCurrentM_ → Do not emit `unreachable!()` as a live function body. Emit a genuine, panic-free implement
+- **`src/Sky/Generate/Rust/Builder/Pattern.hs`**
+  - [broad] Emitted `unreachable!()` for refutable function-arg patterns is a Sky-reachable panic — _patternToRustArg, lines 111-114_ → Replace the dead `unreachable!()` with a recoverable runtime error path that the Sky panic
+  - [broad] Tuple arg containing a non-trivial sub-pattern silently drops its bindings — _patternToRustArg line 107 (PTuple branch) + patter_ → In patternToRustArg, detect tuples whose elements are not all trivial (PVar/PAnything/nest
+- **`src/Sky/Generate/Rust/Project.hs`**
+  - [broad] rustfmt step uses locale-dependent readFile/writeFile outside try — crashes the build on non-ASCII generated Rust under a non-UTF-8 locale — _rustfmtFileInPlace, lines 362-373 (readFile line 3_ → Read and write via ByteString + TE (mirror readFileUtf8 / writeFileIfChanged): decode the 
+- **`tools/skydex/src/walk.rs`**
+  - [broad] `changed` mishandles renames: indexes the deleted old path, drops the new path — _fn changed, lines 59-76 (parse loop 68-74)_ → Pass `--no-renames` (or `-M0`) to `git diff --name-status` so renames decompose into a `D 
+
+### Per-file roster — Last audited 2026-06-27 (all 196 in-boundary files)
+
+| File | Verdict | Findings | Top sev |
+|---|:-:|--:|:-:|
+| `` | — | 0 | — |
+| `runtime-rust/docs/CODE-REVIEW.md` | findings | 4 | low |
+| `runtime-rust/docs/PRINCIPLES.md` | findings | 3 | medium |
+| `runtime-rust/docs/PROGRESS.md` | findings | 4 | low |
+| `runtime-rust/docs/TECHNICAL-DETAILS.md` | findings | 4 | low |
+| `runtime-rust/docs/analysis/2026-06-22-hot-reload-feasibility.md` | findings | 4 | medium |
+| `runtime-rust/docs/analysis/2026-06-22-universal-ffi-arc-feasibility.md` | findings | 4 | medium |
+| `runtime-rust/docs/audits/2026-06-19-full-findings.md` | findings | 2 | low |
+| `runtime-rust/docs/audits/2026-06-19-security-2nd-pass.md` | findings | 3 | high |
+| `runtime-rust/docs/audits/2026-06-19-security-whole.md` | findings | 4 | medium |
+| `runtime-rust/docs/courses/MISSION.md` | findings | 1 | low |
+| `runtime-rust/docs/courses/NOTES.md` | findings | 1 | info |
+| `runtime-rust/docs/go-rust-parity-audit-2026-06-21.md` | findings | 5 | medium |
+| `runtime-rust/docs/superpowers/plans/2026-06-18-readme-docs-overhaul.md` | findings | 4 | medium |
+| `runtime-rust/docs/superpowers/plans/2026-06-19-keep-go-parity-v2.md` | findings | 2 | medium |
+| `runtime-rust/docs/superpowers/plans/2026-06-22-rust-ffi-closures.md` | findings | 6 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-12-rust-multibackend-entry-model.md` | findings | 4 | medium |
+| `runtime-rust/docs/superpowers/specs/2026-06-15-skyshop-rs-codegen-gaps.md` | findings | 3 | medium |
+| `runtime-rust/docs/superpowers/specs/2026-06-15-skyshop-rs-port-SYNTHESIS.md` | findings | 3 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-15-skyshop-rs-port-plan-A.md` | findings | 2 | info |
+| `runtime-rust/docs/superpowers/specs/2026-06-15-skyshop-rs-port-plan-B.md` | findings | 4 | medium |
+| `runtime-rust/docs/superpowers/specs/2026-06-15-skyshop-rs-port-questions.md` | findings | 3 | medium |
+| `runtime-rust/docs/superpowers/specs/2026-06-16-dbdec-subsystem.md` | findings | 5 | medium |
+| `runtime-rust/docs/superpowers/specs/2026-06-18-readme-docs-overhaul-design.md` | findings | 2 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-19-keep-go-parity-v2-design.md` | findings | 3 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-20-console-auth-token-mode-design.md` | findings | 1 | info |
+| `runtime-rust/docs/superpowers/specs/2026-06-22-incremental-rust-codegen-plan.md` | findings | 4 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-22-rust-ffi-closures-design.md` | findings | 2 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-22-rust-ffi-generics-design.md` | findings | 4 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-22-rust-ffi-typed-surface-parity.md` | findings | 5 | high |
+| `runtime-rust/docs/superpowers/specs/2026-06-22-wall2-instance-codegen-design.md` | findings | 2 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-22-wall3-inspector-generic-stubs-design.md` | findings | 2 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-23-rust-ffi-async-fn-design.md` | findings | 3 | medium |
+| `runtime-rust/docs/superpowers/specs/2026-06-23-rust-ffi-iterators-design.md` | findings | 2 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-23-rust-ffi-serde-bound-design.md` | findings | 3 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-23-rust-ffi-trait-method-visibility-design.md` | findings | 2 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-23-rust-ffi-trait-methods-design.md` | findings | 2 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-25-rust-ffi-firestore-crud-walls-design.md` | findings | 5 | medium |
+| `runtime-rust/docs/superpowers/specs/2026-06-25-rust-ffi-opaque-handle-and-concrete-impl-master.md` | findings | 6 | medium |
+| `runtime-rust/docs/superpowers/specs/2026-06-25-rust-ffi-trait-bounded-generic-param-design.md` | findings | 3 | medium |
+| `runtime-rust/docs/superpowers/specs/2026-06-25-rust-ffi-wall3a-serde-trait-method-design.md` | findings | 2 | medium |
+| `runtime-rust/docs/superpowers/specs/2026-06-26-rust-ffi-wall4-async-trait-desugar-design.md` | findings | 4 | medium |
+| `runtime-rust/docs/superpowers/specs/2026-06-26-rust-ffi-wall5-firestore-ground-ctor-design.md` | findings | 3 | medium |
+| `runtime-rust/docs/superpowers/specs/2026-06-26-wall-f-firebase-crud-design.md` | findings | 2 | medium |
+| `runtime-rust/docs/superpowers/specs/2026-06-26-wall-g-cross-crate-unique-impl-mono.md` | findings | 4 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-26-wall-h-generic-self-serde-send.md` | findings | 3 | low |
+| `runtime-rust/docs/superpowers/specs/2026-06-26-wall-i-stripe-resource-builders.md` | findings | 2 | low |
+| `runtime-rust/docs/syncing-upstream.md` | findings | 4 | medium |
+| `runtime-rust/plugins/sky-rust-backend/skills/autonomous-swarm/SKILL.md` | findings | 1 | low |
+| `runtime-rust/plugins/sky-rust-backend/skills/examples-perf-sweep/SKILL.md` | findings | 2 | low |
+| `runtime-rust/plugins/sky-rust-backend/skills/examples-sweep/SKILL.md` | findings | 5 | medium |
+| `runtime-rust/plugins/sky-rust-backend/skills/ffi-audit/SKILL.md` | findings | 4 | medium |
+| `runtime-rust/plugins/sky-rust-backend/skills/implement-parity-gap/SKILL.md` | findings | 2 | low |
+| `runtime-rust/plugins/sky-rust-backend/skills/informative-naming/SKILL.md` | findings | 2 | medium |
+| `runtime-rust/plugins/sky-rust-backend/skills/keep-go-parity/SKILL.md` | findings | 4 | medium |
+| `runtime-rust/plugins/sky-rust-backend/skills/principles-audit/SKILL.md` | — | 0 | — |
+| `runtime-rust/plugins/sky-rust-backend/skills/prune-archaeology/SKILL.md` | findings | 3 | medium |
+| `runtime-rust/plugins/sky-rust-backend/skills/push/SKILL.md` | findings | 3 | medium |
+| `runtime-rust/plugins/sky-rust-backend/skills/quality-audit/SKILL.md` | findings | 3 | medium |
+| `runtime-rust/plugins/sky-rust-backend/skills/sync-with-upstream/SKILL.md` | findings | 4 | high |
+| `runtime-rust/plugins/sky-rust-backend/skills/update-docs/SKILL.md` | findings | 4 | medium |
+| `runtime-rust/scripts/alloc-stress.sh` | findings | 5 | medium |
+| `runtime-rust/scripts/equiv-corpus.sh` | findings | 2 | low |
+| `runtime-rust/scripts/equiv-render.sh` | findings | 3 | low |
+| `runtime-rust/scripts/examples-perf-sweep.sh` | findings | 2 | low |
+| `runtime-rust/scripts/examples-sweep.sh` | findings | 2 | low |
+| `runtime-rust/scripts/ffi-fixtures-test.sh` | findings | 2 | low |
+| `runtime-rust/scripts/ffi_audit.py` | findings | 2 | low |
+| `runtime-rust/scripts/keep-go-parity.sh` | findings | 3 | low |
+| `runtime-rust/scripts/lib/checks.sh` | findings | 4 | low |
+| `runtime-rust/scripts/lib/env.sh` | findings | 1 | low |
+| `runtime-rust/scripts/lib/equiv_normalize_html.py` | findings | 7 | medium |
+| `runtime-rust/scripts/lib/equiv_tui_grid.py` | findings | 3 | low |
+| `runtime-rust/scripts/lib/examples.sh` | findings | 2 | low |
+| `runtime-rust/scripts/lib/examples_test.sh` | findings | 1 | info |
+| `runtime-rust/scripts/lib/keep_go_parity_test.sh` | findings | 1 | low |
+| `runtime-rust/scripts/push.sh` | findings | 2 | medium |
+| `runtime-rust/scripts/quality-audit.sh` | findings | 3 | low |
+| `runtime-rust/scripts/readme-tables.py` | findings | 1 | low |
+| `runtime-rust/scripts/rust-equiv.sh` | findings | 3 | medium |
+| `runtime-rust/scripts/rust-perf.sh` | findings | 5 | medium |
+| `runtime-rust/scripts/rust-risk-precheck.py` | findings | 4 | medium |
+| `runtime-rust/scripts/static-bench.sh` | findings | 2 | medium |
+| `runtime-rust/scripts/static-perf.sh` | findings | 3 | medium |
+| `runtime-rust/scripts/verify-rust-target.sh` | findings | 3 | medium |
+| `runtime-rust/src/lib.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/auth.rs` | findings | 8 | medium |
+| `runtime-rust/src/sky_runtime/basics.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/cache.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/char_kernel.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/compression.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/config.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/config_decode.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/core.rs` | findings | 3 | low |
+| `runtime-rust/src/sky_runtime/crypto.rs` | findings | 4 | medium |
+| `runtime-rust/src/sky_runtime/csv.rs` | findings | 4 | medium |
+| `runtime-rust/src/sky_runtime/db.rs` | findings | 7 | medium |
+| `runtime-rust/src/sky_runtime/decimal.rs` | findings | 3 | low |
+| `runtime-rust/src/sky_runtime/dict.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/email.rs` | findings | 5 | medium |
+| `runtime-rust/src/sky_runtime/encoding.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/ffi_polyfills.rs` | findings | 1 | info |
+| `runtime-rust/src/sky_runtime/file.rs` | findings | 5 | high |
+| `runtime-rust/src/sky_runtime/html.rs` | findings | 8 | high |
+| `runtime-rust/src/sky_runtime/http_client.rs` | findings | 7 | medium |
+| `runtime-rust/src/sky_runtime/http_stream.rs` | findings | 5 | medium |
+| `runtime-rust/src/sky_runtime/io.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/json.rs` | findings | 2 | low |
+| `runtime-rust/src/sky_runtime/jwt.rs` | findings | 2 | medium |
+| `runtime-rust/src/sky_runtime/list.rs` | findings | 5 | high |
+| `runtime-rust/src/sky_runtime/live/console.rs` | findings | 5 | medium |
+| `runtime-rust/src/sky_runtime/live/console_proxy.rs` | findings | 6 | medium |
+| `runtime-rust/src/sky_runtime/live/csrf.rs` | findings | 3 | low |
+| `runtime-rust/src/sky_runtime/live/diff.rs` | findings | 1 | info |
+| `runtime-rust/src/sky_runtime/live/dispatch.rs` | findings | 2 | low |
+| `runtime-rust/src/sky_runtime/live/form.rs` | findings | 2 | low |
+| `runtime-rust/src/sky_runtime/live/hub.rs` | findings | 8 | medium |
+| `runtime-rust/src/sky_runtime/live/hub_exporter.rs` | findings | 7 | medium |
+| `runtime-rust/src/sky_runtime/live/mod.rs` | findings | 6 | high |
+| `runtime-rust/src/sky_runtime/live/observability.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/live/pubsub.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/live/push_exporter.rs` | findings | 3 | medium |
+| `runtime-rust/src/sky_runtime/live/req.rs` | findings | 2 | low |
+| `runtime-rust/src/sky_runtime/live/route.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/live/sse.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/live/store.rs` | findings | 6 | medium |
+| `runtime-rust/src/sky_runtime/live/style_inject.rs` | findings | 6 | high |
+| `runtime-rust/src/sky_runtime/log.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/math.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/mod.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/money.rs` | findings | 4 | medium |
+| `runtime-rust/src/sky_runtime/path.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/random.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/regex_kernel.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/server.rs` | findings | 17 | high |
+| `runtime-rust/src/sky_runtime/server_stream.rs` | findings | 2 | low |
+| `runtime-rust/src/sky_runtime/set.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/ssrf.rs` | findings | 6 | medium |
+| `runtime-rust/src/sky_runtime/string.rs` | findings | 1 | info |
+| `runtime-rust/src/sky_runtime/stringify.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/system.rs` | findings | 6 | high |
+| `runtime-rust/src/sky_runtime/task.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/tea.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/telemetry.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/telemetry_spill.rs` | findings | 6 | low |
+| `runtime-rust/src/sky_runtime/time.rs` | findings | 4 | medium |
+| `runtime-rust/src/sky_runtime/trace.rs` | findings | 1 | info |
+| `runtime-rust/src/sky_runtime/tui/app.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/tui/cell.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/tui/diff.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/tui/focus.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/tui/key.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/tui/layout.rs` | findings | 11 | high |
+| `runtime-rust/src/sky_runtime/tui/mod.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/ui/element.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/ui/mod.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/uuid_kernel.rs` | — | 0 | — |
+| `runtime-rust/src/sky_runtime/webview.rs` | findings | 1 | low |
+| `runtime-rust/src/sky_runtime/ws_client.rs` | findings | 8 | medium |
+| `src/Sky/Build/Rust/Console.hs` | findings | 1 | low |
+| `src/Sky/Build/Rust/Ffi.hs` | findings | 1 | low |
+| `src/Sky/Build/Rust/FfiCall.hs` | findings | 2 | low |
+| `src/Sky/Build/Rust/FfiInstance.hs` | findings | 1 | info |
+| `src/Sky/Generate/Rust/Builder.hs` | — | 0 | — |
+| `src/Sky/Generate/Rust/Builder/CrateSpecs.hs` | — | 0 | — |
+| `src/Sky/Generate/Rust/Builder/Emitter.hs` | findings | 6 | low |
+| `src/Sky/Generate/Rust/Builder/ExprEmitter.hs` | findings | 7 | medium |
+| `src/Sky/Generate/Rust/Builder/Kernel.hs` | — | 0 | — |
+| `src/Sky/Generate/Rust/Builder/ModuleEmitter.hs` | findings | 5 | medium |
+| `src/Sky/Generate/Rust/Builder/Naming.hs` | findings | 1 | low |
+| `src/Sky/Generate/Rust/Builder/Pattern.hs` | findings | 4 | high |
+| `src/Sky/Generate/Rust/Builder/SigRegistry.hs` | — | 0 | — |
+| `src/Sky/Generate/Rust/Builder/TypeEmitter.hs` | findings | 1 | low |
+| `src/Sky/Generate/Rust/Builder/TypeRenderer.hs` | findings | 2 | low |
+| `src/Sky/Generate/Rust/Builder/Types.hs` | — | 0 | — |
+| `src/Sky/Generate/Rust/Builder/Walker.hs` | — | 0 | — |
+| `src/Sky/Generate/Rust/Project.hs` | findings | 4 | medium |
+| `tools/sky-ffi-inspect-rs/src/main.rs` | — | 0 | — |
+| `tools/sky-ffi-inspect-rs/target/debug/build/serde-0c79bc1bb5bf9eba/out/private.rs` | — | 0 | — |
+| `tools/sky-ffi-inspect-rs/target/debug/build/serde-77bdd74bab5807b0/out/private.rs` | — | 0 | — |
+| `tools/sky-ffi-inspect-rs/target/debug/build/serde_core-7b7cb0cfdf46fc20/out/private.rs` | — | 0 | — |
+| `tools/sky-ffi-inspect-rs/target/debug/build/serde_core-b09189df0b0454e9/out/private.rs` | — | 0 | — |
+| `tools/sky-ffi-inspect-rs/target/release/build/serde-267e49a898ff1aae/out/private.rs` | — | 0 | — |
+| `tools/sky-ffi-inspect-rs/target/release/build/serde-9d08b465ff0b51b1/out/private.rs` | — | 0 | — |
+| `tools/sky-ffi-inspect-rs/target/release/build/serde_core-7e370908b61b4f7c/out/private.rs` | — | 0 | — |
+| `tools/sky-ffi-inspect-rs/target/release/build/serde_core-9cc8eab84977feb7/out/private.rs` | — | 0 | — |
+| `tools/skydex/src/coverage.rs` | — | 0 | — |
+| `tools/skydex/src/extract/mod.rs` | — | 0 | — |
+| `tools/skydex/src/extract/sky.rs` | — | 0 | — |
+| `tools/skydex/src/extract/treesitter.rs` | — | 0 | — |
+| `tools/skydex/src/main.rs` | — | 0 | — |
+| `tools/skydex/src/model.rs` | — | 0 | — |
+| `tools/skydex/src/parity.rs` | findings | 1 | low |
+| `tools/skydex/src/query.rs` | findings | 2 | low |
+| `tools/skydex/src/store.rs` | — | 0 | — |
+| `tools/skydex/src/walk.rs` | findings | 4 | medium |
+
+### Disposition
+
+- **Read-only audit run** (user request) — no source edits, no fixes applied. Every finding is FILED here; fixing is a follow-up batch under the anti-race protocol + per-component build gate.
+- **Next-pass debt:** re-run the lost 5-vote + completeness-critic on the HIGH/MED set with a hard agent cap (cap votes to 3, cap candidates) so it terminates under the 1000-agent / session limits.
+- **Top fix priorities (by principle order):** (1) `style_inject.rs` strip-style-close XSS bypass; (2) `html.rs` `is_safe_html_name` event-handler/`srcdoc` XSS; (3) `Pattern.hs` `unreachable!()` on refutable arg patterns (no-panic thesis); (4) `list.rs` `list_sort_with` comparator panic; (5) quinn-proto bump; (6) DoS caps: `file.rs` read cap, `live/mod.rs` session admission + driver leak, `server.rs` WS unbounded mpsc, `tui/layout.rs` cell clamp; (7) `system.rs` env read/write race.
+
+---
 
 ### 2026-06-22 — delta audit (batches 17–28), guardian-supervised specialist pass
 
