@@ -74,9 +74,17 @@ pub async fn enable_from_env() {
     // Secrets-in-transit: refuse to push a bearer token over cleartext HTTP.
     // A misconfigured `http://` hub URL would leak the ≥32-byte token on the
     // wire. Allow a non-https scheme only when no token is set (anonymous push).
-    let scheme_ok = {
-        let lower = hub.trim_start().to_ascii_lowercase();
-        lower.starts_with("https://") || lower.starts_with("http://localhost") || lower.starts_with("http://127.0.0.1")
+    // PARSE the URL — a string prefix `http://localhost` ALSO matches
+    // `http://localhost.evil.com`, leaking the bearer token over cleartext to an
+    // attacker host. Accept https://, or http:// ONLY when the host is exactly a
+    // loopback name/address.
+    let scheme_ok = match reqwest::Url::parse(hub.trim()) {
+        Ok(u) => {
+            u.scheme() == "https"
+                || (u.scheme() == "http"
+                    && matches!(u.host_str(), Some("localhost") | Some("127.0.0.1") | Some("[::1]")))
+        }
+        Err(_) => false,
     };
     if !scheme_ok {
         eprintln!(

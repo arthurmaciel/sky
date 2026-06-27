@@ -143,22 +143,27 @@ pub fn console_auth_mode_label() -> &'static str {
 }
 
 pub fn gate_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::Response> {
-    let console_auth = std::env::var("SKY_CONSOLE_AUTH").unwrap_or_default();
-    if console_auth == "off" {
-        return Some((StatusCode::NOT_FOUND, "console disabled").into_response());
-    }
-    // `SKY_CONSOLE_AUTH=app` (the row-poly `consoleAuth` callback mode) is not yet
-    // implemented in the Rust runtime. Fail closed with a clear, correctly-typed
-    // 501 rather than a misleading 401 that suggests a bad token would fix it.
-    if console_auth == "app" {
-        return Some(
-            (
-                StatusCode::NOT_IMPLEMENTED,
-                "SKY_CONSOLE_AUTH=app (row-poly consoleAuth callback) is not yet \
-                 supported on the Rust runtime; use token/off or SKY_ADMIN_TOKEN",
+    // Resolve through the SAME normalizer as console_auth_mode_label (trim +
+    // lowercase + unknown→off). A raw, case-sensitive `== "off"` let `OFF` / `Off`
+    // / ` off ` slip through and leave the console MOUNTED (fail-OPEN) — diverging
+    // from the label's fail-closed contract. One resolver, one behaviour.
+    match console_auth_mode_label() {
+        "off" => return Some((StatusCode::NOT_FOUND, "console disabled").into_response()),
+        // `SKY_CONSOLE_AUTH=app` (row-poly `consoleAuth` callback) is not yet
+        // implemented in the Rust runtime. Fail closed with a clear 501 rather than
+        // a misleading 401 that suggests a bad token would fix it.
+        "app" => {
+            return Some(
+                (
+                    StatusCode::NOT_IMPLEMENTED,
+                    "SKY_CONSOLE_AUTH=app (row-poly consoleAuth callback) is not yet \
+                     supported on the Rust runtime; use token/off or SKY_ADMIN_TOKEN",
+                )
+                    .into_response(),
             )
-                .into_response(),
-        );
+        }
+        // "token" / "unset-prod" / "dev-open" fall through to the prod/token gate.
+        _ => {}
     }
     if !telemetry::production_from_env() {
         return None;
