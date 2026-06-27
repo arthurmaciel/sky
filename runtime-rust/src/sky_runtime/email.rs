@@ -258,6 +258,24 @@ async fn send_sendgrid<E: From<String>>(api_key: &str, m: &EmailMessage) -> SkyR
     if !m.replyTo.is_empty() {
         json_obj_set(&mut body, "reply_to", serde_json::json!({ "email": m.replyTo }));
     }
+    if !m.attachments.is_empty() {
+        // SendGrid v3 attachments: base64 `content` (decode the Latin-1 byte-string
+        // via base64_encode, NOT as_bytes() which would re-UTF-8 corrupt bytes ≥0x80),
+        // `filename`, `type` (MIME), `disposition`. Previously dropped silently.
+        let atts: Vec<serde_json::Value> = m
+            .attachments
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "content": base64_encode(a.content.clone()),
+                    "filename": a.filename,
+                    "type": a.mimeType,
+                    "disposition": "attachment",
+                })
+            })
+            .collect();
+        json_obj_set(&mut body, "attachments", atts.into());
+    }
     let payload = serde_json::to_vec(&body).unwrap_or_default();
     let endpoint = email_endpoint("sendgrid", "https://api.sendgrid.com/v3/mail/send");
     match email_post_json::<E>(
@@ -290,6 +308,18 @@ async fn send_ses<E: From<String>>(cfg: &SesConfig, m: &EmailMessage) -> SkyResu
     if cfg.region.is_empty() || cfg.key.is_empty() || cfg.secret.is_empty() {
         return SkyResult::Err(
             "email.send/Ses: region+key+secret required".to_string().into(),
+        );
+    }
+    // SES v2 simple-content (used below) cannot carry attachments — that needs the
+    // raw-MIME (Content.Raw) path. Rather than SILENTLY DROP attachments (data
+    // loss), fail loudly until the raw-MIME builder lands. Resend/SendGrid/SMTP
+    // support attachments today.
+    if !m.attachments.is_empty() {
+        return SkyResult::Err(
+            "email.send/Ses: attachments require the raw-MIME path, not yet supported on SES \
+             (use Resend / SendGrid / SMTP for attachments)"
+                .to_string()
+                .into(),
         );
     }
     // SSRF guard: `region` is interpolated into the SES host
