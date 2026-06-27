@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain 94-ffi-inherent-self-output 95-ffi-inherent-self-output-async 96-ffi-external-trait-xcrate 97-ffi-numeric-param-coerce 98-ffi-projected-numeric 99-ffi-nested-numeric-drop 100-ffi-asref-return 101-task-rethunk 102-task-rethunk-free-tvar 103-task-rethunk-discard 104-ffi-owned-query-builder)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain 94-ffi-inherent-self-output 95-ffi-inherent-self-output-async 96-ffi-external-trait-xcrate 97-ffi-numeric-param-coerce 98-ffi-projected-numeric 99-ffi-nested-numeric-drop 100-ffi-asref-return 101-task-rethunk 102-task-rethunk-free-tvar 103-task-rethunk-discard 104-ffi-owned-query-builder 105-ffi-generic-struct-accessor)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -1283,6 +1283,41 @@ run_owned_query_builder() {
 # is UB-free under BOTH Stacked AND Tree Borrows (the documented soundness claim) —
 # keeps the unsafe mechanism's invariants from rotting.
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 105-ffi-generic-struct-accessor — #73 Part A (E0107). A field accessor for a
+# GENERIC struct emits the bare struct name for its receiver (`Gen` not `Gen<T>`)
+# → E0107 (firestore FirestoreWithMetadata<T>, SKY_DCE=0). The inspector now
+# fail-closed DROPS field accessors for any struct with a type/const generic param.
+# POSITIVE: non-generic Plain accessors + ctor bind, [ALL OK].
+# NEGATIVE: generic Gen's field accessors (val_field/tag_field) ABSENT.
+# ─────────────────────────────────────────────────────────────────────────────
+run_generic_struct_accessor() {
+  local base=105-ffi-generic-struct-accessor
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+  local wd; wd="$(stage_workdir "$src")" || { _fail "$base (stage failed)"; return; }
+  local bin; bin="$(build_fixture "$wd")" || { _fail "$base (build failed)"; rm -rf "$wd"; return; }
+  local skyi="$wd/.skycache/ffi/rust/genaccessor105crate.skyi"
+  # NEGATIVE: generic struct field accessors must be ABSENT (E0107 drop).
+  if [ -f "$skyi" ] && rg -q 'val_field_from_gen|tag_field_from_gen' "$skyi"; then
+    _fail "$base: generic-struct field accessor leaked (E0107 gate): $(rg 'val_field_from_gen|tag_field_from_gen' "$skyi" | tr '\n' ';')"; rm -rf "$wd"; return
+  fi
+  # POSITIVE: non-generic struct accessor must BIND.
+  if ! rg -q 'x_field_from_plain : Plain -> Int' "$skyi" 2>/dev/null; then
+    _fail "$base: non-generic Plain accessor did NOT bind (over-drop)"; rm -rf "$wd"; return
+  fi
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (generic-struct field accessors dropped (E0107) · non-generic bind · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
+
 run_selfref_miri_proof() {
   local base=selfref-builder-proof
   # Sibling of $FIXROOT (a standalone proof crate, not a sky fixture).
@@ -1335,6 +1370,7 @@ for n in "${FIXTURES[@]}"; do
     96-ffi-external-trait-xcrate) run_external_trait_xcrate ;;
     97-ffi-numeric-param-coerce) run_numeric_param_coerce ;;
     104-ffi-owned-query-builder) run_owned_query_builder ;;
+    105-ffi-generic-struct-accessor) run_generic_struct_accessor ;;
     selfref-builder-proof)    run_selfref_miri_proof ;;
     *)                        run_basic "$n" ;;
   esac

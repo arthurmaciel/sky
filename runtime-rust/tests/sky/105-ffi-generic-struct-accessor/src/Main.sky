@@ -1,0 +1,20 @@
+module Main exposing (main)
+
+-- #73 Part A (E0107): generic-struct field accessors DROP; non-generic BIND.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Genaccessor105crate as G
+import Std.Log exposing (println)
+
+main : Task Error ()
+main =
+    Task.fromResult (G.new_from_plain 5)
+        |> Task.andThen
+            (\p ->
+                if G.x_field_from_plain p == 5 then
+                    println "[ALL OK]"
+
+                else
+                    Task.fail (Error.unexpected "x_field bad")
+            )

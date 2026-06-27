@@ -1880,6 +1880,26 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
             let Some(plain) = struct_data.get("kind").and_then(|k| k.get("plain")) else {
                 continue; // tuple / unit struct — no named fields in S1
             };
+            // [#73 Part A] A GENERIC struct (e.g. `FirestoreWithMetadata<T>`) cannot
+            // have field accessors emitted: `recv_path` below uses `args: null`
+            // (the BARE struct name), which for `Foo<T>` is E0107 "missing generics"
+            // (surfaced under SKY_DCE=0 full-surface). The field type may also mention
+            // the unbound `T`. Fail-closed DROP the whole struct's field accessors when
+            // it has any TYPE or CONST generic param (lifetime-only generics are elided
+            // and stay fine).
+            if struct_data
+                .get("generics")
+                .and_then(|g| g.get("params"))
+                .and_then(|p| p.as_array())
+                .is_some_and(|params| {
+                    params.iter().any(|p| {
+                        p.get("kind")
+                            .is_some_and(|k| k.get("type").is_some() || k.get("const").is_some())
+                    })
+                })
+            {
+                continue;
+            }
             let Some(field_ids) = plain.get("fields").and_then(|f| f.as_array()) else {
                 continue;
             };
