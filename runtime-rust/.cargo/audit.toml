@@ -1,0 +1,20 @@
+# cargo-audit configuration for the Sky Rust runtime crate.
+# Read by `cargo audit` when run from runtime-rust/ (the quality-audit + CI path).
+#
+# Documented advisory acceptances — each MUST carry a justification + a re-check
+# trigger. This is the RustSec-sanctioned way to handle an advisory that has no
+# available upstream fix (the alternative — a perpetually-red audit — hides any
+# NEW advisory in the noise). Re-audit and remove an entry the moment a fix ships.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — rsa 0.9.x "Marvin Attack" (PKCS#1 v1.5 timing sidechannel).
+    # NO fixed upstream release exists (the advisory's Solution is "no fixed upgrade
+    # available"); the only remediation is replacing the `rsa` crate, which has no
+    # drop-in equivalent for our RS256 JWT (jsonwebtoken) + Crypto.rsaSha256* surface.
+    # Exposure is limited: our use is SIGN (private key) + VERIFY (public key), not
+    # the PKCS#1 v1.5 DECRYPTION oracle the Marvin timing attack targets. Accepted +
+    # tracked; revisit when `rsa` ships a fix or a vetted constant-time alternative
+    # lands. (principles-audit 2026-06-27)
+    "RUSTSEC-2023-0071",
+]
