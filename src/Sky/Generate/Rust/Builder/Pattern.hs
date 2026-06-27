@@ -77,7 +77,16 @@ patternToRustPattern (Ann.At _ pat) = case pat of
     Can.PCtor{Can._p_home = mod', Can._p_type = ty, Can._p_name = ctor, Can._p_args = args} ->
         let modName = ModuleName._name mod'
             modPrefix' = map (\c -> if c == '.' then '_' else c) modName
-            enumName = toCamelCase (modPrefix' ++ "_" ++ ty)
+            -- Maybe/Result are RUNTIME-BRIDGED to SkyMaybe/SkyResult (see
+            -- TypeRenderer `TType "Maybe"` and the ExprEmitter ctor arms). The
+            -- pattern renderer must use the SAME bridged enum name, else a
+            -- `Just`/`Ok` arg pattern emits `SkyCoreMaybeMaybe::Just` — an
+            -- undefined type (E0433). (User ADTs are unaffected: Sky forbids a
+            -- user type named Maybe/Result, so this can't shadow.)
+            enumName = case ty of
+                "Maybe"  -> "SkyMaybe"
+                "Result" -> "SkyResult"
+                _        -> toCamelCase (modPrefix' ++ "_" ++ ty)
             argStrs = map (\(Can.PatternCtorArg _ _ p) -> patternToRustPattern p) args
             argsRendered = if null argStrs then "" else "(" ++ intercalate ", " argStrs ++ ")"
         in enumName ++ "::" ++ rustVariantName ctor ++ argsRendered
@@ -104,7 +113,14 @@ patternToRustPattern (Ann.At _ pat) = case pat of
 patternToRustArg :: Set.Set String -> Int -> Can.Pattern -> (String, String)
 patternToRustArg _ _ pat@(Ann.At _ (Can.PVar _))       = (patternToRustParam pat, "")
 patternToRustArg _ _ pat@(Ann.At _ Can.PAnything)      = (patternToRustParam pat, "")
-patternToRustArg _ _ pat@(Ann.At _ (Can.PTuple _ _ _)) = (patternToRustParam pat, "")
+-- A tuple arg is a NATIVE Rust param pattern ONLY when every leaf is a plain
+-- binder (PVar/PAnything) or a nested all-trivial tuple. A tuple carrying a
+-- ctor/literal/record/cons sub-pattern (e.g. `f (a, Just b)`) is refutable and
+-- can't bind through a bare param pattern — emitting it as one DROPPED the
+-- sub-pattern's bindings (`b`). Such a tuple falls through to the general
+-- `__pN` + `let <pat> = __pN else {…}` destructure path below, which binds them.
+patternToRustArg _ _ pat@(Ann.At _ (Can.PTuple _ _ _))
+    | tupleArgIsTrivial pat = (patternToRustParam pat, "")
 patternToRustArg singleVarEnums idx pat =
     let paramName = "__p" ++ show idx
         rustPat = patternToRustPattern pat
@@ -113,6 +129,17 @@ patternToRustArg singleVarEnums idx pat =
                      else " else { unreachable!() }"
         prelude = "let " ++ rustPat ++ " = " ++ paramName ++ elseClause ++ "; "
     in (paramName, prelude)
+
+-- | A tuple arg can be emitted as a native Rust param pattern only when every
+-- leaf is a plain binder or a nested all-trivial tuple. Any ctor/literal/record/
+-- list/cons/alias sub-pattern → not trivial → must route through the destructure
+-- prelude (so its bindings survive). Conservative: unknown shapes → not trivial.
+tupleArgIsTrivial :: Can.Pattern -> Bool
+tupleArgIsTrivial (Ann.At _ p) = case p of
+    Can.PVar _          -> True
+    Can.PAnything       -> True
+    Can.PTuple a b rest -> all tupleArgIsTrivial (a : b : rest)
+    _                   -> False
 
 -- | A function-argument pattern is irrefutable iff every constructor in it is
 -- the SOLE variant of its enum (the destructure can never fail) AND every
