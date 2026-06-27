@@ -1,0 +1,36 @@
+module Main exposing (main)
+
+-- #95 — numeric coercion on the PROJECTED/UFCS path. `widen` is a TRAIT method
+-- (carries a traitQualifier → the generic-wrapper / UFCS emitter). Its params
+-- usize/u32/f32 travel as the Sky carrier (Int/Float) and narrow SATURATING at
+-- the call site; the usize return widens to Int. Pre-#95 the projected emitter
+-- coerced neither side → cargo-fail (so such methods were unusable / dropped).
+--
+-- widen(n, w, x) = base.max(0) + n + w + x  (all as usize).
+-- base=10, n=1, w=5_000_000_000 (> u32::MAX → SATURATES to 4294967295), x=2.0
+-- ⇒ 10 + 1 + 4294967295 + 2 = 4294967308  (proves the u32 PARAM saturates,
+--   never wraps; a wrapping `as u32` would give 705032704 → total 705032717).
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Widenproj_crate as C
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    case C.new_from_calc 10 of
+        Ok calc ->
+            case C.widen calc 1 5000000000 2.0 of
+                Ok total ->
+                    if total == 4294967308 then
+                        println "projected widen total=4294967308 [ALL OK]"
+
+                    else
+                        println ("UNEXPECTED total=" ++ String.fromInt total)
+
+                Err e ->
+                    println ("widen-failed: " ++ Error.toString e)
+
+        Err e ->
+            println ("new-failed: " ++ Error.toString e)

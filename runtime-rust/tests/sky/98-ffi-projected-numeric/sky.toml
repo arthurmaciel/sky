@@ -1,0 +1,8 @@
+[project]
+name = "98-ffi-projected-numeric"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+["rust.dependencies"]
+widenproj-crate = { git = "file:///home/arthur/.cache/sky/98-ffi-projected-numeric-crate", branch = "master" }

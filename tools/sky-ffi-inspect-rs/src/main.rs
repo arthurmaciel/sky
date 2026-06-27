@@ -7593,6 +7593,42 @@ fn type_to_typeref(
 /// `extern "X"` fn. Closure metadata is emitted ONLY for a Rust-ABI host (B3) —
 /// a non-Rust host cannot receive a Rust closure. A MISSING `abi` (older rustdoc
 /// format) is treated as Rust (the common case), since closure-taking `extern`
+/// [#95] TOP-LEVEL projected/UFCS param-or-return TypeRef builder. A DIRECT
+/// numeric primitive at a param/return position PRESERVES its foreign Rust width
+/// (`usize`/`u32`/`f32`/…) instead of collapsing to the Sky carrier (i64/f64) the
+/// way the recursive `type_to_typeref` does — so the Haskell projected emitter
+/// (`renderArgTypeAt`/`renderValueArg`/`numWidenScalar`) can coerce it SATURATING
+/// (carrier wrapper param + `numSaturate` at the call site + `numWidenScalar` on
+/// the return). Without this the wrapper sig + body both saw `i64`/`f64`, so the
+/// foreign call got/returned a mismatched width → E0308 (the projected emitter's
+/// numeric coercion was dead).
+///
+/// C6 (inspector-admit ⊆ codegen-cover): this fires ONLY for a DIRECT (top-level)
+/// `{primitive:…}` node. A NESTED numeric (inside `resolved_path` / `borrowed_ref`
+/// / Option / Vec) carries a DIFFERENT top-level key, so it delegates to
+/// `type_to_typeref` and keeps the carrier-collapse — codegen covers only
+/// top-level scalar. The width set is EXACTLY the one `type_to_typeref` already
+/// admitted-then-collapsed (i8..i64 / isize / u8..u64 / usize / f32 / f64);
+/// `i128`/`u128` (which `type_to_typeref` DROPS as NotBindable) and bool/char/str
+/// fall through to `type_to_typeref` unchanged — no coverage change beyond the
+/// collapse fix.
+fn type_to_typeref_toplevel(
+    val: &serde_json::Value,
+    param_idx: &HashMap<String, usize>,
+) -> Result<TypeRef, GenericDrop> {
+    if let Some(p) = val.get("primitive").and_then(|p| p.as_str()) {
+        if matches!(
+            p,
+            "i8" | "i16" | "i32" | "i64" | "isize"
+                | "u8" | "u16" | "u32" | "u64" | "usize"
+                | "f32" | "f64"
+        ) {
+            return Ok(TypeRef::Prim(p.to_string()));
+        }
+    }
+    type_to_typeref(val, param_idx)
+}
+
 /// fns are vanishingly rare and the downstream wall re-checks before emission.
 fn host_abi_is_rust(fn_data: &serde_json::Value) -> bool {
     match fn_data.get("header").and_then(|h| h.get("abi")) {
@@ -8428,7 +8464,9 @@ fn try_parametric_stub(
                 TypeRef::Ctor("::Vec".to_string(), vec![item_tr])
             }
             (None, None) => {
-                let tref = type_to_typeref(&input[1], &param_idx)?;
+                // [#95] top-level param: preserve a direct numeric foreign width
+                // so the projected emitter can coerce it (saturating).
+                let tref = type_to_typeref_toplevel(&input[1], &param_idx)?;
                 // [Wall-3b] If the original was a non-mut borrowed_ref and
                 // type_to_typeref accepted it (only possible via the Wall-3b
                 // String-coercible arm), record for `.as_ref()` at the call site.
@@ -8445,7 +8483,9 @@ fn try_parametric_stub(
         next_arg += 1;
     }
 
-    let ret = type_to_typeref(&sig["output"], &param_idx)?;
+    // [#95] top-level return: preserve a direct numeric foreign width so the
+    // projected emitter widens it to the Sky carrier (saturating).
+    let ret = type_to_typeref_toplevel(&sig["output"], &param_idx)?;
 
     // [#72] The METHOD's OWN generics, in DECLARATION order, each resolved to its
     // concrete — the method-level turbofish `::<C1, C2, …>`. The Rust method
