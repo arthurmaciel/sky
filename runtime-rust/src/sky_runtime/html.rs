@@ -475,6 +475,11 @@ fn is_url_attr(name: &str) -> bool {
             | "background"
             | "manifest"
             | "longdesc"
+            // `<object data="…">` / `<embed src>` navigate the value as a document;
+            // a `data:text/html,<script>` or `javascript:` value is script-exec.
+            // Not media (is_media_url_attr("data")=false) so data: is blocked here.
+            // (Exact name "data" only — `data-*` custom attrs do not match.)
+            | "data"
     )
 }
 

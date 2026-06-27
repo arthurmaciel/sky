@@ -264,17 +264,30 @@ fn make_temp_path(prefix: &str, is_dir: bool) -> Result<String, String> {
         let name = format!("{}{}{:08x}{:04x}", prefix, pid, nanos, attempt);
         let path = base.join(&name);
         if is_dir {
-            match std::fs::create_dir(&path) {
+            // Owner-only (0700) on Unix — a temp dir created with the default
+            // umask can be world-readable/traversable, exposing whatever the
+            // caller writes into it (Go uses 0700 for MkdirTemp).
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
                 Ok(_) => return Ok(path.to_string_lossy().into_owned()),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(format!("{}", e)),
             }
         } else {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
+            // Owner-only (0600) on Unix — same rationale; Go's CreateTemp is 0600.
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
             {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            match opts.open(&path) {
                 Ok(_) => return Ok(path.to_string_lossy().into_owned()),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(format!("{}", e)),

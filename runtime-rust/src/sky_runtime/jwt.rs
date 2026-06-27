@@ -37,6 +37,13 @@ pub fn jwt_decode_hs256<E: From<String>>(secret: String, token: String) -> SkyRe
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
     validation.validate_nbf = true;
+    // These are GENERIC decoders with no expected-audience argument, so a specific
+    // `aud` cannot be enforced here. jsonwebtoken's default `validate_aud = true`
+    // would then REJECT any token that merely CARRIES an `aud` claim (error
+    // InvalidAudience) — breaking the documented audience feature + Go parity.
+    // Disable aud validation; audience-scoped checks belong to a future
+    // expected-audience decoder variant.
+    validation.validate_aud = false;
     // Keep `exp` required (jsonwebtoken's default) so an omitted-exp token is
     // rejected rather than treated as non-expiring — matches Go's exp/nbf check
     // and aligns with auth.rs's verify path (which never clears required claims).
@@ -79,6 +86,13 @@ pub fn jwt_decode_rs256<E: From<String>>(key_pem: String, token: String) -> SkyR
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_exp = true;
     validation.validate_nbf = true;
+    // These are GENERIC decoders with no expected-audience argument, so a specific
+    // `aud` cannot be enforced here. jsonwebtoken's default `validate_aud = true`
+    // would then REJECT any token that merely CARRIES an `aud` claim (error
+    // InvalidAudience) — breaking the documented audience feature + Go parity.
+    // Disable aud validation; audience-scoped checks belong to a future
+    // expected-audience decoder variant.
+    validation.validate_aud = false;
     // Keep `exp` required (jsonwebtoken's default) so an omitted-exp token is
     // rejected rather than treated as non-expiring — matches Go's exp/nbf check
     // and aligns with auth.rs's verify path (which never clears required claims).
