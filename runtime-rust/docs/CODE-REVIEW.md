@@ -29,18 +29,32 @@ recursion caps, CORS Vary merge) — **fixed, build-gated, guardian-reviewed,
 committed** (~38 commits cc07c1e1..eea5942e). False-positives dispositioned with
 reasons (CAF memoization, encoding Latin-1, etc.).
 
-**ONLY two categories remain, both documented + intentional:**
-1. **Low-value in-boundary codegen residue** (cabal-gated, rare/dead-in-practice):
-   db_format_sql `?`-in-SQL-string-literal (postgres-only); Cargo.toml dep-version
-   string-escaping; ffi_kernel_polyfill `panic!` (dead compiler-bug-contract);
-   Naming `user_` collision; TypeEmitter bare-`any`; TypeRenderer generic-order;
-   the two `unreachable!()`s (refutable-arg + std_ui_on_submit — dead-in-practice,
-   all applied uses peepholed, contained by recover).
-2. **OUT OF RUST BOUNDARY — need user / Go-side decision** (a Rust-only change
-   breaks Go≡Rust parity or needs shared/front-end edits): Pattern.hs HIGH
-   front-end exhaustiveness; register email-enumeration; email case-normalization;
-   CSV formula-injection policy; email SES/SendGrid attachments (feature); rsa
-   Marvin (no upstream fix).
+**Further autonomous fixes (codegen LOW residue + email; build-verified):**
+- `f961310a` Pattern.hs refutable-arg `unreachable!()` → CLASSIFIED panic (in-boundary
+  mitigation of the front-end HIGH); Emitter db_format_sql quote-aware `?`-rewrite
+  (postgres; rustc-verified leaves `'?'`/`'a''?b'` literals intact).
+- `eea5942e` SKY_DB_URL via rustStringLit (not Haskell `show`).
+- `ee6a6355` email attachments: SendGrid implemented; SES fail-loud (no silent drop).
+
+**DISPOSITIONED — codegen LOW (analysed, not blind-fixed; high blast-radius, ~0 value):**
+- TypeEmitter bare-`any`: already guarded (`guardBareAny` + `anyCarrierField`).
+- TypeRenderer generic-order: `Data.Set` is ORDERED (deterministic), not a non-det
+  HashSet → likely false-positive.
+- Naming `user_` collision: `user_` is lowercase, module prefixes are Capitalized →
+  Rust case-sensitivity prevents it; theoretical.
+
+**TRULY REMAINING — hard external / boundary constraints (NOT autonomously fixable):**
+1. **rsa Marvin (RUSTSEC-2023-0071):** NO upstream fix exists; only "fix" is swapping
+   the `rsa` crate (no drop-in) — external blocker.
+2. **Cross-backend** (editing `runtime-go` is FORBIDDEN by the boundary; a Rust-only
+   change breaks Go≡Rust parity AND half-fixes): Pattern.hs HIGH front-end
+   exhaustiveness (shared `Type/Exhaustiveness`); register email-enumeration (Go has
+   the identical path); email case-normalization. Maintainer/Go-side call.
+3. **Dead-in-practice codegen** (can't be total — no value to synthesise):
+   ffi_kernel_polyfill `panic!` (compiler-bug-contract); std_ui_on_submit
+   `unreachable!()` (applied uses peepholed). Contained by recover if ever hit.
+4. **CSV formula-injection:** no lossless mitigation (corrupts signed numbers / breaks
+   round-trip) — a sanitize-policy decision for the user.
 
 ---
 
