@@ -851,7 +851,17 @@ where
                 // origin-dependent — emit `Vary: Origin` so a shared/intermediary
                 // cache can't serve one origin's ACAO to another (CORS cache
                 // poisoning). `*` is origin-independent, so no Vary needed.
-                if a != "*" { resp.headers.insert("Vary".to_string(), "Origin".to_string()); }
+                if a != "*" {
+                    // MERGE, don't clobber: a handler may already have set Vary
+                    // (e.g. `Accept-Encoding`). Append `Origin` unless present.
+                    let vary = match resp.headers.get("Vary") {
+                        Some(prev) if !prev.split(',').any(|p| p.trim().eq_ignore_ascii_case("origin")) =>
+                            format!("{}, Origin", prev),
+                        Some(prev) => prev.clone(),
+                        None => "Origin".to_string(),
+                    };
+                    resp.headers.insert("Vary".to_string(), vary);
+                }
                 resp.headers.insert("access-control-allow-origin".to_string(), a);
             }
             return Box::pin(async move { ok_res(resp) });
@@ -863,7 +873,17 @@ where
                     if let Some(a) = allow {
                         // See preflight branch: a reflected specific origin needs
                         // `Vary: Origin` to be cache-safe.
-                        if a != "*" { resp.headers.insert("Vary".to_string(), "Origin".to_string()); }
+                        if a != "*" {
+                    // MERGE, don't clobber: a handler may already have set Vary
+                    // (e.g. `Accept-Encoding`). Append `Origin` unless present.
+                    let vary = match resp.headers.get("Vary") {
+                        Some(prev) if !prev.split(',').any(|p| p.trim().eq_ignore_ascii_case("origin")) =>
+                            format!("{}, Origin", prev),
+                        Some(prev) => prev.clone(),
+                        None => "Origin".to_string(),
+                    };
+                    resp.headers.insert("Vary".to_string(), vary);
+                }
                         resp.headers.insert("access-control-allow-origin".to_string(), a);
                     }
                     ok_res(resp)
