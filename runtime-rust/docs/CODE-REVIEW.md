@@ -73,10 +73,17 @@ boundary is later expanded.
 2. **Pattern.hs full front-end exhaustiveness** — lives in `src/Sky/Type/Exhaustiveness.hs`
    (shared HM checker, governs Go too) — outside the Rust boundary. **In-boundary
    mitigation SHIPPED** (`f961310a`: classified panic, recover-contained — Go-parity).
-3. **Dead-in-practice codegen, no total behavior** — ffi_kernel_polyfill `panic!`
-   (compiler-bug-contract; returns `T`, no value to synthesise → must diverge — correct
-   as-is) and std_ui_on_submit `unreachable!()` (peepholed-dead; converting to a value
-   would trip the unused-param clippy gate for zero benefit). Recover-contained if hit.
+3. **Dead-in-practice codegen** — RESOLVED/dispositioned:
+   - `d35671a2` std_ui_on_submit value-use `unreachable!()` → CLASSIFIED panic (accurate
+     message, recover-contained) — in-boundary mitigation, same as Pattern.hs.
+   - ffi_kernel_polyfill `panic!` — ➖ NO-DEFECT: it's the SANCTIONED CompilerBug-contract
+     (CLAUDE.md lists Ffi.kernel as a compiler-bug-contract panic site); reachable only via
+     a codegen bug (unrouted kernel), never from correct codegen on well-typed Sky. Already
+     a classified please-report message. Correct defensive code, not a vulnerability.
+
+   So only items 1 (register-enum) + 2 (Pattern front-end) remain — BOTH require crossing
+   the boundary the maintainer chose to KEEP (2026-06-27 decision). Not autonomously
+   fixable without that explicit boundary change.
 
 Every item with ANY Rust-backend autonomous fix OR mitigation now has one (supply chain
 CLEAN — `cargo audit` exits 0; clippy `-D` clean; 563 tests). The 3 above need a Go-side
