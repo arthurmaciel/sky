@@ -204,6 +204,14 @@ pub fn auth_register<E: Send + From<String> + 'static>(
     conn: Db, email: String, password: String,
 ) -> SkyTask<E, i64> {
     Box::pin(async move {
+        // Normalize the email (trim + lowercase) so a case/whitespace variant can't
+        // create a DUPLICATE account that bypasses the UNIQUE constraint, and so
+        // login matches regardless of the case the user types. Applied identically
+        // in auth_login, so auth BEHAVIOUR is unchanged (login still succeeds); only
+        // the stored case is canonical. (Email local-parts are technically case-
+        // sensitive per RFC 5321, but every real provider treats them case-
+        // insensitively; canonical-lowercase is the universal practice.)
+        let email = email.trim().to_lowercase();
         if let SkyResult::Err(e) = ensure_users_schema::<E>(&conn).await {
             return SkyResult::Err(e);
         }
@@ -247,6 +255,9 @@ pub fn auth_login<E: Send + From<String> + 'static>(
     conn: Db, email: String, password: String,
 ) -> SkyTask<E, i64> {
     Box::pin(async move {
+        // Same canonicalisation as auth_register so a case/whitespace variant of a
+        // registered email still logs in (and can't be used to probe the store).
+        let email = email.trim().to_lowercase();
         if let SkyResult::Err(e) = ensure_users_schema::<E>(&conn).await {
             return SkyResult::Err(e);
         }
@@ -373,6 +384,27 @@ mod tests {
         let token: SkyResult<String, String> =
             auth_sign_token("short".into(), HashMap::new(), 3600);
         assert!(matches!(token, SkyResult::Err(_)));
+    }
+
+    #[tokio::test]
+    async fn test_email_normalized_case_insensitive() {
+        let pool = match DbPool::connect("sqlite::memory:").await {
+            Ok(p) => p,
+            Err(_) => return, // in-memory connect can't realistically fail; skip if it does
+        };
+        // Register with mixed case + surrounding whitespace.
+        let id: SkyResult<String, i64> =
+            auth_register(pool.clone(), "  Alice@Example.COM ".into(), "hunter2!".into()).await;
+        let uid = match id { SkyResult::Ok(i) => i, SkyResult::Err(_) => 0 };
+        assert!(uid > 0, "register with mixed-case email should succeed");
+        // Login with a DIFFERENT case must resolve to the SAME account.
+        let login: SkyResult<String, i64> =
+            auth_login(pool.clone(), "alice@example.com".into(), "hunter2!".into()).await;
+        assert!(matches!(login, SkyResult::Ok(u) if u == uid), "login must be case-insensitive");
+        // A case-variant re-register must hit the UNIQUE constraint (no dup account).
+        let dup: SkyResult<String, i64> =
+            auth_register(pool.clone(), "ALICE@example.com".into(), "hunter2!".into()).await;
+        assert!(matches!(dup, SkyResult::Err(_)), "case-variant must not create a duplicate account");
     }
 
     #[tokio::test]
