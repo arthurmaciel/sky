@@ -190,7 +190,10 @@ buildConsole ver cacheDir cacheBin fpFile fingerprint = do
     let childEnv =
             (recursionGuardEnv, "1")
             : filter ((/= "CARGO_TARGET_DIR") . fst) baseEnv
-        cp = (proc skyBin ["build", "src/Main.sky", "--target", "rust"])
+        -- `--backend rust` selects the codegen backend. The old `--target rust`
+        -- spelling is now REJECTED by the CLI (`--target` takes a cross-compile
+        -- triple), so the console pre-build self-invocation failed with that flag.
+        cp = (proc skyBin ["build", "src/Main.sky", "--backend", "rust"])
                  { cwd = Just buildDir, env = Just childEnv }
     (ec, _out, errOut) <- readCreateProcessWithExitCode cp ""
     case ec of
