@@ -18,6 +18,32 @@ codebase). One pass, one file at a time.
 - **Latest full re-audit: 2026-06-27** (whole codebase, swarm; see section below). Prior full: 2026-06-19 (whole codebase, 131 code/script/skill files) —
   see the dated section immediately below for severity summary + high/medium dispositions.
 
+## 2026-06-27 — FIX CAMPAIGN COMPLETE (in-boundary)
+
+Every HIGH (15 in-boundary) + supply-chain HIGH + all docs · every MED (runtime
++ codegen) · both delicate security items (db-txn cancel-safety, ssrf DNS-pin) ·
+all actionable LOW (runtime via 3 disjoint-file fix-swarms + docs/scripts swarm) ·
+codegen MED tier (div-by-zero, tuple/Maybe-Result arg-patterns, Live.route OOB,
+rustfmt locale, console --backend, SKY_DB_URL) · guardian follow-ups (html+style
+recursion caps, CORS Vary merge) — **fixed, build-gated, guardian-reviewed,
+committed** (~38 commits cc07c1e1..eea5942e). False-positives dispositioned with
+reasons (CAF memoization, encoding Latin-1, etc.).
+
+**ONLY two categories remain, both documented + intentional:**
+1. **Low-value in-boundary codegen residue** (cabal-gated, rare/dead-in-practice):
+   db_format_sql `?`-in-SQL-string-literal (postgres-only); Cargo.toml dep-version
+   string-escaping; ffi_kernel_polyfill `panic!` (dead compiler-bug-contract);
+   Naming `user_` collision; TypeEmitter bare-`any`; TypeRenderer generic-order;
+   the two `unreachable!()`s (refutable-arg + std_ui_on_submit — dead-in-practice,
+   all applied uses peepholed, contained by recover).
+2. **OUT OF RUST BOUNDARY — need user / Go-side decision** (a Rust-only change
+   breaks Go≡Rust parity or needs shared/front-end edits): Pattern.hs HIGH
+   front-end exhaustiveness; register email-enumeration; email case-normalization;
+   CSV formula-injection policy; email SES/SendGrid attachments (feature); rsa
+   Marvin (no upstream fix).
+
+---
+
 ## 2026-06-27 — EXHAUSTIVE full re-audit (swarm: broad 196/196 + specialist lenses)
 
 **Method.** `principles-audit` exhaustive mode, budget=max. Deterministic tier (cargo-audit/deny + secgrep) → broad sweep 1 read-only agent/file over **196 in-boundary files** (112 code + 24 scripts + 60 prose), six principles each → specialist adversarial lenses (injection/authz/crypto-timing/memory-safety+UB/DoS+resource) over ~50 high-risk files. 44.6M subagent tokens, ~4.3 h.
