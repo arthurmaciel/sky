@@ -1,0 +1,46 @@
+module Main exposing (main)
+
+-- #96 / FOUND-ERRORS E-001 regression. Two general-codegen gaps the Rust backend
+-- had (the Go backend always accepted this shape):
+--
+--   1. `cleanup` is a SkyTask (`Pin<Box<dyn Future>>`, move-only) BOUND ONCE and
+--      used in TWO non-discard branches (the andThen-success path AND the onError
+--      path). The old per-closure capture-prelude emitted `cleanup.clone()` on a
+--      non-Clone future → E0599. Fixed by re-thunking a multi-use Task binding to
+--      a `Fn() -> SkyTask` closure that rebuilds the future on demand (each read
+--      site calls it), matching Go's re-runnable-thunk Task semantics.
+--
+--   2. `withResource` is GENERIC over `a`, and that generic `result : a` is
+--      captured in a NESTED closure (`\result -> … (\_ -> result)`). The closure
+--      param was emitted un-annotated → E0282. Fixed by annotating a closure
+--      param whose region type is the enclosing fn's sole Rust generic.
+--
+-- Both branches are mutually exclusive, so `cleanup` runs at most once — exactly
+-- Go's behaviour. Success path → "value=42"; the `[ALL OK]` proves the resource
+-- value flowed through the cleanup-wrapping continuation.
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Std.Log exposing (println)
+
+
+withResource : (Int -> Task Error a) -> Task Error a
+withResource action =
+    let
+        -- A SkyTask bound once, referenced twice below (both non-discard).
+        cleanup =
+            Task.succeed 0
+                |> Task.andThen (\_ -> Task.succeed 1)
+                |> Task.onError (\_ -> Task.succeed (-1))
+    in
+        action 42
+            -- gap 2: generic `result : a` captured in the nested `\_ -> result`.
+            |> Task.andThen (\result -> cleanup |> Task.map (\_ -> result))
+            -- gap 1: SECOND non-discard use of the shared `cleanup` binding.
+            |> Task.onError (\err -> cleanup |> Task.andThen (\_ -> Task.fail err))
+
+
+main : Task Error ()
+main =
+    withResource (\n -> Task.succeed ("value=" ++ String.fromInt n))
+        |> Task.andThen (\s -> println (s ++ " [ALL OK]"))

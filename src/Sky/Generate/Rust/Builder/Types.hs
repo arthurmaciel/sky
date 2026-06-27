@@ -456,6 +456,14 @@ data EmitCtx = EmitCtx
         --   `Task.run`. Derived from usesLive || usesTui || usesWebview.
     , ecZeroArgDefs :: Set.Set (String, String)  -- (modPrefix, name) for zero-arg definitions
     , ecNoCloneVars :: Set.Set String  -- vars whose types don't implement Clone (e.g. Decoder)
+    , ecThunkVars :: Set.Set String
+        -- ^ #96: let-bound SkyTask names re-thunked to a `Fn() -> SkyTask`
+        --   closure because the value is used ≥2 times (a move-only
+        --   `Pin<Box<dyn Future>>` can't be bound-once-used-twice). Every read
+        --   site CALLS the thunk (`name()`) to build a fresh future, matching
+        --   Go's re-runnable-thunk Task semantics. The thunk-call takes priority
+        --   over the `.clone()` logic at every VarLocal emit site (the
+        --   capture-prelude already clones the Clone closure when captured).
     , ecCtorArity :: Map.Map String Int  -- alias name -> field count (for succeed curry wrapping)
     , ecSingleVariantEnums :: Set.Set String
         -- Rust enum names with exactly one variant. A function-argument PCtor

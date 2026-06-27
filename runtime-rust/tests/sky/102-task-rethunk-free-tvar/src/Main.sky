@@ -1,0 +1,43 @@
+module Main exposing (main)
+
+-- #96 PART 2 soundness lock (guardian-confirmed). The sole-generic closure-param
+-- annotation (`useType` → `[only] <- ecGenParams`) is sound because it fires ONLY
+-- when the param's solved type is a genuinely FREE tvar, and instantiating a free
+-- var to the fn's sole generic (bounded Clone+PartialEq+Debug+Send+Sync+'static —
+-- a superset of any op on a free value) is always accepted by rustc. This fixture
+-- pins both edges:
+--
+--   * `freeTvar` — `result : b` is FREE (from `Task.fail`'s polymorphic success),
+--     USED (so `useType` collects it), and never unified with the signature
+--     generic `a`. The annotation fires (`move |result: A|`) and is harmless.
+--
+--   * `unusedParam` — the continuation param is UNUSED → zero use-site regions →
+--     `useType` collects nothing → the param stays BARE (no annotation). Guards a
+--     future traversal refactor from silently starting to annotate unused params.
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Std.Log exposing (println)
+
+
+-- result : b (FREE, polymorphic-success of Task.fail), used, ≠ the generic `a`.
+freeTvar : a -> Task Error a
+freeTvar x =
+    Task.fail (Error.unexpected "boom")
+        |> Task.andThen (\result -> Task.succeed result |> Task.andThen (\_ -> Task.succeed x))
+
+
+-- continuation param UNUSED → stays bare (no [only] annotation).
+unusedParam : a -> Task Error a
+unusedParam x =
+    Task.succeed "p"
+        |> Task.andThen (\result -> Task.succeed x)
+
+
+main : Task Error ()
+main =
+    freeTvar 1
+        |> Task.onError (\_ -> Task.succeed 0)
+        |> Task.andThen (\a -> unusedParam (a + 5))
+        |> Task.andThen (\b -> println ("b=" ++ String.fromInt b ++ " [ALL OK]"))

@@ -1,0 +1,5 @@
+[project]
+name = "101-task-rethunk"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"

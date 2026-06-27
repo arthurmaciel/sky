@@ -17,6 +17,77 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 12:30 — #96 / E-001 CLOSED — generic, Task-reusing fn now builds on Rust (re-thunk + generic closure-param annotation)
+
+**What.** Closed FOUND-ERRORS **E-001** (found exercising `sky-playground`'s
+`withTempDir`): a well-typed generic Sky fn that BINDS a `Task` once and reuses
+it builds on the Go backend but failed on `--backend rust` with two distinct
+codegen errors. Both fixed in `ExprEmitter.hs`; the original generic, Task-reusing
+shape now builds + runs on Rust.
+
+**Gap 1 — multi-use SkyTask → E0599 (`.clone()` on a move-only future).** A
+`let`-bound `SkyTask` (`Pin<Box<dyn Future>>`, move-only) used ≥2 times where not
+every use is a discard fell through to the default Let arm, which emitted
+`cleanup.clone()` → E0599 ("Pin<Box<dyn Future>>: Clone not satisfied"). The
+existing arms only handled single-use (move) and ≥2-use-all-discard (Arc<Mutex>).
+**Fix:** a new Let arm RE-THUNKS the residual case — lowers the binding to a
+`Fn() -> SkyTask` closure that rebuilds the future on demand; every read site
+CALLS it (`cleanup()`, routed via a new `ecThunkVars` set + `varLocalRead`
+helper used at all four VarLocal emit sites). This matches Go's re-runnable-thunk
+Task semantics (each reference re-runs the effect), so a value used in two
+mutually-exclusive branches runs at most once — identical to Go. Guardian
+APPROVE-WITH-CONSTRAINTS: C1 (gate disjoint from the Arc arm via
+`not (allUsesDiscarded …)`), C2 (patch the two `substVar` sites too, not just
+864+1244), C3 (thunk-call short-circuits before the `.clone()` logic everywhere)
+— all applied. Documented residual (no regression): a thunk capturing ANOTHER
+non-Clone Task that isn't itself thunked stays non-Clone — exactly as it fails
+today.
+
+**Gap 2 — generic closure param → E0282.** A closure param whose solver region
+type is a bare type-variable resolving to the enclosing fn's generic
+(`\result -> … (\_ -> result)`, `result : a`) was emitted un-annotated → E0282.
+The header already declared `<A: Clone + PartialEq + Debug + Send + Sync +
+'static>`, so `result.clone()` was valid — only the annotation was missing.
+**Fix:** `useType` now annotates a bare-tvar param when its mangled name matches a
+header generic OR (the alpha-rename case — solver renamed `a`→`c`) when the fn has
+exactly ONE generic. Sound because Sky does NOT generalise local `let` bindings
+(`T.CLet [] []` — no quantifiers), so a one-generic fn body has exactly one
+logical type variable. Fail-safe: multi-generic non-matching tvars stay bare (no
+regression).
+
+**Guardian.** Design review APPROVE-WITH-CONSTRAINTS (C1/C2/C3 applied) then a
+final review of the full diff. PART 2's sole-generic fallback was challenged
+(could a body-internal kernel tvar in a single-generic fn be mis-annotated?) and
+then APPROVED after an empirical + logical refutation: the fallback fires ONLY on
+a genuinely FREE tvar (one zonked type per var ⇒ uniformly bare or uniformly
+concrete use-regions; concrete hits the concrete arm first), and instantiating a
+free var to the sole generic — bounded `Clone+PartialEq+Debug+Send+Sync+'static`,
+a superset of any op a generated value can need — is always rustc-accepted.
+Rust-concrete positions map to `TType`/`Value`, never a bare `TVar`
+(`FfiTypeResolve.hs`), so "Sky-bare-tvar ↔ Rust-concrete" is impossible. No
+tightening needed.
+
+**Verify.** `/tmp/e001b` (non-generic, isolates gap 1) + `/tmp/e001` (generic,
+both gaps) build + run green. Two in-tree regression fixtures wired into
+`ffi-fixtures-test.sh` (46→48 ok · 0 fail): `101-task-rethunk` (`value=42 [ALL
+OK]` — both gaps) and `102-task-rethunk-free-tvar` (`b=5 [ALL OK]` — PART 2
+soundness lock: free-tvar `[only]` annotation + unused-param stays-bare). No
+regressions: 07-todo-cli, 18-job-queue, 23-tui-todo, 24-tui-kitchen-sink all
+build green on `--backend rust`; full FFI-fixtures gate green. Full 3-OS sweep
+deferred to CI.
+
+**Also.** FOUND-ERRORS **E-002** (console pre-build's deprecated `--target rust`)
+marked FIXED — already closed in source by `243465ff`; the user's tested binary
+predated it (rebuild clears it).
+
+**Affected.** `src/Sky/Generate/Rust/Builder/Types.hs` (ecThunkVars field) ·
+`src/Sky/Generate/Rust/Builder/ModuleEmitter.hs` (ctx init) ·
+`src/Sky/Generate/Rust/Builder/ExprEmitter.hs` (varLocalRead helper, 4 VarLocal
+sites, re-thunk Let arm, useType generic-param annotation) ·
+`runtime-rust/tests/sky/101-task-rethunk/` (new) ·
+`runtime-rust/scripts/ffi-fixtures-test.sh` (ALL_FIXTURES) ·
+`runtime-rust/docs/FOUND-ERRORS.md` (E-001/E-002 FIXED).
+
 ## 2026-06-27 04:30 — #73-c2 REPRODUCED + re-triaged GENERAL (not firestore-specific); leak narrowed
 
 **What.** #73's class 2 ("generic-result-hole wrappers") was assumed firestore-only. Reproduced it

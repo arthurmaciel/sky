@@ -300,7 +300,7 @@ substVar ctx name inline = go
   where
     go e@(Ann.At _ expr) = case expr of
         Can.VarLocal n | n == name -> inline
-        Can.VarLocal n -> rustSafeIdent n ++ if n `Set.member` ecCloneVars ctx && not (n `Set.member` ecCopyVars ctx) && not (n `Set.member` ecNoCloneVars ctx) then ".clone()" else ""
+        Can.VarLocal n -> varLocalRead ctx False n
         Can.VarTopLevel mod n ->
             let modName = ModuleName._name mod
                 modPrefix = map (\c -> if c == '.' then '_' else c) modName
@@ -336,11 +336,8 @@ substVar ctx name inline = go
                             Ann.At _ (Can.VarKernel _ n2) -> n2 == "run" || n2 == "sequence" || n2 == "parallel"
                             _ -> False
                         as = map (\a -> case a of
-                             Ann.At _ (Can.VarLocal n2) | n2 == name -> inline
-                             Ann.At _ (Can.VarLocal n2) | noClone -> rustSafeIdent n2
-                             Ann.At _ (Can.VarLocal n2) ->
-                                 (let needClone = Set.member n2 (ecCloneVars ctx) && not (Set.member n2 (ecCopyVars ctx))
-                                  in if needClone then rustSafeIdent n2 ++ ".clone()" else rustSafeIdent n2)
+                             Ann.At _ (Can.VarLocal n2) | n2 == name, not (n2 `Set.member` ecThunkVars ctx) -> inline
+                             Ann.At _ (Can.VarLocal n2) -> varLocalRead ctx noClone n2
                              _ -> go a) args
                     in fs ++ "(" ++ intercalate ", " as ++ ")"
         Can.Let def body -> goDef def ++ go body
@@ -764,6 +761,24 @@ clonePreludeFor ctx vars = concatMap mk vars
          | otherwise = let v' = rustSafeIdent v
                        in "let " ++ v' ++ " = " ++ v' ++ ".clone(); "
 
+-- | #96: emit a `Can.VarLocal` read, honouring re-thunked SkyTask bindings.
+-- A name in `ecThunkVars` holds a `Fn() -> SkyTask` closure (a multi-use Task
+-- binding lowered to a re-buildable thunk), so every read CALLS it (`name()`)
+-- to produce a fresh future — matching Go's re-runnable-thunk Task semantics.
+-- The thunk-call takes ABSOLUTE priority over the `.clone()` logic: the
+-- per-closure capture-prelude already clones the (Clone) thunk closure when it
+-- is captured, so at the use site we only call it. `noCloneFn` lets the
+-- `Task.run`/`sequence`/`parallel` arg arms (which suppress the ordinary clone)
+-- reuse this — a thunk var still needs the call there. Outside the thunk set
+-- this is byte-identical to the inlined clone logic it replaces.
+varLocalRead :: EmitCtx -> Bool -> String -> String
+varLocalRead ctx noCloneFn n
+    | n `Set.member` ecThunkVars ctx = rustSafeIdent n ++ "()"
+    | (not noCloneFn) && n `Set.member` ecCloneVars ctx
+      && not (n `Set.member` ecCopyVars ctx)
+      && not (n `Set.member` ecNoCloneVars ctx) = rustSafeIdent n ++ ".clone()"
+    | otherwise = rustSafeIdent n
+
 -- | Helper: render a single function-call argument string, handling
 -- lambda capture cloning and VarLocal ownership.
 -- Clones every VarLocal argument by default (most Sky types implement Clone).
@@ -861,11 +876,7 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
            else if null captured
                 then closure
                 else "{ " ++ clones ++ closure ++ " }"
-    Can.VarLocal n ->
-        let needsClone = (not noCloneFn) && (n `Set.member` ecCloneVars ctx)
-                         && not (n `Set.member` ecCopyVars ctx)
-                         && not (n `Set.member` ecNoCloneVars ctx)
-        in if needsClone then rustSafeIdent n ++ ".clone()" else rustSafeIdent n
+    Can.VarLocal n -> varLocalRead ctx noCloneFn n
     _ -> exprToRustString ctx (Ann.At Ann.one a)
 
 -- | Emit a Rust string literal from a Haskell string.
@@ -1241,7 +1252,7 @@ peepholeArg ctx e = exprToRustString ctx e
 
 exprToRustInner :: EmitCtx -> Can.Expr_ -> String
 exprToRustInner ctx e = case e of
-    Can.VarLocal name -> rustSafeIdent name ++ if name `Set.member` ecCloneVars ctx && not (name `Set.member` ecCopyVars ctx) && not (name `Set.member` ecNoCloneVars ctx) then ".clone()" else ""
+    Can.VarLocal name -> varLocalRead ctx False name
     Can.VarTopLevel mod name ->
         let modName = ModuleName._name mod
             modPrefix = map (\c -> if c == '.' then '_' else c) modName
@@ -2295,6 +2306,45 @@ exprToRustInner ctx e = case e of
                         bind = "let " ++ n' ++ tyAnnot ++ " = " ++ exprToRustString ctx taskBody ++ "; "
                         wrap = "let " ++ n' ++ " = std::sync::Arc::new(std::sync::Mutex::new(" ++ n' ++ ")); "
                     in "{ " ++ bind ++ wrap ++ exprToRustString ctx body ++ " }"
+            -- #96 RE-THUNK: a `let`-bound SkyTask used ≥2 times where NOT every
+            -- use is a discard (the residual the single-use-move + Arc-all-discard
+            -- arms above leave behind). A `SkyTask = Pin<Box<dyn Future>>` is
+            -- move-only, so binding-once-using-twice would emit `cleanup.clone()`
+            -- → E0599. Lower the binding to a `Fn() -> SkyTask` closure that
+            -- REBUILDS the future on demand; every read site CALLS it (`name()`,
+            -- via ecThunkVars). This matches Go's re-runnable-thunk Task semantics
+            -- (each reference re-runs the effect), so a value used in two
+            -- mutually-exclusive branches runs at most once — identical to Go.
+            --   * Gate (a): SkyTask-valued RHS (isTaskValuedExpr).
+            --   * Gate (b): used ≥2 times (single use stays on the move arm).
+            --   * Gate (c): NOT all-discard — the Arc arm (placed FIRST) already
+            --     owns the all-discard case; this gate keeps the two DISJOINT
+            --     (the Arc arm's narrower `taskExprInnerType /= ""` vs this arm's
+            --     broader `isTaskValuedExpr` would otherwise overlap on a
+            --     `Task.fail`-rooted all-discard binding). [guardian C1]
+            -- The thunk's free vars are clone-captured INTO the closure (so the
+            -- closure is `Fn` + `'static` and the OUTER values survive other
+            -- uses); each use INSIDE the thunk clones (thunkCtx ecCloneVars) so a
+            -- second invocation doesn't move-out a once-captured value. The
+            -- closure is `Clone` (captures are Sky values, all `Clone`) + `Send`
+            -- + `Sync`, so the per-closure capture-prelude's `name.clone()` for a
+            -- sibling-closure capture is sound. RESIDUAL (no regression vs today):
+            -- if a free var is itself a non-Clone Task that is NOT thunked, the
+            -- closure isn't Clone and a ≥2-sibling-capture would still fail —
+            -- exactly as it fails today. [guardian C5]
+            Can.Def (Ann.At _ name) [] taskBody
+                | isTaskValuedExpr (ecSolvedTypes ctx) taskBody
+                , Just c <- Map.lookup name (collectVarLocalsMulti body), c >= 2
+                , not (allUsesDiscarded name body) ->
+                    let n' = rustSafeIdent name
+                        rhsFree  = Set.toList (collectVarLocals taskBody)
+                        clones   = clonePreludeFor ctx rhsFree
+                        thunkCtx = ctx { ecCloneVars = Set.union (ecCloneVars ctx) (Set.fromList rhsFree) }
+                        inner    = "move || " ++ exprToRustString thunkCtx taskBody
+                        thunkExpr = if null rhsFree then inner else "{ " ++ clones ++ inner ++ " }"
+                        bind     = "let " ++ n' ++ " = " ++ thunkExpr ++ "; "
+                        bodyCtx  = ctx { ecThunkVars = Set.insert name (ecThunkVars ctx) }
+                    in "{ " ++ bind ++ exprToRustString bodyCtx body ++ " }"
             -- A `let`-bound LAMBDA whose binding type is an effectful `Handler`
             -- (`… -> Task …`) is referenced as a value that flows into an
             -- `Arc<dyn Fn>` slot (e.g. `todosByMethod` passed to a
@@ -3731,6 +3781,31 @@ inferParamRustTypeFromRegions ctx pname = firstJust . go
     isFfiOpaqueSentinel _ = False
     useType region = case Map.lookup region (ecRegionTypes ctx) of
       Just t | not (hasTypeVars t), not (isFfiOpaqueSentinel t) -> Just (typeToRustString (ecRecordMap ctx) t)
+      -- #96 problem 2: a bare type-VARIABLE that resolves to an ENCLOSING fn's
+      -- Rust generic param — annotate the closure param with that generic name.
+      -- Rust can't always infer a generic closure param through nested-closure
+      -- indirection (E0282 on `move |result|` where `result : A`, the generic
+      -- threaded through `Task.andThen (\result -> … (\_ -> result))`). The
+      -- generic already carries Clone+PartialEq+Debug+Send+Sync+'static at the fn
+      -- header, so the annotation is SOUND — it only makes EXPLICIT the type the
+      -- param already has.
+      --
+      -- Resolution is by NAME when the solver's region-tvar name matches a header
+      -- generic; but the solver alpha-renames (the header's `a`→`A` shows up as
+      -- `TVar "c"` at the use site), so we ALSO accept the SOLE-GENERIC case: a
+      -- bare tvar in a fn with exactly ONE generic param can only BE that
+      -- generic. Sound because Sky does NOT generalise local `let` bindings
+      -- (`T.CLet [] []` carries no quantifiers), so a one-generic fn body has
+      -- exactly one logical type variable — there is no local polymorphic var a
+      -- bare tvar could otherwise denote.
+      --
+      -- FAIL-SAFE: a multi-generic fn whose region-tvar name doesn't match falls
+      -- through to Nothing and the param stays bare (byte-identical to before, no
+      -- regression). Container/arrow types that merely CONTAIN a tvar also fall
+      -- through (only a BARE tvar is a sound whole-param annotation).
+      Just (Can.TVar tv)
+        | mangleTVar tv `elem` ecGenParams ctx -> Just (mangleTVar tv)
+        | [only] <- ecGenParams ctx            -> Just only
       _                                                          -> Nothing
     -- Stop descending into any sub-scope that REBINDS `pname` — a shadowed use
     -- belongs to the inner binding, not this param, so its region type would

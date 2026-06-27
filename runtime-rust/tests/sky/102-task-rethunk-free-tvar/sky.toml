@@ -1,0 +1,5 @@
+[project]
+name = "102-task-rethunk-free-tvar"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
