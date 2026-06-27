@@ -311,7 +311,35 @@ Guardian-final on Stages 1-3: APPROVED CLEAN, all B1-B8 honored. Added a 64-deep
 recursion bound to `subst_self_projections` (guardian rewrite-opp #1 — defense-in-depth
 vs a rustc-impossible self-cyclic assoc; fail-closed on exceed).
 
-### Stage 4 — real async-stripe via multi-crate `--manifest` (NEXT)
-The cross-crate `C: StripeClient` resolves via WALL-G from a `--manifest` run including
-the facade `async-stripe`. The mechanism is fully proven on 94/95; Stage 4 is the
-real-crate manifest assembly + measurement.
+### Stage 4 — real async-stripe via multi-crate `--manifest` — MEASURED, reveals WALL-K
+
+Ran `--manifest [async-stripe-core(customer,deserialize) + async-stripe(default-tls,blocking)]`.
+Both rustdoc'd cleanly (core 126/779, facade 9/53). But `send` STILL drops
+`unmodellable-bound | StripeClient` (×25 unchanged) — WALL-G did NOT resolve the cross-crate `C`.
+
+**Root cause (confirmed by code read) — WALL-K, a distinct new wall.** WALL-G's cross-crate
+resolution is keyed via `LOCAL_TRAIT_ID_CANON_PATH` (crate-LOCAL traits only):
+- `single_concrete_impl_trait_key` (main.rs:9613-9618) HARD-GATES the bound trait to crate-local
+  (`LOCAL_TYPE_IDS` / `REACHABLE_PATHS`) — an external trait bound returns None (not even a
+  mono candidate).
+- `xc_unique_for_trait_key` (2588) resolves the canon ONLY via `LOCAL_TRAIT_ID_CANON_PATH`.
+
+Fixture 91 (shipped WALL-G) had the bound trait `Wire` **crate-local to the method's crate**
+(2-crate case). The real stripe is a **3-crate triangle**: `send<C: StripeClient>` is in
+async-stripe-**core**; `StripeClient` is in async-stripe-**client-core** (a dep — EXTERNAL to
+core); `impl StripeClient for Client` is in the **facade**. The external-trait bound is never
+routed to the XC index.
+
+**WALL-K fix sketch (#92).** Extend the two gates to handle an EXTERNAL trait bound: resolve its
+canonical path via the existing `EXTERNAL_TRAIT_PATH_BY_ID` (collect_external_trait_paths) and
+consult `xc_unique_for_canon(canon)` against the global index (which the facade's
+`mirror_into_global_xc_index` populates — it already accepts an external-trait impl whose
+impl+concrete-`for` are crate-local). Soundness rests on the SAME uniqueness argument WALL-G
+made (the manifest is the closed world; a UNIQUE impl across the project's deps is the mono
+target). The make-or-break is canonical-path agreement: core's external `StripeClient` and the
+facade's external `StripeClient` must normalise to the same canon (both via the shared
+`stripe_client_core` lib) — to verify in the design. Needs a guardian DESIGN (cross-crate
+soundness danger zone) + then a heavy real-stripe cargo build to confirm end-to-end.
+
+The WALL-J Self::Output mechanism is DONE; WALL-K is the last cross-crate-client piece for the
+real `CreateCustomer::new(id).send(&client)`.

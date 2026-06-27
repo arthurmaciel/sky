@@ -44,6 +44,17 @@ generic-self-rejected / missing-sibling / wrong-trait), 217 total. Gate-wired
 tests), `runtime-rust/scripts/ffi-fixtures-test.sh` (`run_inherent_self_output` + 94 in
 ALL_FIXTURES + dispatch), fixture `runtime-rust/tests/sky/94-ffi-inherent-self-output/`, spec §11.
 
+### Stage 4 measurement (2026-06-26 21:10) — real async-stripe reveals WALL-K (#92)
+`--manifest [async-stripe-core(customer,deserialize) + async-stripe(default-tls,blocking)]` both
+rustdoc'd clean, but the real `send` STILL drops `unmodellable-bound StripeClient` (×25) — WALL-G
+did NOT resolve cross-crate `C`. Root cause (code-read confirmed): WALL-G keys cross-crate
+resolution via `LOCAL_TRAIT_ID_CANON_PATH` (crate-LOCAL traits only); fixture 91 had the bound
+trait crate-local to the method. Real stripe is a 3-crate triangle — `send<C: StripeClient>` in
+core, `StripeClient` in client-core (external to core), impl in the facade. An external trait
+bound is hard-gated out (`single_concrete_impl_trait_key` 9613-9618) before the XC index. Filed
+WALL-K (#92): route an external bound's canon via `EXTERNAL_TRAIT_PATH_BY_ID` + `xc_unique_for_canon`.
+The WALL-J Self::Output mechanism is DONE; WALL-K is the last cross-crate-client piece. Spec §11 Stage 4.
+
 ### Stage 2+3 (same commit) — async + `Result<_, C::Err>` + generic `<C: Client>` — ZERO extra code
 Fixture `95-ffi-inherent-self-output-async` mirrors the REAL stripe `send` shape in one crate:
 inherent `async fn send<C: LocalClient>(&self, c: &C) -> Result<<Self as Req>::Output, C::Err>` +
