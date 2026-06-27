@@ -31,6 +31,38 @@ const CANVAS_H: usize = 720;
 /// panic. 100_000 is far above any real terminal (Go's tui cap is 50_000).
 const MAX_CELLS: usize = 100_000;
 
+/// Hard recursion-depth bound for the Element/Html tree walk. A deeply-nested
+/// (program- or input-built) tree would otherwise overflow the native stack in
+/// `render_node` / `extract_text` / `html_text` (no tail-call elimination). At the
+/// limit the walk stops and emits nothing (empty block / empty string). 1024 is
+/// far beyond any real UI nesting.
+const MAX_RENDER_DEPTH: usize = 1024;
+thread_local! {
+    static RENDER_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+/// RAII depth guard shared by the three mutually/self-recursive tree walkers.
+/// `enter()` returns `None` once `MAX_RENDER_DEPTH` is reached (caller stops
+/// descending); otherwise it increments and decrements on drop (incl. unwind).
+struct DepthGuard;
+impl DepthGuard {
+    fn enter() -> Option<DepthGuard> {
+        RENDER_DEPTH.with(|d| {
+            let n = d.get();
+            if n >= MAX_RENDER_DEPTH {
+                None
+            } else {
+                d.set(n + 1);
+                Some(DepthGuard)
+            }
+        })
+    }
+}
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        RENDER_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Canvas {
     px_per_cell_x: f64,
@@ -1118,6 +1150,11 @@ fn render_node<M: Clone>(
     ctx: &mut Ctx<M>,
     avail_w: usize,
 ) -> Rendered {
+    // Bound recursion depth (stack-overflow guard on a deeply-nested tree).
+    let _depth = match DepthGuard::enter() {
+        Some(g) => g,
+        None => return Rendered { block: Block::default(), hits: vec![] },
+    };
     match node {
         Element::Empty => Rendered { block: Block::default(), hits: vec![] },
         Element::Text(t) => {
@@ -1362,6 +1399,10 @@ fn render_node<M: Clone>(
 /// hatch rendered in a terminal): concatenate `HText`/`HRaw` leaves, recursing
 /// into elements. Markup/attrs are dropped — the terminal shows text only.
 fn html_text<M>(h: &Html<M>) -> String {
+    let _depth = match DepthGuard::enter() {
+        Some(g) => g,
+        None => return String::new(),
+    };
     // Sanitize every leaf: this text is written straight to the terminal stream,
     // so an unescaped `\x1b` in attacker-controlled `Ui.html` content would inject
     // ANSI/OSC sequences (cursor moves, window-title, OSC-52 clipboard write).
@@ -1375,6 +1416,10 @@ fn html_text<M>(h: &Html<M>) -> String {
 /// Extract the concatenated text content of an element subtree (Go's
 /// `extractTextContent` — flattens every `Text` leaf, space-joining nested ones).
 fn extract_text<M>(el: &Element<M>) -> String {
+    let _depth = match DepthGuard::enter() {
+        Some(g) => g,
+        None => return String::new(),
+    };
     match el {
         // Sanitize: paragraph/textColumn text flows here to the terminal stream;
         // an unescaped `\x1b` would inject ANSI/OSC sequences (same vector as the
