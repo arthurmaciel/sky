@@ -347,8 +347,8 @@ isNumericRust t = t `elem`
 -- SCALAR numeric param/field/ctor-arg cast (guardian #82 B8): `argCall` (method
 -- args), `setValExpr` (field setters), `ctorArgOwned` (enum ctors) — each top-level
 -- + its Option<numeric> arm — all route here. (A `Vec<numeric>` element write in a
--- setter/ctor still truncates per-element — tracked separately; a method-arg
--- Vec<numeric> mismatch is a LOUD E0308, fail-safe.) `e` must be a side-effect-free
+-- setter/ctor also routes here per-element for an int→int-narrowing element (#94);
+-- a FLOAT-source element keeps Rust's already-saturating `as`.) `e` must be a side-effect-free
 -- expr (a bound local) — the `isize` arm evaluates it more than once.
 --
 -- Platform-correctness BY CONSTRUCTION (guardian #82 Q2): `usize`/`isize` are
@@ -1191,12 +1191,20 @@ emitRustFile kernelName pkg =
                 let base = "arg0" in
                 case seqKind setFieldRawTy of
                     Just (SeqKind Owned ElemU8) -> "to_u8_vec(&" ++ base ++ ")"
-                    Just (SeqKind Owned (ElemGeneral elemRust _)) ->
+                    Just (SeqKind Owned (ElemGeneral elemRust elemSky)) ->
                         -- Sky `List T` is `Vec<declElem>`; map to the field's
                         -- `Vec<elemRust>` only when the element widths differ.
+                        -- [#94] int→int narrowing must SATURATE (Rust `as` WRAPS —
+                        -- the banned silent coercion); route through `numSaturate`.
+                        -- A FLOAT source elem (elemSky == "Float", i.e. the Sky
+                        -- list is `Vec<f64>`) keeps bare `as`: float→int `as` is
+                        -- already saturating (Rust ≥1.45) and →f32 is lossy-total,
+                        -- and numSaturate's i64-literal clamps assume an i64 elem.
                         if elemRust `elem` ["i64", "f64"] || not (isNumericRust elemRust)
                         then base   -- already the matching Vec<T>
-                        else base ++ ".into_iter().map(|x| x as " ++ elemRust ++ ").collect()"
+                        else if elemSky == "Float"
+                             then base ++ ".into_iter().map(|x| x as " ++ elemRust ++ ").collect()"
+                             else base ++ ".into_iter().map(|x| " ++ numSaturate elemRust "x" ++ ").collect()"
                     Just _ -> base   -- slice/array field shapes don't reach here (not in closed set)
                     Nothing
                         | Just innerRaw <- stripGeneric1 "Option" setFieldRawTy ->
@@ -1259,10 +1267,14 @@ emitRustFile kernelName pkg =
                     declTy = if j < length paramTypes then paramTypes !! j else "String"
                 in case seqKind rawTy of
                     Just (SeqKind Owned ElemU8) -> "to_u8_vec(&" ++ base ++ ")"
-                    Just (SeqKind Owned (ElemGeneral elemRust _)) ->
+                    Just (SeqKind Owned (ElemGeneral elemRust elemSky)) ->
+                        -- [#94] same saturation rule as setValExpr; a FLOAT source
+                        -- elem (elemSky == "Float") keeps bare `as`.
                         if elemRust `elem` ["i64", "f64"] || not (isNumericRust elemRust)
                         then base
-                        else base ++ ".into_iter().map(|x| x as " ++ elemRust ++ ").collect()"
+                        else if elemSky == "Float"
+                             then base ++ ".into_iter().map(|x| x as " ++ elemRust ++ ").collect()"
+                             else base ++ ".into_iter().map(|x| " ++ numSaturate elemRust "x" ++ ").collect()"
                     Just _ -> base
                     Nothing
                         | Just innerRaw <- stripGeneric1 "Option" rawTy ->

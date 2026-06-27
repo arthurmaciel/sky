@@ -146,6 +146,13 @@ spec = do
             numSaturate "f64" "a" `shouldBe` "a"
             numSaturate "i64" "a" `shouldBe` "a"
 
+    -- #94 (Vec<numeric> element saturation in field-setter/enum-ctor) routes the
+    -- int→int-narrowing element through numSaturate (above) and keeps bare `as`
+    -- for a float-source element (gated on the carried `ElemGeneral _ "Float"`
+    -- classification). The end-to-end proof is fixture 97 (Pack::Nums(Vec<u32>):
+    -- 5_000_000_000 → 4294967295 per element). No separate unit here — the
+    -- per-element string is exactly numSaturate's, already covered above.
+
     describe "skyTypeToRustClosed (closed set)" $ do
         it "maps every primitive" $ do
             skyTypeToRustClosed tInt   `shouldBe` Right "i64"

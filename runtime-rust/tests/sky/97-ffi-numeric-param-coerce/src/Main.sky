@@ -3,6 +3,11 @@ module Main exposing (main)
 -- #82 — numeric param-width coercion (SATURATING) on the regular inherent path.
 -- `widen` mixes usize/u32/f32 params; `echo_u32` proves SATURATION (a Sky Int >
 -- u32::MAX clamps to u32::MAX, never wraps).
+-- #94 — Vec<numeric> ELEMENT saturation through the auto enum ctor:
+-- `nums_new_variant_from_pack` writes a Sky `List Int` (Vec<i64>) into a
+-- `Pack::Nums(Vec<u32>)` variant; each element must clamp per-element
+-- (5_000_000_000 → 4294967295), never wrap. (A narrowing field SETTER is
+-- fail-closed by the inspector, so the enum ctor is the reachable Vec-narrow site.)
 import Sky.Core.Prelude exposing (..)
 import Sky.Core.Task as Task
 import Sky.Core.Error as Error
@@ -20,11 +25,7 @@ main =
                     -- echo_u32 with 5_000_000_000 (> u32::MAX) saturates to 4294967295.
                     case C.echo_u32_from_calc calc 5000000000 of
                         Ok sat ->
-                            if w == 20 && sat == 4294967295 then
-                                println "numparam widen=20 sat=4294967295 [ALL OK]"
-
-                            else
-                                println ("UNEXPECTED widen=" ++ String.fromInt w ++ " sat=" ++ String.fromInt sat)
+                            checkPack w sat
 
                         Err e ->
                             println ("echo-failed: " ++ Error.toString e)
@@ -34,3 +35,19 @@ main =
 
         Err e ->
             println ("new-failed: " ++ Error.toString e)
+
+
+-- #94 — Vec<u32> per-element saturation: [5e9, 7, 100] → [4294967295, 7, 100],
+-- total = 4294967295 + 7 + 100 = 4294967402.
+checkPack : Int -> Int -> Task Error ()
+checkPack w sat =
+    case C.total_from_pack (C.nums_new_variant_from_pack [ 5000000000, 7, 100 ]) of
+        Ok packTotal ->
+            if w == 20 && sat == 4294967295 && packTotal == 4294967402 then
+                println "numparam widen=20 sat=4294967295 packTotal=4294967402 [ALL OK]"
+
+            else
+                println ("UNEXPECTED widen=" ++ String.fromInt w ++ " sat=" ++ String.fromInt sat ++ " packTotal=" ++ String.fromInt packTotal)
+
+        Err e ->
+            println ("pack-total-failed: " ++ Error.toString e)
