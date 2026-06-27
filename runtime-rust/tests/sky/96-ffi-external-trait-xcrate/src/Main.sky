@@ -1,8 +1,9 @@
 module Main exposing (main)
 
--- WALL-K (#92): the 3-crate triangle — `Trip.go<T: Walker>(w)` where Walker is an
--- EXTERNAL trait (crate B) with its unique impl `Boots` in crate C. WALL-K resolves
--- T → Boots cross-crate. Result<String, T::Err> = Task Error String.
+-- WALL-K (#92) + WALL-J∘WALL-K compose: the 3-crate triangle. `Trip.go2<T: Walker>` is the
+-- EXACT real-stripe `send` shape — returns `<Self as Req>::Output` (WALL-J sibling-assoc over
+-- the EXTERNAL `Req` trait, impl crate-local) AND `T::Err` for a cross-crate `T: Walker`
+-- (WALL-K). Walker is EXTERNAL (crate B); its unique impl `Boots` is in crate C.
 import Sky.Core.Prelude exposing (..)
 import Sky.Core.Task as Task
 import Sky.Core.Error as Error
@@ -17,16 +18,21 @@ main =
         Ok trip ->
             case I.new_from_boots () of
                 Ok boots ->
-                    M.go_from_trip trip boots
+                    M.go2_from_trip trip boots
                         |> Task.andThen
-                            (\s ->
-                                if s == "trip:x:boots" then
-                                    println "xtrait=trip:x:boots [ALL OK]"
+                            (\oc ->
+                                case M.shown_from_outcome oc of
+                                    Ok s ->
+                                        if s == "trip2:x:boots" then
+                                            println "xtrait-compose go2=trip2:x:boots [ALL OK]"
 
-                                else
-                                    println ("xtrait=UNEXPECTED " ++ s)
+                                        else
+                                            println ("go2=UNEXPECTED " ++ s)
+
+                                    Err e ->
+                                        println ("go2-shown-failed: " ++ Error.toString e)
                             )
-                        |> Task.onError (\e -> println ("go-failed: " ++ Error.toString e))
+                        |> Task.onError (\e -> println ("go2-failed: " ++ Error.toString e))
 
                 Err e ->
                     println ("boots-failed: " ++ Error.toString e)

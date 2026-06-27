@@ -7,3 +7,5 @@ pub trait Walker: Send + Sync + 'static {
     type Err: Debug;
     fn step(&self) -> String;
 }
+
+pub trait Req { type Output; }

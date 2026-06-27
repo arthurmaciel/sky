@@ -5,7 +5,10 @@
 //! is in a THIRD crate (C). The 3-crate triangle WALL-K must close: `T: Walker` resolves to
 //! `walk_impl::Boots` via the global XC index keyed by Walker's canonical path. The `T::Err`
 //! error slot (newly reachable — guardian B3) must flow through sky_error_from_foreign.
-use walk_trait::Walker;
+use walk_trait::{Req, Walker};
+#[derive(Clone)]
+pub struct Outcome { msg: String }
+impl Outcome { pub fn shown(&self) -> String { self.msg.clone() } }
 #[derive(Clone)]
 pub struct Trip {
     name: String,
@@ -19,4 +22,8 @@ impl Trip {
     pub async fn go<T: Walker>(&self, w: &T) -> Result<String, T::Err> {
         Ok(format!("trip:{}:{}", self.name, w.step()))
     }
+    pub async fn go2<T: Walker>(&self, w: &T) -> Result<<Self as Req>::Output, T::Err> {
+        Ok(Outcome { msg: format!("trip2:{}:{}", self.name, w.step()) })
+    }
 }
+impl Req for Trip { type Output = Outcome; }

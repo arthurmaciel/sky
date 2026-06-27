@@ -1164,11 +1164,18 @@ run_external_trait_xcrate() {
   if ! rg -q 'go_from_trip : Trip -> Boots -> Task Error String' "$skyi" 2>/dev/null; then
     _fail "$base: go<T: Walker> did NOT resolve T→Boots cross-crate (WALL-K broken) — got: $(rg 'go_from_trip' "$skyi" 2>/dev/null)"; rm -rf "$wd"; return
   fi
+  # [WALL-J∘WALL-K compose] go2 = the EXACT real-stripe send shape: `<Self as Req>::Output`
+  # (WALL-J sibling-assoc over the EXTERNAL Req trait, impl crate-local) + cross-crate
+  # `T: Walker` (WALL-K) + `T::Err`, async. Proves the full composition the real
+  # `CreateCustomer::send<C: StripeClient>(&self) -> Result<<Self as StripeRequest>::Output, C::Err>` needs.
+  if ! rg -q 'go2_from_trip : Trip -> Boots -> Task Error Outcome' "$skyi" 2>/dev/null; then
+    _fail "$base: go2 (Self::Output ∘ cross-crate-T compose) did NOT bind — got: $(rg 'go2_from_trip' "$skyi" 2>/dev/null)"; rm -rf "$wd"; return
+  fi
 
   local outp="/tmp/ffi-fixture-$base.out"
   exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
   if rg -q '\[ALL OK\]' "$outp"; then
-    _ok "$base  (external-trait bound T: Walker → cross-crate walk_impl::Boots bound+ran 'trip:x:boots' · SKY_DCE=0 cargo-clean · [ALL OK])"
+    _ok "$base  (external-trait T: Walker → cross-crate Boots; go2 composes <Self as Req>::Output + cross-crate-C + C::Err = the real-stripe send shape · SKY_DCE=0 cargo-clean · [ALL OK])"
   else
     _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
   fi
