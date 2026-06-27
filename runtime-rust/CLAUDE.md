@@ -727,6 +727,23 @@ log** — hold it to the same bar as a code review:
   pure gain. When JSON-mode-logging an attacker-influenced string, it MUST pass
   `telemetry::json_escape` (escapes `"`/`\`/controls) or a crafted Debug forges
   log fields.
+- **A LOSSY inspector `TypeRef` silently disables correct codegen coercion — when
+  adding a codegen coercion for a type position, verify the inspector PRESERVES the
+  discriminating info (width/shape) in the TypeRef it emits there.** The projected/
+  UFCS call-AST builder (`type_to_typeref` in `tools/sky-ffi-inspect-rs`) COLLAPSES
+  every foreign numeric width to the Sky carrier (`usize`/`u32`/`f32` → `i64`/`f64`)
+  before emitting `TypeRef::Prim`. So the codegen numeric helpers
+  (`NumCoerce.numSaturate`/`numWidenScalar`/`numCarrier`) had nothing to coerce —
+  the wrapper sig + body both carried the carrier, the foreign call got/returned a
+  mismatched width → E0308 (or the whole method fail-closed-dropped). The fix was
+  inspector-side: `type_to_typeref_toplevel` preserves a DIRECT top-level numeric
+  width at the param/return positions (#95), with nested numerics still collapsing
+  (C6: inspector-admit ⊆ codegen-cover — codegen only coerces top-level scalar). The
+  INHERENT path (`parse_fn_item`, #16/#82) already preserved widths via its
+  rust_type-string mechanism; the PROJECTED path (`try_parametric_stub` →
+  `synthesiseGenericWrapper`) is a SEPARATE pipeline that needed the same fidelity.
+  General rule: codegen can only coerce what the inspector lets it SEE; a green
+  `sky build` that cargo-fails on a numeric width is the tell.
 - Known unfixed codegen/runtime gaps:
   `2026-06-15-skyshop-rs-codegen-gaps.md` (unconstrained-`Result`→`i64`;
   `Dict.union`/`List.sortBy` absences).
