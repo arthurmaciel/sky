@@ -24,6 +24,12 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const CANVAS_W: usize = 1280;
 const CANVAS_H: usize = 720;
+/// Hard ceiling on any single program-controlled cell dimension. `Ui.px`/`Ui.vw`/
+/// `Ui.vh` / `Ui.fillPortion` take an arbitrary Sky `Int`, so a resolved cell
+/// count must be clamped before it reaches a `.repeat()` / Vec allocation or a
+/// fill loop — otherwise a well-typed Sky.Tui view can request an OOM / capacity
+/// panic. 100_000 is far above any real terminal (Go's tui cap is 50_000).
+const MAX_CELLS: usize = 100_000;
 
 #[derive(Clone, Copy)]
 struct Canvas {
@@ -45,13 +51,17 @@ impl Canvas {
         if px <= 0 {
             return 0;
         }
-        ((px as f64 / self.px_per_cell_x).round() as i64).max(1) as usize
+        // DoS clamp: `px` is program-controlled (`Ui.px`/`Ui.vw : Int -> Length`),
+        // so an arbitrary i64 could resolve to a cell count that overflows a
+        // downstream `.repeat()` / Vec allocation (OOM / capacity panic). Cap at
+        // MAX_CELLS — far above any real terminal, so no legitimate layout loses.
+        (((px as f64 / self.px_per_cell_x).round() as i64).max(1) as usize).min(MAX_CELLS)
     }
     fn cells_y(self, px: i64) -> usize {
         if px <= 0 {
             return 0;
         }
-        ((px as f64 / self.px_per_cell_y).round() as i64).max(1) as usize
+        (((px as f64 / self.px_per_cell_y).round() as i64).max(1) as usize).min(MAX_CELLS)
     }
 }
 
@@ -199,7 +209,10 @@ fn height_length<M>(attrs: &[Attribute<M>]) -> Option<Length> {
 fn resolve_fixed_h(l: &Length, canvas: Canvas) -> Option<usize> {
     match l {
         Length::Px(n) => Some(canvas.cells_y(*n).max(1)),
-        Length::Vh(p) => Some(canvas.rows.saturating_mul((*p).max(0) as usize) / 100),
+        // Vh percentage is program-controlled (Ui.vh : Int -> Length): clamp the
+        // resolved rows to MAX_CELLS so a huge percent can't drive an unbounded
+        // pad-loop / Vec alloc (cells_x/y are already clamped; Vw/Vh bypass them).
+        Length::Vh(p) => Some((canvas.rows.saturating_mul((*p).max(0) as usize) / 100).min(MAX_CELLS)),
         Length::Content | Length::Fill(_) | Length::Vw(_) => None,
         Length::Min(n, inner) => {
             let mn = canvas.cells_y(*n);
@@ -253,8 +266,10 @@ fn resolve_fixed_w(l: &Length, available: usize, canvas: Canvas) -> Option<usize
         Length::Px(n) => Some(canvas.cells_x(*n)),
         Length::Content => None,
         Length::Fill(_) => Some(available), // a direct ask claims all; the ROW pass overrides
-        Length::Vw(p) => Some(canvas.cols.saturating_mul((*p).max(0) as usize) / 100),
-        Length::Vh(p) => Some(canvas.rows.saturating_mul((*p).max(0) as usize) / 100),
+        // Vw/Vh percentages are program-controlled: clamp to MAX_CELLS (see Vh in
+        // resolve_fixed_h — these bypass the already-clamped cells_x/y path).
+        Length::Vw(p) => Some((canvas.cols.saturating_mul((*p).max(0) as usize) / 100).min(MAX_CELLS)),
+        Length::Vh(p) => Some((canvas.rows.saturating_mul((*p).max(0) as usize) / 100).min(MAX_CELLS)),
         Length::Min(n, inner) => {
             let mn = canvas.cells_x(*n);
             Some(resolve_fixed_w(inner, available, canvas).map_or(mn, |c| c.max(mn)))
@@ -848,8 +863,12 @@ fn render_input<M: Clone>(
     } else {
         attr_str(attrs, "type").unwrap_or("text").to_string()
     };
-    let value = attr_str(attrs, "value").unwrap_or("").to_string();
-    let placeholder = attr_str(attrs, "placeholder").unwrap_or("").to_string();
+    // Sanitize value/placeholder: both are seeded from Sky `Attr.value` /
+    // `Attr.placeholder` (attacker-controllable model data) and rendered into the
+    // terminal stream — an unescaped `\x1b` would inject ANSI/OSC sequences.
+    let value: String = attr_str(attrs, "value").unwrap_or("").chars().map(sanitize_rune).collect();
+    let placeholder: String =
+        attr_str(attrs, "placeholder").unwrap_or("").chars().map(sanitize_rune).collect();
     // Checked detection. A checkbox uses `checked`/`value="true"`. A radio in the
     // common hand-rolled idiom (`value = if selected then val else ""`) signals
     // selection by a NON-EMPTY value — so a radio is checked when an explicit
@@ -1343,9 +1362,12 @@ fn render_node<M: Clone>(
 /// hatch rendered in a terminal): concatenate `HText`/`HRaw` leaves, recursing
 /// into elements. Markup/attrs are dropped — the terminal shows text only.
 fn html_text<M>(h: &Html<M>) -> String {
+    // Sanitize every leaf: this text is written straight to the terminal stream,
+    // so an unescaped `\x1b` in attacker-controlled `Ui.html` content would inject
+    // ANSI/OSC sequences (cursor moves, window-title, OSC-52 clipboard write).
     match h {
-        Html::HText(t) => t.clone(),
-        Html::HRaw(r) => r.clone(),
+        Html::HText(t) => t.chars().map(sanitize_rune).collect(),
+        Html::HRaw(r) => r.chars().map(sanitize_rune).collect(),
         Html::HElement(_, _, kids) => kids.iter().map(html_text).collect::<Vec<_>>().join(""),
     }
 }
@@ -1354,7 +1376,10 @@ fn html_text<M>(h: &Html<M>) -> String {
 /// `extractTextContent` — flattens every `Text` leaf, space-joining nested ones).
 fn extract_text<M>(el: &Element<M>) -> String {
     match el {
-        Element::Text(t) => t.clone(),
+        // Sanitize: paragraph/textColumn text flows here to the terminal stream;
+        // an unescaped `\x1b` would inject ANSI/OSC sequences (same vector as the
+        // Element::Text render path, which already sanitizes).
+        Element::Text(t) => t.chars().map(sanitize_rune).collect(),
         Element::Node(_, _, kids) | Element::TaggedNode(_, _, _, kids) => {
             kids.iter().map(extract_text).collect::<Vec<_>>().join(" ")
         }
@@ -1533,7 +1558,7 @@ fn render_grid_tracked<M: Clone>(
         .iter()
         .map(|t| match t {
             GridTrack::Px(n) => canvas.cells_x(*n).max(1),
-            GridTrack::Fr(n) => (leftover * (*n).max(0) as usize / fr_total).max(1),
+            GridTrack::Fr(n) => (leftover.saturating_mul((*n).max(0) as usize) / fr_total).max(1),
             GridTrack::Auto => (leftover / fr_total).max(1),
         })
         .collect();
@@ -1762,7 +1787,11 @@ fn distribute_col_fill(
         let share = if i == last {
             leftover.saturating_sub(used)
         } else {
-            leftover * portion(i) / portion_total
+            // saturating_mul: `portion(i)` is caller-controlled (Ui.fillPortion),
+            // so `leftover * portion` can overflow usize. portion_total >= portion(i),
+            // so the quotient stays <= leftover and the saturation never changes a
+            // valid result.
+            leftover.saturating_mul(portion(i)) / portion_total
         };
         used += share;
         if let Some(child) = children.get_mut(i) {

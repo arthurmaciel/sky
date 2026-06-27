@@ -1,34 +1,44 @@
 // System helpers — some generic over E (when returning SkyTask).
 use super::*;
 
-// `std::env::set_var`/`remove_var` are documented as NOT thread-safe; under
-// `Task.parallel` (Task-tier `System.setenv`/`unsetenv`/`loadEnv` compose with
-// it) two threads mutating the environment is a data race / UB by the std
-// contract. Serialise every mutation behind this process-global lock so a
-// concurrent mutator can't race another. (Concurrent readers on another thread
-// are still technically unsynchronised against this — but this removes the
-// mutator↔mutator race, which is the one reachable purely from env-Task
-// composition; Go's os.Setenv is likewise only mutex-guarded among Go callers.)
-static ENV_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// `std::env::set_var`/`remove_var` are documented as NOT thread-safe: a mutator
+// can reallocate the C `environ` block while another thread READS it
+// (`std::env::var` walks `environ`), which is a data race / use-after-free by the
+// std + POSIX contract — not just a mutator↔mutator hazard. Both are reachable
+// from Sky purely through env-Task composition under `Task.parallel`
+// (`System.setenv`/`unsetenv`/`loadEnv` are mutators; `System.getenv*` are
+// readers). Serialise BOTH sides behind one process-global RwLock: mutators take
+// the write lock (exclusive), readers take the read lock (shared with each other,
+// excluded against any mutator). This closes the reader↔mutator race for every
+// Sky-originated access. (A non-Sky dependency reading `environ` without this lock
+// is outside our reach — but every Sky path is now serialised.)
+static ENV_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
-/// Set an environment variable under the process-global env-mutation lock.
+/// Read an environment variable under the shared env read lock (excluded against
+/// any concurrent mutator so the `environ` walk can't race a realloc).
+fn read_env_var(key: &str) -> Result<String, std::env::VarError> {
+    let _guard = ENV_LOCK.read().unwrap_or_else(|p| p.into_inner());
+    std::env::var(key)
+}
+
+/// Set an environment variable under the exclusive env write lock.
 fn locked_set_var(key: &str, val: &str) {
     // std::env::set_var PANICS on an empty key, a key containing '=' or NUL, or a
     // value containing NUL. Skip such a key/value (no-op) rather than panic.
     if key.is_empty() || key.contains('=') || key.contains('\0') || val.contains('\0') {
         return;
     }
-    let _guard = ENV_MUTATION_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.write().unwrap_or_else(|p| p.into_inner());
     std::env::set_var(key, val);
 }
 
-/// Remove an environment variable under the process-global env-mutation lock.
+/// Remove an environment variable under the exclusive env write lock.
 fn locked_remove_var(key: &str) {
     // std::env::remove_var panics on the same invalid keys as set_var — guard it.
     if key.is_empty() || key.contains('=') || key.contains('\0') {
         return;
     }
-    let _guard = ENV_MUTATION_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.write().unwrap_or_else(|p| p.into_inner());
     std::env::remove_var(key);
 }
 
@@ -125,7 +135,7 @@ pub fn system_exit(code: i64) -> ! {
 /// `String` (the default plugs the missing case at the call site).
 pub fn system_getenv<E: Send + From<String> + 'static>(key: String) -> SkyTask<E, String> {
     Box::pin(async move {
-        match std::env::var(&key) {
+        match read_env_var(&key) {
             Ok(v) => ok_res(v),
             Err(_) => {
                 let msg = format!("environment variable {:?} is not set", key);
@@ -136,7 +146,7 @@ pub fn system_getenv<E: Send + From<String> + 'static>(key: String) -> SkyTask<E
 }
 /// `Sky.Core.System.getenvOr key default` — the env var, or `default` when unset.
 pub fn system_getenv_or(key: String, default: String) -> String {
-    std::env::var(&key).unwrap_or(default)
+    read_env_var(&key).unwrap_or(default)
 }
 
 /// `System.getenvInt key : String -> Task Error Int`. Unset → `Err` (Go's
@@ -145,7 +155,7 @@ pub fn system_getenv_or(key: String, default: String) -> String {
 /// `getenv`/`cwd`).
 pub fn system_getenv_int<E: Send + From<String> + 'static>(key: String) -> SkyTask<E, i64> {
     Box::pin(async move {
-        let r: Result<i64, String> = match std::env::var(&key) {
+        let r: Result<i64, String> = match read_env_var(&key) {
             Err(_) => Err(format!("environment variable {:?} is not set", key)),
             Ok(v) => v
                 .trim()
@@ -164,7 +174,7 @@ pub fn system_getenv_int<E: Send + From<String> + 'static>(key: String) -> SkyTa
 /// `Err` (NotFound); anything else → `Err` (not-a-bool).
 pub fn system_getenv_bool<E: Send + From<String> + 'static>(key: String) -> SkyTask<E, bool> {
     Box::pin(async move {
-        let r: Result<bool, String> = match std::env::var(&key) {
+        let r: Result<bool, String> = match read_env_var(&key) {
             Err(_) => Err(format!("environment variable {:?} is not set", key)),
             Ok(v) => match v.trim().to_lowercase().as_str() {
                 "true" | "yes" | "1" | "on" | "y" | "t" => Ok(true),
@@ -241,7 +251,7 @@ pub fn system_load_env<E: Send + 'static>(_: ()) -> SkyTask<E, ()> {
                 if let Some((k, v)) = line.split_once('=') {
                     let k = k.trim();
                     let v = v.trim().trim_matches('"').trim_matches('\'');
-                    if std::env::var(k).is_err() { locked_set_var(k, v); }
+                    if read_env_var(k).is_err() { locked_set_var(k, v); }
                 }
             }
         }
