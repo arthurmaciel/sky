@@ -218,17 +218,14 @@ pub(crate) fn ssrf_pinned_ws_addr(url: &str) -> Result<Option<SocketAddr>, Strin
 /// returning the resolved address.  Used in the redirect policy callback
 /// where we only have a URL and cannot rebuild the client.
 ///
-/// SECURITY — residual redirect-hop rebind window: unlike the initial-request
-/// path (which PINS the vetted IP into reqwest's resolver via
-/// `resolve_to_addrs`, closing the TOCTOU per the doc on
-/// `resolve_first_non_private_addr`), this validate-then-discard call leaves a
-/// gap: the address that passed the check here is NOT the address the redirect
-/// hop connects to — reqwest re-resolves the host at connect time, so a DNS
-/// rebind between this check and the TCP connect can still reach a private host.
-/// Fully closing it needs a custom `reqwest::dns::Resolve` that runs
-/// `is_private_ip` at resolution time for every hop (tracked as a redesign;
-/// see the deferred SSRF finding). Operators needing a hard guarantee today
-/// should disable redirect following on the client.
+/// SECURITY — redirect-hop scheme/host + IP-literal check. The DNS-rebind window
+/// this once left open (validate-then-discard: the vetted address was not the one
+/// reqwest re-resolved at connect) is now CLOSED by `http_client::DenyPrivateResolver`,
+/// a `reqwest::dns::Resolve` that runs `is_private_ip` at resolution time for EVERY
+/// hop under `SKY_HTTP_DENY_PRIVATE` (so reqwest connects only to vetted addrs, no
+/// re-resolve by name). This function remains the literal/scheme guard and a
+/// belt-and-suspenders layer — IP-literal redirect targets bypass the resolver, so
+/// the per-hop `ssrf_check_url` call is still mandatory.
 ///
 /// Returns `Ok(())` if allowed, `Err(message)` if blocked.
 fn check_host_not_private(host: &str) -> Result<(), String> {

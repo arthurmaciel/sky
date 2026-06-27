@@ -83,6 +83,50 @@ pub struct HttpRequest {
 /// the Email SES path — so the guard can NEVER be missing from a request path
 /// (the bug class this closes: a new path that built its own client without the
 /// check). When the guard is off, installs the caller's plain redirect policy.
+/// Fail-closed DNS resolver vetting EVERY hostname reqwest resolves (initial AND
+/// every redirect hop) at connect time against `ssrf::is_private_ip`, returning
+/// only non-private addresses. Closes the redirect-rebinding TOCTOU the per-hop
+/// URL re-check left open: `ssrf_check_url` validated a hostname then DISCARDED the
+/// address, so reqwest re-resolved it by name at connect and could hit a rebind
+/// target; with this resolver reqwest connects to exactly the vetted addrs (no
+/// re-resolve). Installed only under SKY_HTTP_DENY_PRIVATE. IP-literal targets
+/// bypass the resolver, so the literal/scheme checks below and the per-hop
+/// redirect `Policy` remain mandatory.
+#[derive(Debug)]
+struct DenyPrivateResolver;
+
+impl reqwest::dns::Resolve for DenyPrivateResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let resolved = tokio::task::spawn_blocking(move || {
+                use std::net::ToSocketAddrs;
+                // Port 0: reqwest substitutes the real port onto the returned addrs.
+                let addrs: Vec<std::net::SocketAddr> = (host.as_str(), 0u16)
+                    .to_socket_addrs()
+                    .map_err(|e| e.to_string())?
+                    .filter(|a| !crate::sky_runtime::ssrf::is_private_ip(a.ip()))
+                    .collect();
+                if addrs.is_empty() {
+                    Err("http: blocked: host resolves only to private/blocked addresses (SKY_HTTP_DENY_PRIVATE)".to_string())
+                } else {
+                    Ok(addrs)
+                }
+            })
+            .await;
+            match resolved {
+                Ok(Ok(addrs)) => {
+                    let iter: Box<dyn Iterator<Item = std::net::SocketAddr> + Send> =
+                        Box::new(addrs.into_iter());
+                    Ok(iter)
+                }
+                Ok(Err(msg)) => Err(msg.into()),
+                Err(join) => Err(format!("http: blocked: DNS resolver task failed: {join}").into()),
+            }
+        })
+    }
+}
+
 pub(crate) fn ssrf_apply(
     mut builder: reqwest::ClientBuilder,
     url: &str,
@@ -107,6 +151,10 @@ pub(crate) fn ssrf_apply(
             .to_owned();
         let addr = resolve_first_non_private_addr(&host)?;
         builder = builder.resolve_to_addrs(host.as_str(), &[addr]);
+        // Pin EVERY hostname (the initial host's static override above + every
+        // redirect hop) through the vetting resolver so a redirect to a DIFFERENT
+        // hostname can't be re-resolved by name to a rebind target at connect.
+        builder = builder.dns_resolver(std::sync::Arc::new(DenyPrivateResolver));
     }
     builder = if follow_redirects {
         if deny {
