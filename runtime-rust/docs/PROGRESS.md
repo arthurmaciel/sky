@@ -17,6 +17,17 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 01:15 — #95 follow-up: skyi Sky-surface type must be Int/Float (not leaked width) + C6 fixture 99
+
+**What.** The C6 negative-fixture probe surfaced a #95 leak: preserving the foreign numeric width in the
+projected call-AST `TypeRef` made `sky_of_typeref` (the `.skyi` Sky-facing renderer) emit the raw width
+(`scale : Calc -> u32 -> Result Error Int`) — `u32`/`usize` are UNDEFINED Sky types. Fixed its `Prim`
+arm to map EVERY integer width → `Int`, `f32`/`f64` → `Float`. Isolated to the Sky surface; codegen reads
+the call-AST TypeRef via Haskell `renderTypeRef` (separate path), so the saturating coercion is untouched.
+i64/f64 byte-identical → no regression. Added fixture 99 (`99-ffi-nested-numeric-drop`, the C6 boundary:
+top-level u32 coerces+saturates while a nested `Option<usize>` sibling stays `Option Int` collapsed),
+wired into ALL_FIXTURES. Guardian final: CLEAN (call-graph verified). Commit `33ecfff5`.
+
 ## 2026-06-27 01:20 — #95 inspector half: foreign-width preservation activates the projected coercion (COMPLETE)
 
 **What.** The gating piece. The projected/UFCS call-AST builder (`try_parametric_stub`) recorded a
