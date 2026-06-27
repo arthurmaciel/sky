@@ -45,11 +45,17 @@ const ALL_MARKERS: &[&str] = &[
 /// render output AND the diff baseline (Go applies it before render + before
 /// storing the tree, so the diff compares two already-injected trees and never
 /// sees a marker-attr-vs-style-child asymmetry → no spurious replace).
+/// Hard recursion-depth bound for the style-injection tree walk — same rationale
+/// and value as html's MAX_HTML_DEPTH: a deeply-nested (attacker-influenced) tree
+/// would overflow the thread stack. Past the cap we stop descending (deeper nodes
+/// keep their markers) rather than abort the process.
+const MAX_STYLE_DEPTH: usize = 1024;
+
 pub fn apply_style_injections<M>(node: &mut Html<M>) {
-    inject_pass(node, &["data-sky-mq-q", "data-sky-mq-rules"], "data-sky-mq", &|id, a| build_mq(id, a));
-    inject_pass(node, &["data-sky-pc-rules"], "data-sky-pc", &|id, a| build_pc(id, a));
-    inject_pass(node, &["data-sky-tr-rules", "data-sky-tr-respect"], "data-sky-tr", &|id, a| build_tr(id, a));
-    inject_pass(node, &["data-sky-anim-rules"], "data-sky-anim", &|id, a| build_anim(id, a));
+    inject_pass(node, &["data-sky-mq-q", "data-sky-mq-rules"], "data-sky-mq", &|id, a| build_mq(id, a), 0);
+    inject_pass(node, &["data-sky-pc-rules"], "data-sky-pc", &|id, a| build_pc(id, a), 0);
+    inject_pass(node, &["data-sky-tr-rules", "data-sky-tr-respect"], "data-sky-tr", &|id, a| build_tr(id, a), 0);
+    inject_pass(node, &["data-sky-anim-rules"], "data-sky-anim", &|id, a| build_anim(id, a), 0);
     // A void element at the TREE ROOT is never self-handled (inject_pass skips
     // void self-build, since a void tag can take no child <style>) and has no
     // parent to hoist a sibling <style> after it (#409). Its markers would
@@ -72,7 +78,13 @@ fn inject_pass<M>(
     markers: &[&str],
     style_attr: &str,
     build: &impl Fn(&str, &[Attribute<M>]) -> String,
+    depth: usize,
 ) {
+    // Stack-overflow guard: stop descending a pathologically deep tree (deeper
+    // nodes keep their markers — a truncated injection beats a process abort).
+    if depth >= MAX_STYLE_DEPTH {
+        return;
+    }
     let (tag, attrs, kids) = match node {
         Html::HElement(t, a, k) => (t, a, k),
         _ => return,
@@ -88,7 +100,7 @@ fn inject_pass<M>(
     // after any void child that still carries a marker.
     let mut out: Vec<Html<M>> = Vec::with_capacity(kids.len());
     for mut child in std::mem::take(kids) {
-        inject_pass(&mut child, markers, style_attr, build);
+        inject_pass(&mut child, markers, style_attr, build, depth + 1);
         let hoist = match &mut child {
             Html::HElement(ct, ca, _) if is_void(ct) => build_style_node(ca, markers, style_attr, build),
             _ => None,
