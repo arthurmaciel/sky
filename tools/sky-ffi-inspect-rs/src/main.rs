@@ -4699,6 +4699,23 @@ fn collect_external_type_paths(doc: &serde_json::Value) -> HashMap<String, Strin
 ///      dep's own rustdoc, so we FAIL CLOSED rather than emit a path that may
 ///      E0603. (Pre-fix these already emitted the private def path and
 ///      cargo-failed; dropping is strictly sounder.)
+/// [#80] The EXACT set of `std::collections` types stably re-exported at the
+/// `std::collections::<Type>` ROOT (the contract rule 2 relies on): the 7
+/// containers + `TryReserveError` (root re-export since Rust 1.57). Every OTHER
+/// collections type (entries, iterators, drains, hashers — `hash_map::Entry`,
+/// `hash_map::RandomState`, …) lives only in a public SUBMODULE
+/// (`std::collections::hash_map::Entry`), so collapsing it to the root is E0432.
+/// Keep this EXACT: an EXTRA non-root type re-opens the over-collapse cargo-fail;
+/// a MISSING root re-export needlessly fail-closed-drops a valid binding.
+fn is_std_collections_root_reexport(last: &str) -> bool {
+    matches!(
+        last,
+        "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet"
+            | "VecDeque" | "BinaryHeap" | "LinkedList"
+            | "TryReserveError"
+    )
+}
+
 fn external_type_public_path(joined: &str) -> Option<String> {
     // (1) alloc → std re-export.
     let path = remap_alloc_to_std(joined);
@@ -4712,10 +4729,23 @@ fn external_type_public_path(joined: &str) -> Option<String> {
     let root = segs[0];
     let last = *segs.last()?;
 
-    // (2) std collections container — collapse private internals to the public
-    // `std::collections::<Type>` re-export.
+    // (2) std collections ROOT re-export — collapse private internals to the
+    // public `std::collections::<Type>` re-export. [#80] GATED on the root-reexport
+    // allowlist: only the 7 containers + `TryReserveError` are re-exported at the
+    // `std::collections` ROOT. A non-root collections type (`hash_map::Entry`,
+    // `hash_map::RandomState`, `hash_map::Iter`, `OccupiedEntry`, …) is re-exported
+    // at a PUBLIC SUBMODULE (`std::collections::hash_map::Entry`) — NOT the root —
+    // while its rustdoc DEF path threads PRIVATE internals
+    // (`std::collections::hash::map::Entry`). Collapsing it to
+    // `std::collections::Entry` is E0432; keeping the def path is E0603; and the
+    // public-submodule alias (`hash_map` vs `hash::map`) is not reconstructable
+    // without the dep rustdoc — so FAIL CLOSED (drop), sound over a wrong path.
+    // (Pre-#80 every such return cargo-failed E0432.)
     if (root == "std" || root == "core") && segs.get(1) == Some(&"collections") {
-        return Some(format!("std::collections::{last}"));
+        if is_std_collections_root_reexport(last) {
+            return Some(format!("std::collections::{last}"));
+        }
+        return None;
     }
 
     // (3) Root-public def path (`crate::Type`) — already public.
@@ -11704,6 +11734,50 @@ mod tests {
         assert_eq!(
             external_type_public_path("alloc::collections::btree::set::BTreeSet"),
             Some("std::collections::BTreeSet".to_string())
+        );
+    }
+
+    #[test]
+    fn wallc_r2_noncontainer_collections_type_fails_closed() {
+        // [#80] A NON-container `std::collections` type must NOT collapse to the
+        // root — it lives only in a public SUBMODULE, so `std::collections::Entry`
+        // / `std::collections::RandomState` are E0432. Fail closed (None) rather
+        // than emit a wrong path. (Pre-#80 every one of these collapsed to the root
+        // and cargo-failed.)
+        assert_eq!(
+            external_type_public_path("std::collections::hash::map::Entry"),
+            None
+        );
+        assert_eq!(
+            external_type_public_path("std::collections::hash::map::RandomState"),
+            None
+        );
+        assert_eq!(
+            external_type_public_path("std::collections::hash::map::Iter"),
+            None
+        );
+        assert_eq!(
+            external_type_public_path("std::collections::hash::map::OccupiedEntry"),
+            None
+        );
+        // The 7 ROOT-re-exported containers still collapse (positive guard).
+        for c in [
+            "HashMap", "HashSet", "BTreeMap", "BTreeSet", "VecDeque", "BinaryHeap",
+            "LinkedList",
+        ] {
+            assert_eq!(
+                external_type_public_path(&format!("std::collections::hash::map::{c}")),
+                Some(format!("std::collections::{c}")),
+                "root container {c} must still collapse"
+            );
+        }
+        // [#80] `TryReserveError` IS a root re-export (since Rust 1.57) — its real
+        // def path is `alloc::collections::TryReserveError` → root-level, so it
+        // must collapse (NOT drop), or a `Result<T, TryReserveError>` binding is
+        // needlessly lost.
+        assert_eq!(
+            external_type_public_path("alloc::collections::TryReserveError"),
+            Some("std::collections::TryReserveError".to_string())
         );
     }
 
