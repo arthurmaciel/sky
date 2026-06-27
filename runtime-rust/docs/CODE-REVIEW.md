@@ -42,7 +42,15 @@ Each batch: read → fix → clippy `--all-targets --all-features -D warnings` +
 rsa 0.9.10 (RUSTSEC-2023-0071 Marvin) — no upstream fix; deferred (tracked).
 Filed follow-ups: ~40 process-internal `SKY_*` env reads via read_env_var; render_node recursion depth limit; WS full-vs-closed error message; HTTP server header-read/idle timeout (parity-audit P1).
 
-**Next: MED (~110) then LOW (~281), in-boundary, by component.**
+**MED tier — in progress (guardian-approved, build-gated):**
+
+| Commit | MED findings fixed |
+|---|---|
+| `2877938d` | time.rs add_months/years/days_in_month i64/i32 overflow → saturating + i32::try_from; crypto.rs RSA sign panic → try_sign; list.rs NaN-nontransitive sort panic → catch_unwind |
+| `e3c8c4bd` | jwt.rs decode rejected any `aud` claim → validate_aud=false (parity); html.rs is_url_attr missing `data` (object data: XSS); file.rs temp perms 0600/0700 |
+| `fe2de983` | money.rs allocate dropped residue for negative totals (shares≠input) → sign-aware; unbounded FX registry → 16-char code + 4096-pair caps |
+
+**Next: remaining rt-core MED (auth bcrypt, csv, email, db, ws_client, http_client/ssrf, http_stream), then rt-live/tui/codegen/scripts MED, then LOW (~281). Continuing by component.**
 
 ### Deterministic tier (supply-chain + secgrep)
 
