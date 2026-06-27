@@ -82,22 +82,45 @@ what was bound). The remaining 13 are exactly Part A.
    rustdoc actually SUCCEEDED with, and ideally drop known-conflicting pairs). Verify
    no regression on stripe/firebase (their Cargo.toml now gets features too).
 
-## Part A — UFCS/generic-path missing drop gates (13 errors). Inspector-side.
+## Part A — remaining tail (10 errors, post-E0107, post-Part-B). Inspector-side.
 
-Theme: the `sky_ffi_generics.rs` (UFCS / generic-stub / trait-method / field-accessor)
-emission path lacks the fail-closed gates the main `parse_fn_item` path has. Each is
-a fail-closed-DROP (or owned-conversion). Exact sites (from the real build):
+E0107 gate SHIPPED (generic-struct field accessor; fixture 105). With Part B
+applied, the CLEAN-MEASURED remaining firestore `SKY_DCE=0` residual is **10**
+(`/tmp/fs73-partA.log`, committed Part B compiler). Two distinct emission paths:
 
-| site | shape | fix |
+### A1 — `sky_ffi_generics.rs` (UFCS/external-trait path), 4 errors — CLEAN DROPS
+
+| site (sky_ffi_generics.rs) | shape | fix |
 |---|---|---|
-| `get_documents_path -> &String` (UFCS) | return-borrow not owned | owned-copy (`.to_string()`) OR drop |
-| `ParentPathBuilder::as_ref -> &str` (UFCS) | return-borrow `&str` | owned-copy OR drop |
-| `try_into -> Result<i32>` (UFCS) | Result-returning ok_res-double-wrapped | flatten OR drop |
-| `parent_path -> FirestoreResult<ParentPathBuilder>` | Result double-wrap | flatten OR drop |
-| `from_message(&arg0)` | arg/return mismatch | inspect + drop/fix |
-| `FirestoreWithMetadata<T>` field-accessor | generic struct w/o `<T>` | DROP (can't monomorphise T) |
-| `VariantAccess<'de>::unit_variant` | serde-internal `'de` method | DROP |
-| `fluent_api::*::build_filter/aggregation/transform` ×3 | private-module fluent trait method on UFCS path | DROP (private module + the #68 fluent class) |
+| `:33` `<FirestoreValue as ::serde_core::de::VariantAccess<'de>>::unit_variant` | UFCS method sig references an undeclared lifetime `'de` (serde Deserialize-internal trait) | DROP — gate: a UFCS trait-method whose rendered path/sig introduces a lifetime the wrapper fn doesn't declare |
+| `:165` `<_ as ::firestore::fluent_api::select_filter_builder::FirestoreQueryFilterExpr>::build_filter` | E0603 — trait path runs through the PRIVATE `fluent_api` module (not publicly re-exported) | DROP — gate: UFCS trait path with a private-module segment + no public re-export (the #68 fluent class on the UFCS path) |
+| `:183` `…fluent_api::select_aggregation_builder::FirestoreAggregationExpr>::build_aggregation` | same (private `fluent_api`) | DROP |
+| `:254` `…fluent_api::document_transform_builder::FirestoreTransformExpr>::build_transform` | same (private `fluent_api`) | DROP |
+
+The existing private-module machinery (`REACHABLE_PATHS`, the ~line-2093 "external
+type whose canonical path runs through a private module" gate, the ~line-2493
+`trait_reachable` gate) does NOT catch these on the UFCS external-trait emission.
+**DELICATE: shares the path with WORKING public external-trait bindings** (From/Into/
+Display — fixtures 46/96), so the private-module gate must drop ONLY genuinely-private
+trait refs. Needs guardian review + verify 46/96 + firestore CRUD UFCS still bind.
+
+### A2 — `firestore_bindings.rs` (parse_fn_item path), 6 errors — FLATTEN-or-DROP
+
+| site (firestore_bindings.rs) | shape | fix |
+|---|---|---|
+| `:4328` `ok_res(arg0.parent_path(arg1.as_ref(), &arg2))` | method returns `Result<ParentPathBuilder, FirestoreError>` but is wrapped in `ok_res` (double-wrap) | flatten (`match … Ok(v)=>ok_res(v) Err=>err`) OR drop |
+| `:5489` `ok_res(FirestoreSerializationError::from_message(&arg0))` | method returns an ERROR struct, declared-return String | DROP (binding an error-ctor is not useful) |
+| 4 more E0308 (read /tmp/fs73-partA.log :141/:164/:189/:214) | characterise each | flatten/owned/drop |
+
+All fail-closed (conservative). A2's flatten is the same Result-returning-method
+handling the main path already does elsewhere — verify why these slip past it.
+
+### Plan (next pass)
+1. A1 first (cleanest, general): add the UFCS private-module + undeclared-lifetime
+   gates; verify firestore 10→6, no over-drop (fixtures 46/96 + 104/105 green).
+2. A2: characterise the 6 E0308, flatten Result-returning methods / drop error-ctors.
+3. Guardian-review each gate (over-drop risk on the shared UFCS path). Per-class
+   regression fixtures. Target firestore `SKY_DCE=0` → 0.
 
 All are conservative drops (fail-closed) except the return-borrow ones, which can bind
 via owned-copy (coverage win) — apply the existing `owned_copy_admissible` treatment
