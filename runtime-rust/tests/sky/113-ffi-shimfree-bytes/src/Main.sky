@@ -1,0 +1,48 @@
+module Main exposing (main)
+
+-- bytes MAIN functionality: build a Bytes buffer from data + read it back.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Bytes as Bytes
+import Std.Log exposing (println)
+
+
+check : Task Error ()
+check =
+    case Bytes.copy_from_slice_from_bytesBytes [ 104, 105 ] of
+
+        Ok buf ->
+            case Bytes.len_from_bytesBytes buf of
+
+                Ok 2 ->
+                    case Bytes.copy_from_slice_from_bytesBytes [ 104, 105 ] of
+
+                        Ok buf2 ->
+                            case Bytes.get_u8 buf2 of
+
+                                Ok 104 ->
+                                    Task.succeed ()
+
+                                Ok other ->
+                                    Task.fail (Error.unexpected ("get_u8=" ++ String.fromInt other))
+
+                                Err e ->
+                                    Task.fail e
+
+                        Err e ->
+                            Task.fail e
+
+                Ok n ->
+                    Task.fail (Error.unexpected ("len=" ++ String.fromInt n))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+
+main : Task Error ()
+main =
+    check |> Task.andThen (\_ -> println "[ALL OK]")
