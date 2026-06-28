@@ -5,7 +5,6 @@ entry = "src/Main.sky"
 backend = "rust"
 
 ["rust.dependencies"]
-serde_json = "1"
 url = "2"
-csv = "1"
 chrono = "0.4"
+time = "0.3"

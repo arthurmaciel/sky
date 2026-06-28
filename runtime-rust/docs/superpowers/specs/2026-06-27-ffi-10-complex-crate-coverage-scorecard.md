@@ -28,20 +28,45 @@ only via a wrapper shim — now binds DIRECTLY after the wall campaign (#44–#9
 + Part B (#100): `SKY_DCE=0` full-surface residual is down to **10** (from 124),
 and it is already USABLE via the owned CRUD path under default DCE (fixture 104).
 
-## What this establishes vs what remains
+## CRITICAL CAVEAT — classification ≠ working main functionality
 
-- **Establishes:** the auto-FFI machinery emits a rich constructable binding surface
-  for ≥10 complex crates shim-free — real client SDKs (redis/reqwest/rusqlite),
-  data formats (serde_json/csv/toml), and widely-used libs (chrono/url/uuid/semver).
-  A `drop` in any of these is fail-closed (never a cargo-fail), per the inspector's
-  gates.
-- **Remains (verification):** the scorecard is rustdoc *classification*; the gold
-  standard is a real `sky add` + `sky build` that is **cargo-clean** end-to-end.
-  firestore showed classification can hide residual cargo-fails (its 10). The
-  end-to-end cargo-clean sweep across this basket should run on **CI / a healthy
-  box** — the local dev box is memory-constrained (≈300 MB free after a 12-crate
-  rustdoc pass), so heavy multi-crate cargo builds are unreliable locally
-  ("no local sweeps; CI verifies"). Tracked as a task.
+The `rich`/`usable` verdict above is **rustdoc CLASSIFICATION** (how many wrappers
+the inspector emits). It is NOT proof the crate is usable. Verifying each crate's
+**MAIN functionality** end-to-end (real `sky add` + a program calling the crate's
+core API with real values + cargo-clean build + correct output) tells a very
+different, honest story:
+
+### GENUINELY shim-free — main functionality works (verified, real values), 5
+| crate | main functionality proven | fixture |
+|---|---|---|
+| semver | `parse "1.2.3"` + major/minor/patch + `VersionReq` match | 107 |
+| url | `Url::parse` + `scheme`/`host_str` (scheme=="https") | 108 |
+| chrono | `NaiveDate` calendar-date construction (y/m/d) | 108 |
+| time | `OffsetDateTime::from_unix_timestamp` | 108 |
+| hex | `encode [104,105] == "6869"` | 109 |
+
+### Main functionality BLOCKED by codegen/inspector gaps (NOT shim-free yet)
+| crate | main fn | blocked by |
+|---|---|---|
+| serde_json | `from_str` (parse) | #105 (`core::str::traits::FromStr` private path) + serde-deserialize-arg codegen bug (`as_i64` wrapper does `from_str::<Value>(&value)`) |
+| rusqlite | `Connection` (open/insert/query) | #107 — `Connection` is `!Send`/RefCell → can't be a Sky value |
+| bytes | construct from data | #107 — `From<&'static str>` impl picked (E0597) |
+| regex | `Regex::new` | #106 — inspector auto-enables nightly `pattern` feature → E0554 on stable |
+| csv | record reading | generic `Reader<R>` over the IO source — no clean bound path |
+| toml | parse / `Value` | private internal types (`SerBuffer`) on the usable path |
+
+**The honest state:** auto-FFI binds a large SURFACE for ≥10 complex crates, but the
+WORKING main functionality is **5 / 10**. Reaching 10 GENUINE requires fixing the
+gaps (#105, the serde-arg bug, #106, #107) — each unblocks a crate's core API. That
+is the real path; it is delicate inspector/codegen work, multi-session. A
+trivial-accessor call (`version_number()`, `default()`) is NOT a valid proof and
+must never be counted.
+
+## What remains
+- Fix #105/#106/#107 + the serde-deserialize-arg bug → re-verify serde_json /
+  bytes / regex / rusqlite (where !Send permits) main functionality.
+- Per-crate end-to-end build belongs on CI / a healthy box for the heavy SDKs
+  (redis/reqwest) — local dev box is memory-constrained (≈300 MB free).
 
 ## Reproduce
 
