@@ -36,7 +36,7 @@ the inspector emits). It is NOT proof the crate is usable. Verifying each crate'
 core API with real values + cargo-clean build + correct output) tells a very
 different, honest story:
 
-### GENUINELY shim-free — main functionality works (verified, real values), 5
+### GENUINELY shim-free — main functionality works (verified, real values), 6
 | crate | main functionality proven | fixture |
 |---|---|---|
 | semver | `parse "1.2.3"` + major/minor/patch + `VersionReq` match | 107 |
@@ -44,11 +44,19 @@ different, honest story:
 | chrono | `NaiveDate` calendar-date construction (y/m/d) | 108 |
 | time | `OffsetDateTime::from_unix_timestamp` | 108 |
 | hex | `encode [104,105] == "6869"` | 109 |
+| serde_json | `from_str "42"` (parse) + `as_i64` read (==42) | 111 |
+
+**serde_json was UNBLOCKED by fixing two ROOT-CAUSE gaps** (not by routing around
+them): #105 (inspector now emits the public `core::str::FromStr` path, not the
+private `core::str::traits::FromStr` — unblocks `from_str`/parse for EVERY FromStr
+type) + the serde-receiver over-deserialize (FfiInstance `serdeArgIdxs` excludes
+the receiver; `Value::as_i64(&self)` no longer mis-emits a `from_str::<Value>(&value)`
+prelude — unblocks EVERY serde-Value-receiver accessor: as_str/as_bool/as_f64/get/…).
+Guardian-approved; serde fixtures 73/79/81 regression-clean.
 
 ### Main functionality BLOCKED by codegen/inspector gaps (NOT shim-free yet)
 | crate | main fn | blocked by |
 |---|---|---|
-| serde_json | `from_str` (parse) | #105 (`core::str::traits::FromStr` private path) + serde-deserialize-arg codegen bug (`as_i64` wrapper does `from_str::<Value>(&value)`) |
 | rusqlite | `Connection` (open/insert/query) | #107 — `Connection` is `!Send`/RefCell → can't be a Sky value |
 | bytes | construct from data | #107 — `From<&'static str>` impl picked (E0597) |
 | regex | `Regex::new` | #106 — inspector auto-enables nightly `pattern` feature → E0554 on stable |

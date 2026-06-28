@@ -894,7 +894,12 @@ emitRustFile kernelName pkg =
                         -- [#47(a)] serde-bound param: Sky String → serde_json::Value.
                         -- The JSON is deserialized in `serdePrelude` and bound to `sv_j`;
                         -- `argCall` just names that local (to be used at the call site).
-                        | rawTy == "serde_json::Value" -> "sv_" ++ show j
+                        -- Gate on `declTy == "String"` to MATCH serdePrelude (#105
+                        -- sibling): a `Value`-HANDLE param (declTy == foreign type ==
+                        -- `serde_json::Value`) gets no `sv_j` prelude, so it must pass
+                        -- through as `base` (the `rawTy == declTy` arm below), NOT
+                        -- reference a non-existent `sv_j`.
+                        | rawTy == "serde_json::Value" && declTy == "String" -> "sv_" ++ show j
                         -- [#67] OWNED `String` host param (the firestore
                         -- `FirestoreDbOptions::new(project_id: String)` shape).
                         -- The wrapper holds an owned Sky `String` (`argN:
@@ -1036,14 +1041,23 @@ emitRustFile kernelName pkg =
                          _                           -> []
                 ]
             -- [#47(a)] serde-bound params: Sky `String` → `serde_json::Value`.
-            -- Each param whose raw Rust type is `serde_json::Value` is deserialized
-            -- BEFORE the call (C-G4: fallible, propagates Err via early return).
-            -- `argCall` references the bound local `sv_j` instead of `argJ`.
+            -- A param whose foreign Rust type is `serde_json::Value` AND whose
+            -- WRAPPER-declared type is `String` (Sky passes JSON text) is
+            -- deserialized BEFORE the call (C-G4: fallible, propagates Err via early
+            -- return); `argCall` then references the bound local `sv_j`.
+            -- GATE on `declTy == "String"` (#105 sibling): when the wrapper already
+            -- takes a `serde_json::Value` (the wrapper-declared type IS the foreign
+            -- type — e.g. an inherent method's `Value` RECEIVER like
+            -- `Value::as_i64(&self)`, or a `merge(a: Value, b: Value)` param), Sky
+            -- passes the Value HANDLE, not text — deserializing it is wrong (from_str
+            -- wants `&str`, gets `&Value` → E0308) AND pointless (the local is
+            -- unused). Such a param passes through as `base` in argCall.
             serdePrelude =
                 [ "let sv_" ++ show j ++ ": serde_json::Value = match serde_json::from_str::<serde_json::Value>(&arg" ++ show j ++ ") { Ok(v) => v, Err(e) => return SkyResult::Err(str_err(&format!(\"{:?}\", e))), };"
                 | j <- [0 .. nParams - 1]
                 , let rawTy = if j < nRawRustParam then rawRustParamTypes !! j else ""
                 , rawTy == "serde_json::Value"
+                , j < length paramTypes && paramTypes !! j == "String"
                 ]
             -- ── Field GETTER (S1) ──────────────────────────────────────
             -- A field getter reads the field BY VALUE from the receiver —

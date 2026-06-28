@@ -557,8 +557,19 @@ synthesiseGenericWrapper gf =
                 isSerdeRef TRSerdeValue    = True
                 isSerdeRef TRSerdeValueRef = True
                 isSerdeRef _               = False
+                -- Exclude the RECEIVER arg (#105 sibling — the serde_json `as_i64`
+                -- bug): an instance method on a serde type (e.g.
+                -- `Value::as_i64(&self)`) has its `Value` receiver typed
+                -- `TRSerdeValue`, but Sky passes the Value HANDLE — `renderCall`'s
+                -- `recvArg` uses the RAW `argN` (not `sv_j`), so a deserialize
+                -- prelude on the receiver is both WRONG (`from_str` wants `&str`,
+                -- gets `&Value` → E0308) and produces an UNUSED `sv_j`. Only a
+                -- NON-receiver serde value-arg (Sky `String` → `serde_json::Value`,
+                -- genuinely deserialised + referenced as `sv_j` at the call site)
+                -- gets the prelude.
+                recvArgIdx = maybe (-1) _recv_arg (_call_receiver call)
                 serdeArgIdxs = [ j | (j, tr) <- zip [0 :: Int ..] (_call_argTypes call)
-                                   , isSerdeRef tr ]
+                                   , isSerdeRef tr, j /= recvArgIdx ]
                 isAsync      = _call_isAsync call
                 -- The host return shape. A `Result<Ok, Err>` ctor ⇒ the host fn is
                 -- FALLIBLE; the OK arm carries the value the Sky surface returns.

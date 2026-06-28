@@ -4695,6 +4695,30 @@ fn collect_external_trait_paths(doc: &serde_json::Value) -> HashMap<String, Stri
             } else {
                 joined
             };
+            // [#105] rustdoc records a trait's DEFINITION path, which for some std
+            // traits traverses a PRIVATE re-export submodule. The UFCS qualifier
+            // then renders an unusable path (`<T as ::core::str::traits::FromStr>`
+            // → E0603 "module `traits` is private"). Normalise the known std private
+            // re-export submodule to its PUBLIC re-export path. `FromStr` lives in
+            // the private `core::str::traits` but is publicly re-exported at
+            // `core::str` (and `std::str`), so `::str::traits::` → `::str::`. This
+            // is the same class of known-correct path normalisation as the
+            // `alloc::`→`std::` remap above; it unblocks `from_str`/parse for every
+            // `FromStr` type (serde_json::Value, etc.). Other std private-module
+            // traits, if found, get the same treatment here (kept narrow + correct
+            // rather than a speculative privacy heuristic).
+            // Guardian C1: ANCHOR to the known std origin (mirrors the `alloc::`
+            // strip_prefix above) rather than an unanchored `.replace`, so a
+            // foreign crate with a genuine public `…::str::traits::X` path can't be
+            // false-rewritten. FromStr's def-path always starts `core::str::traits::`.
+            let public_path =
+                if let Some(r) = public_path.strip_prefix("core::str::traits::") {
+                    format!("core::str::{r}")
+                } else if let Some(r) = public_path.strip_prefix("std::str::traits::") {
+                    format!("std::str::{r}")
+                } else {
+                    public_path
+                };
             out.insert(id.clone(), public_path);
         }
     }

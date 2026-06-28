@@ -1,0 +1,35 @@
+module Main exposing (main)
+
+-- serde_json MAIN functionality: parse a JSON document + read a value.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Serde_json as Json
+import Std.Log exposing (println)
+
+
+check : Task Error ()
+check =
+    case Json.from_str "42" of
+
+        Ok v ->
+            case Json.as_i64_from_value v of
+
+                Ok (Just n) ->
+                    if n == 42 then
+                        Task.succeed ()
+
+                    else
+                        Task.fail
+                            (Error.unexpected ("as_i64=" ++ String.fromInt n))
+
+                _ ->
+                    Task.fail (Error.unexpected "as_i64 not Just")
+
+        Err e ->
+            Task.fail e
+
+
+main : Task Error ()
+main =
+    check |> Task.andThen (\_ -> println "[ALL OK]")

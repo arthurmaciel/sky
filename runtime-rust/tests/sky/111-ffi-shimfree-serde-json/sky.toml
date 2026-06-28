@@ -1,0 +1,8 @@
+[project]
+name = "111-ffi-shimfree-serde-json"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+["rust.dependencies"]
+serde_json = "1"
