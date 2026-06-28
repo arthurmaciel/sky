@@ -973,9 +973,11 @@ emitRustFile kernelName pkg =
                 | otherwise =
                     -- Absolute `::<crate>` path: never collide with a same-named
                     -- runtime kernel module re-exported at the app crate root.
-                    if null params
-                        then "::" ++ crateImport ++ "::" ++ fnName ++ serdeTurbofish ++ "()"
-                        else "::" ++ crateImport ++ "::" ++ fnName ++ serdeTurbofish ++ "(" ++ callArgs ++ ")"
+                    -- [#109] When call_path is non-empty the fn lives in a submodule;
+                    -- use the full crate-relative path so codegen calls
+                    -- `::jiff::civil::date(...)` not `::jiff::date(...)` (E0425).
+                    let callTarget = if null (_fnCallPath fn) then fnName else _fnCallPath fn
+                    in "::" ++ crateImport ++ "::" ++ callTarget ++ serdeTurbofish ++ "(" ++ callArgs ++ ")"
             -- Build the function body based on effect.  retCoerce lifts the
             -- raw Rust value into the declared return type (Option→SkyMaybe,
             -- Vec element map, numeric widening to i64/f64, &T→owned, opaque

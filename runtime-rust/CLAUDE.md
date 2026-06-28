@@ -854,6 +854,22 @@ log** — hold it to the same bar as a code review:
   no cache) which are authoritative. Corollary: a minimal stub that builds green
   does NOT prove the real crate works — the real wall may be a crate-specific shape
   the stub doesn't capture (→ real-crate/CI characterization, not stub-closeable).
+- **A free fn's CALL path is NOT `::<crate>::<name>` — submodule free fns
+  (`jiff::civil::date`) need the module segments, and the source MUST be the
+  PUBLIC reachable path, not `doc["paths"]`.** The free-fn handler used the bare
+  rustdoc `name` → codegen emitted `::jiff::date` for `::jiff::civil::date` →
+  E0425 (#109). `doc["paths"][id]` gives the DEFINITION path, which can be a
+  PRIVATE module for a re-export (the #105/`core::str::traits::FromStr` trap) →
+  E0603. The sound source is the `is_public`-gated, re-export-aware
+  `walk_module_with_path` (the #57 machinery that already computes public TYPE
+  paths): extend it to ALSO register public free fns into a sibling map
+  (`REACHABLE_FN_PATHS`), strip the leading crate segment, and have codegen
+  prepend `::<crateImport>::`. FAIL-CLOSED to `::crate::name` when the public
+  path is unprovable (status-quo E0425, never a NEW E0603). General to any
+  submodule free fn. `is_public` MUST gate BOTH fn branches (direct child + the
+  named re-export `pub use foo::bar` — the type branch leans on the
+  no-`--document-private-items` precondition; the fn branch adds the explicit
+  gate). Proof: fixture `114-ffi-shimfree-jiff`.
 - Known unfixed codegen/runtime gaps:
   `2026-06-15-skyshop-rs-codegen-gaps.md` (unconstrained-`Result`→`i64`;
   `Dict.union`/`List.sortBy` absences).

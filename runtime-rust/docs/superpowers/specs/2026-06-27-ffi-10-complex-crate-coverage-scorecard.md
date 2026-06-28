@@ -36,7 +36,7 @@ the inspector emits). It is NOT proof the crate is usable. Verifying each crate'
 core API with real values + cargo-clean build + correct output) tells a very
 different, honest story:
 
-### GENUINELY shim-free — main functionality works (verified, real values), 8
+### GENUINELY shim-free — main functionality works (verified, real values), 9
 | crate | main functionality proven | fixture |
 |---|---|---|
 | semver | `parse "1.2.3"` + major/minor/patch + `VersionReq` match | 107 |
@@ -47,6 +47,7 @@ different, honest story:
 | serde_json | `from_str "42"` (parse) + `as_i64` read (==42) | 111 |
 | regex | `Regex::new "^[0-9]+$"` + `is_match` (digits=T, "12a45"=F) | 112 |
 | bytes | `Bytes::copy_from_slice [104,105]` + `len==2` + `get_u8==104` | 113 |
+| jiff | `civil::date 2024 3 15` + `year`==2024 + `to_string`=="2024-03-15" | 114 |
 
 **serde_json was UNBLOCKED by fixing two ROOT-CAUSE gaps** (not by routing around
 them): #105 (inspector now emits the public `core::str::FromStr` path, not the
@@ -77,23 +78,29 @@ forced → `pattern` still dropped).
 tree-shaken when unused). Honest lesson: a SKY_DCE=0 residual ≠ a default-DCE main-fn
 blocker — always probe the main fn under default DCE before declaring a crate blocked.
 
-### The 9th / 10th — root-cause paths IDENTIFIED (each a distinct inspector/codegen fix)
-Three candidate complex crates were probed for the 9th/10th slot; each is blocked by a
-DISTINCT, real root-cause bug (filed — fix-first, no gaming):
+**jiff (9th) was UNBLOCKED by the #109 ROOT-CAUSE fix** (general): the inspector dropped
+the SUBMODULE from a free-fn CALL path → emitted `::jiff::date` for `::jiff::civil::date`
+→ E0425. Fix: route free-fn call paths through `REACHABLE_PATHS` (the public-path,
+re-export-aware #57 machinery — NOT `doc["paths"]` which can be private → the #105 trap),
+via a new `Function.call_path` (crate segment stripped) threaded inspector→FfiGen→Ffi.hs.
+Fail-closed to `::crate::name` (status quo) when the public path is unprovable; crate-root
+free fns byte-identical. Guardian 2-round APPROVE (design + final). General: unblocks any
+crate with free fns in submodules. Fixture 114.
+
+### The 10th — root-cause path IDENTIFIED (distinct inspector/codegen fix)
 | crate | main fn | root cause (filed) |
 |---|---|---|
-| jiff | `civil::date y m d` (calendar date) | inspector drops the SUBMODULE from a free-fn CALL path → emits `::jiff::date` for `::jiff::civil::date` → E0425. General (any free fn in a submodule). |
-| toml | parse → `Value` | `from_str` return-type dedup picks the `String`-returning variant, shadowing `Value::from_str` → no bound parse-to-Value path. #48-class (overload dedup by return type). |
+| toml | parse → `Value` | #110 — `from_str` return-type dedup picks the `String`-returning variant, shadowing `Value::from_str` → no bound parse-to-Value path. #48-class (overload dedup by return type). |
 | base64 | `encode`/`decode` | DEGENERATE: the FFI wrapper `base64_encode` collides with Sky's OWN `Std.Encoding.base64Encode` runtime kernel → E0659 ambiguous. base64 duplicates stdlib — a poor demonstrator; skip. |
 | rusqlite | `Connection` | `Connection` is `!Send`/RefCell → can't be a Sky value. Likely FUNDAMENTAL (needs a wrapper) — don't count; pick another 10th. |
 | csv | record reading | generic `Reader<R>` over the IO source — no clean bound path. |
 
 **The honest state:** auto-FFI binds a large SURFACE for ≥10 complex crates, and the
-WORKING main functionality is now **8 / 10**. The 9th is best reached via the jiff
-free-fn-submodule-path fix (general, tractable); the 10th via the toml `from_str`
-return-type-dedup fix (also general). Each is a fresh inspector+codegen cycle warranting
-its own guardian review — delicate, root-cause work, NOT trivial-accessor gaming. A
-trivial-accessor call (`version_number()`, `default()`) is NOT a valid proof.
+WORKING main functionality is now **9 / 10**. The 10th is best reached via the toml
+`from_str` return-type-dedup fix (#110, general — disambiguate overloaded statics by
+return type). It is a fresh inspector+codegen cycle warranting its own guardian review —
+delicate, root-cause work, NOT trivial-accessor gaming. A trivial-accessor call
+(`version_number()`, `default()`) is NOT a valid proof.
 
 ## What remains
 - Fix #105/#106/#107 + the serde-deserialize-arg bug → re-verify serde_json /

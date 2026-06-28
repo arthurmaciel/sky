@@ -1,0 +1,49 @@
+module Main exposing (main)
+
+-- jiff MAIN functionality: construct a civil calendar date + read it back.
+-- Proves #109: the free fn `jiff::civil::date` (a SUBMODULE free fn) binds.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Jiff as Jiff
+import Std.Log exposing (println)
+
+
+check : Task Error ()
+check =
+    case Jiff.date 2024 3 15 of
+
+        Ok d ->
+            case Jiff.year_from_civilDate d of
+
+                Ok 2024 ->
+                    case Jiff.date 2024 3 15 of
+
+                        Ok d2 ->
+                            case Jiff.to_string_from_civilDate d2 of
+
+                                Ok "2024-03-15" ->
+                                    Task.succeed ()
+
+                                Ok s ->
+                                    Task.fail (Error.unexpected ("to_string=" ++ s))
+
+                                Err e ->
+                                    Task.fail e
+
+                        Err e ->
+                            Task.fail e
+
+                Ok y ->
+                    Task.fail (Error.unexpected ("year=" ++ String.fromInt y))
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+
+main : Task Error ()
+main =
+    check |> Task.andThen (\_ -> println "[ALL OK]")

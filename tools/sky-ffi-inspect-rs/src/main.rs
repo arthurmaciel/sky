@@ -123,6 +123,11 @@ struct Function {
     // `_ffn_generic = Just`, so the whole field is dead for the Go path.
     #[serde(skip_serializing_if = "Option::is_none")]
     generic: Option<Generic>,
+    /// [#109] Public crate-relative call path for a free fn in a SUBMODULE
+    /// (`civil::date` — crate segment STRIPPED; codegen prepends `::<crate>::`).
+    /// Empty for methods, crate-root free fns, and Go. Free fns only.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    call_path: String,
 }
 
 // ── Wall #3 Scheme-A call-AST (mirror of Haskell Sky.Build.Rust.FfiCall) ──
@@ -1466,7 +1471,9 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     // Make the crate-local public-path map available to
     // rustdoc_type_to_rust_str so it can fully-qualify opaque types.  Must be
     // set BEFORE any function is parsed (parse_fn_item -> rust_str reads it).
-    REACHABLE_PATHS.with(|c| *c.borrow_mut() = collect_reachable_paths(doc));
+    let (rp, rfp) = collect_reachable_paths(doc);
+    REACHABLE_PATHS.with(|c| *c.borrow_mut() = rp);
+    REACHABLE_FN_PATHS.with(|c| *c.borrow_mut() = rfp);
     ALIAS_MAP.with(|c| *c.borrow_mut() = collect_aliases(doc));
     GENERIC_ALIAS_MAP.with(|c| *c.borrow_mut() = collect_generic_result_aliases(doc));
     LOCAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_local_type_ids(doc));
@@ -1598,7 +1605,18 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
         // impl/trait (those are handled by the impl-block walk with a receiver).
         if let Some(fn_data) = inner.get("function") {
             if is_public(item) && !associated_ids.contains(item_id.as_str()) {
-                if let Some(f) = parse_fn_item(&name, fn_data, &aliases, None) {
+                if let Some(mut f) = parse_fn_item(&name, fn_data, &aliases, None) {
+                    // [#109] If this free fn lives in a submodule, emit its crate-relative
+                    // public path (`civil::date`) so codegen calls `::<crate>::civil::date`
+                    // instead of `::<crate>::date` (E0425). Strip the leading crate segment;
+                    // set ONLY when a real module segment remains (else byte-identical fallback).
+                    if let Some(full) = REACHABLE_FN_PATHS.with(|c| c.borrow().get(item_id.as_str()).cloned()) {
+                        if let Some((_crate_seg, rest)) = full.split_once("::") {
+                            if rest.contains("::") {
+                                f.call_path = rest.to_string();
+                            }
+                        }
+                    }
                     functions.push(f);
                 }
             }
@@ -4244,6 +4262,13 @@ thread_local! {
     static REACHABLE_PATHS: std::cell::RefCell<HashMap<String, String>> =
         std::cell::RefCell::new(HashMap::new());
 
+    /// [#109] Public reachable path (id → `crate::mod::fn`) for FREE FUNCTIONS,
+    /// populated by the SAME is_public-gated walk as REACHABLE_PATHS (so the path is
+    /// public, never a private def-module → no E0603). Separate map = zero blast
+    /// radius on the type/trait consumers of REACHABLE_PATHS.
+    static REACHABLE_FN_PATHS: std::cell::RefCell<HashMap<String, String>> =
+        std::cell::RefCell::new(HashMap::new());
+
     // [WALL 5 / #66] Current crate-local alias SEE-THROUGH recursion depth. The
     // type renderers (`rustdoc_type_to_sky` / `rustdoc_type_to_rust_str`) expand a
     // crate-local Result/Option/non-generic alias and RECURSE on the body, which
@@ -5627,6 +5652,7 @@ fn walk_module_with_path(
     mp: &str,
     index: &serde_json::Map<String, serde_json::Value>,
     out: &mut HashMap<String, String>,
+    fn_out: &mut HashMap<String, String>,
     seen: &mut HashSet<(String, String)>,
 ) {
     if !seen.insert((mid.to_string(), mp.to_string())) {
@@ -5655,6 +5681,15 @@ fn walk_module_with_path(
                 insert_shorter_path(out, cid.clone(), format!("{}::{}", mp, n));
             }
         }
+        // [#109] Register a public FREE FUNCTION at its reachable path (mirrors the
+        // type branch; same is_public gate). Sound ONLY because rustdoc runs WITHOUT
+        // --document-private-items (same precondition as the #57 type walk) — adding
+        // that flag would reopen E0603 for fns just as for types.
+        if it["inner"].get("function").is_some() && is_public(it) {
+            if let Some(n) = it["name"].as_str() {
+                insert_shorter_path(fn_out, cid.clone(), format!("{}::{}", mp, n));
+            }
+        }
         if let Some(u) = it["inner"].get("use") {
             let tid = u.get("id").map(item_id_to_str);
             if u["is_glob"].as_bool().unwrap_or(false) {
@@ -5664,24 +5699,30 @@ fn walk_module_with_path(
                 // synthetic public prefix so the recursive walk publishes the
                 // target's items at `mp::name` — this is the WALL 1 fix.
                 if let Some(tids) = tid {
-                    walk_module_with_path(&tids, mp, index, out, seen);
+                    walk_module_with_path(&tids, mp, index, out, fn_out, seen);
                 }
             } else if let (Some(n), Some(tids)) = (u["name"].as_str(), tid.as_ref()) {
                 // Named re-export (`pub use foo::Bar as Baz`): register the
                 // target type under the alias name at the current path.
                 if index.get(tids).map(item_is_type).unwrap_or(false) {
                     insert_shorter_path(out, tids.clone(), format!("{}::{}", mp, n));
+                } else if index.get(tids).map(|t| t["inner"].get("function").is_some() && is_public(t)).unwrap_or(false) {
+                    // [#109] named re-export of a public fn (`pub use foo::bar`) — register
+                    // the public ALIAS path; is_public gate is fail-closed (a pub use of a
+                    // pub(crate) fn must NOT publish a path → E0603).
+                    insert_shorter_path(fn_out, tids.clone(), format!("{}::{}", mp, n));
                 }
             }
         }
     }
 }
 
-fn collect_reachable_paths(doc: &serde_json::Value) -> HashMap<String, String> {
+fn collect_reachable_paths(doc: &serde_json::Value) -> (HashMap<String, String>, HashMap<String, String>) {
     let mut out: HashMap<String, String> = HashMap::new();
+    let mut fn_out: HashMap<String, String> = HashMap::new();
     let index = match doc["index"].as_object() {
         Some(i) => i,
-        None => return out,
+        None => return (out, fn_out),
     };
     let paths = doc["paths"].as_object();
     let mpath_from_doc = |mid: &str| -> Option<String> {
@@ -5709,11 +5750,11 @@ fn collect_reachable_paths(doc: &serde_json::Value) -> HashMap<String, String> {
             && is_public(item)
         {
             if let Some(mp) = mpath_from_doc(id) {
-                walk_module_with_path(id, &mp, index, &mut out, &mut seen);
+                walk_module_with_path(id, &mp, index, &mut out, &mut fn_out, &mut seen);
             }
         }
     }
-    out
+    (out, fn_out)
 }
 
 /// True for a read-only byte sequence: `&[u8]`, `Vec<u8>`, `[u8; N]`, or
@@ -11997,7 +12038,9 @@ mod tests {
         STD_TRAIT_BY_ID.with(|c| *c.borrow_mut() = collect_std_trait_ids(doc));
         EXTERNAL_TRAIT_PATH_BY_ID.with(|c| *c.borrow_mut() = collect_external_trait_paths(doc));
         EXTERNAL_TYPE_PATH_BY_ID.with(|c| *c.borrow_mut() = collect_external_type_paths(doc));
-        REACHABLE_PATHS.with(|c| *c.borrow_mut() = collect_reachable_paths(doc));
+        let (rp_td, rfp_td) = collect_reachable_paths(doc);
+        REACHABLE_PATHS.with(|c| *c.borrow_mut() = rp_td);
+        REACHABLE_FN_PATHS.with(|c| *c.borrow_mut() = rfp_td);
         let out = f();
         LOCAL_TYPE_IDS.with(|c| c.borrow_mut().clear());
         EXTERNAL_TYPE_IDS.with(|c| c.borrow_mut().clear());
@@ -12005,6 +12048,7 @@ mod tests {
         EXTERNAL_TRAIT_PATH_BY_ID.with(|c| c.borrow_mut().clear());
         EXTERNAL_TYPE_PATH_BY_ID.with(|c| c.borrow_mut().clear());
         REACHABLE_PATHS.with(|c| c.borrow_mut().clear());
+        REACHABLE_FN_PATHS.with(|c| c.borrow_mut().clear());
         out
     }
 
@@ -12034,7 +12078,7 @@ mod tests {
                 "2":  { "crate_id": 0, "path": ["fluentcrate", "fluent_api", "FluentSelect"], "kind": "struct" }
             }
         });
-        let reach = collect_reachable_paths(&doc);
+        let (reach, _) = collect_reachable_paths(&doc);
         assert_eq!(reach.get("48").map(|s| s.as_str()), Some("fluentcrate::Db"),
             "Db should resolve to its root path");
         assert_eq!(reach.get("2").map(|s| s.as_str()), Some("fluentcrate::FluentSelect"),

@@ -17,6 +17,32 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 23:55 — #109 RESOLVED — free fns in submodules bind (jiff = 9th genuine shim-free crate)
+
+**What.** The inspector bound a free function defined in a SUBMODULE (`jiff::civil::date`)
+but the generated wrapper called it at the crate root (`::jiff::date` → E0425). Fixed by
+threading the PUBLIC module path so codegen emits `::jiff::civil::date(...)`. jiff is now
+genuinely shim-free (`civil::date` + `year`/`to_string` accessors) → 9/10.
+
+**Why/how.** New `REACHABLE_FN_PATHS` (id → public path), populated by the SAME
+`is_public`-gated, re-export-aware `walk_module_with_path` as `REACHABLE_PATHS` (the #57
+machinery) — so the path is PUBLIC, never a private def-module (avoids the #105
+`doc["paths"]` private-path trap). The free-fn handler strips the leading crate segment
+and sets a new `Function.call_path` ONLY when a real module segment remains; codegen
+prepends `::<crateImport>::`. Fail-closed to `::crate::name` (status quo) when unprovable;
+crate-root free fns byte-identical (down to kernel.json). `is_public` gated on BOTH fn
+registration branches (direct child + named re-export). Guardian 2-round APPROVE (design
+review caught a BLOCKING ambient-crate-segment concern → fixed via crate-seg strip + C2
+is_public; final review CLEAN). Implementation delegated to a sonnet subagent per the
+locked design (token discipline).
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (REACHABLE_FN_PATHS + walk fn_out +
+free-fn handler + Function.call_path), `src/Sky/Build/FfiGen.hs` (_fnCallPath),
+`src/Sky/Build/Rust/Ffi.hs` (callTarget in free-fn render),
+`runtime-rust/scripts/ffi-fixtures-test.sh` (114),
+`runtime-rust/tests/sky/114-ffi-shimfree-jiff/`, scorecard. 10th = toml (#110,
+from_str return-type dedup).
+
 ## 2026-06-27 22:50 — #106 RESOLVED — inspector pins STABLE to verify auto-injected features → regex is the 7th genuine shim-free crate
 
 **What.** Closed the Part-B regression where the FFI inspector propagated a crate's

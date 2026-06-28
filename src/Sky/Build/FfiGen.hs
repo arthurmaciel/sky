@@ -151,6 +151,12 @@ data FnInfo = FnInfo
         -- Absent (→ 'Nothing') for the Go inspector (which drops generics at the
         -- producer — no Go kernel.json ever carries a @generic@ key) and for
         -- every non-generic Rust binding, so the whole path is dead for Go.
+    , _fnCallPath :: String
+        -- ^ [#109] Rust only. Public crate-relative call path for a free fn in a
+        -- SUBMODULE (e.g. @civil::date@ — the leading crate segment is STRIPPED
+        -- by the inspector; codegen prepends @::<crate>::@). Empty for methods,
+        -- crate-root free fns, and Go. When non-empty the codegen emits
+        -- @::<crate>::civil::date(...)@ instead of @::<crate>::date(...)@.
     }
     deriving (Show)
 
@@ -214,6 +220,7 @@ instance A.FromJSON FnInfo where
             <*> o A..:? "enumArms" A..!= []
             <*> o A..:? "enumWildcard" A..!= False
             <*> o A..:? "generic"   -- Wall #3: raw `generic` object, verbatim
+            <*> o A..:? "callPath" A..!= ""
       where
         parseParamFull = A.withObject "param" $ \o -> do
             n <- o A..:? "name" A..!= ""
