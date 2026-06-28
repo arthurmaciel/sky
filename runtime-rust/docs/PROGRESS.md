@@ -17,6 +17,41 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-28 02:30 — #110 RESOLVED — toml field-read by key → 10/10 complex crates shim-free (GOAL MET)
+
+**What.** `toml::Value::get<I: Index>(&self, I) -> Option<&Value>` (read a config value by
+key) was DROPPED — toml could parse but not READ. Now bound as
+`get_from_value : Value -> String -> Result Error (Maybe Value)`. toml is the **10th**
+genuinely shim-free complex crate (parse + `get "port"`→`is_integer` + `get "name"`→`as_str`
+=="web"), MEETING the standing goal: **10 complex crates, MAIN functionality, shim-free,
+each via a ROOT-CAUSE fix — no trivial-accessor gaming, no easy-crate cherry-picking.**
+
+**Why/how.** Two cascading drops: (1) `I: Index` is a crate-local SEALED trait with MULTIPLE
+impls (str/String/usize) → the #92 unique-impl monomorphizer returns None → drop. Fixed by
+`string_key_impl_substitute`: a fresh rustdoc-`index` walk finds a DIRECT `impl Index for
+String` and monomorphizes the param to OWNED `String` (guardian correction: owned String,
+NOT synthesized `&str` — a bare `impl for str` does not prove `&str: Index` → would E0277).
+Wired into `monomorphize_concrete_impl_params`'s None branch, gated by the C3 by-value census
++ the existing is_std exclusion (a std `Index`/`Add` bound never reaches it). (2) The
+`Option<&Value>` borrowed return wasn't owned-copy-admissible (only `Option<&str>/&String`
+were). Fixed by extending `owned_copy_admissible` to admit `Option<&T>` for a PROVEN-Clone
+crate-local opaque (the same `CLONE_OPAQUE_NAMES`/`std_trait_tag` oracle the shipped `&T→T`
+path uses) → `SkyMaybe<Value>` via `.to_owned()`. Both fail-closed. General: unblocks
+string-keyed field navigation on any Value-with-`Index::get` crate (toml + serde_json).
+Guardian 2-round APPROVE (design caught the `&str`→`String` unsoundness; final CLEAN).
+Implementation delegated to a sonnet subagent per the locked design (token discipline).
+
+NOTE: the earlier #110 framing ("from_str dedup picks String over Value") was a MISDIAGNOSIS
+— toml's native `from_str → toml::Value` already wins the dedup and works; the real blocker
+was the keyed `get`.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (string_key_impl_substitute +
+monomorphize_concrete_impl_params None-branch + owned_copy_admissible Option<&CloneOpaque> +
+unit test), `runtime-rust/scripts/ffi-fixtures-test.sh` (110),
+`runtime-rust/tests/sky/110-ffi-shimfree-toml/`, scorecard (10/10). Non-blocking follow-ups
+(guardian): correct "derives Clone" comment to "impls Clone"; unit test pinning the
+Clone-membership gate; census `qualified_path` arm.
+
 ## 2026-06-27 23:55 — #109 RESOLVED — free fns in submodules bind (jiff = 9th genuine shim-free crate)
 
 **What.** The inspector bound a free function defined in a SUBMODULE (`jiff::civil::date`)

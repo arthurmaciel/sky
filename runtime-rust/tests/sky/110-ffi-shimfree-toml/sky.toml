@@ -1,0 +1,8 @@
+[project]
+name = "110-ffi-shimfree-toml"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+["rust.dependencies"]
+toml = "0.8"

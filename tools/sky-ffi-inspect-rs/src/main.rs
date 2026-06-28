@@ -1774,6 +1774,7 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                             let mono_owned: Option<serde_json::Value> =
                                 match monomorphize_concrete_impl_params(
                                     method_name, fn_data_raw, impl_generics,
+                                    index,   // [#110]
                                 ) {
                                     Some(Some(rewritten)) => Some(rewritten),
                                     Some(None) => continue, // ambiguous → drop recorded
@@ -4006,7 +4007,20 @@ fn parse_fn_item(
             .and_then(|s| s.strip_suffix('>'))
         {
             let inner = inner.trim();
-            return inner == "&str" || inner == "&String";
+            if inner == "&str" || inner == "&String" {
+                return true;
+            }
+            // [#110] Option<&T> for a crate-local Clone opaque → Maybe T via .to_owned()
+            if let Some(rest) = inner.strip_prefix('&') {
+                let t_name = rest.trim();
+                if !t_name.starts_with("mut ")
+                    && !t_name.starts_with('&')
+                    && !t_name.contains('<')
+                    && is_clone_opaque_name(t_name)
+                {
+                    return true;
+                }
+            }
         }
         // &T for a crate-local derived-Clone opaque → owned T (.to_owned()).
         // Single leading `&`, not `&mut`, not a nested borrow / generic / tuple.
@@ -10111,6 +10125,47 @@ fn concrete_impl_self_id(trait_key: &str) -> Option<String> {
         .map(|id| item_id_to_str(&id))
 }
 
+/// [#110] For a param bounded by a crate trait with MULTIPLE impls (not the #52
+/// unique case), find a DIRECTLY-discovered SIZED `impl Trait for String` and
+/// return its `for` type node, so the param monomorphizes to owned `String`
+/// (the string-key accessor case: toml/serde_json `Value::get<I: Index>`).
+/// Fresh walk over `index` (NOT TRAIT_CONCRETE_IMPLS, which filters out
+/// primitive/foreign self types). Returns None → caller keeps the existing drop.
+fn string_key_impl_substitute(
+    trait_key: &str,
+    index: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    for (_id, item) in index {
+        if item["crate_id"].as_u64().unwrap_or(1) != 0 {
+            continue;
+        }
+        let Some(impl_data) = item["inner"].get("impl") else { continue };
+        // trait id must equal trait_key
+        let tid = impl_data
+            .get("trait")
+            .and_then(|t| t.get("id"))
+            .map(|id| item_id_to_str(id));
+        if tid.as_deref() != Some(trait_key) {
+            continue;
+        }
+        let for_ty = impl_data.get("for").or_else(|| impl_data.get("for_"));
+        // accept ONLY a direct resolved_path whose last segment is "String"
+        if let Some(ft) = for_ty {
+            if let Some(rp) = ft.get("resolved_path") {
+                let p = rp
+                    .get("path")
+                    .or_else(|| rp.get("name"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                if p.rsplit("::").next() == Some("String") {
+                    return Some(ft.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// [#52] Attempt concrete-impl monomorphization of a method's generic params that
 /// are bounded by a UNIQUE-impl crate-local trait (`C: Wire` → `C = Db`). On
 /// success returns a REWRITTEN `fn_data` clone with (a) each such param
@@ -10134,6 +10189,7 @@ fn monomorphize_concrete_impl_params(
     method_name: &str,
     fn_data: &serde_json::Value,
     impl_generics: Option<&serde_json::Value>,
+    index: &serde_json::Map<String, serde_json::Value>,  // [#110]
 ) -> Option<Option<serde_json::Value>> {
     let params = fn_data.get("generics")?.get("params")?.as_array()?;
     // where-clause bounds keyed by generic name (same gather as resolve_generics).
@@ -10190,7 +10246,20 @@ fn monomorphize_concrete_impl_params(
                 removed.insert(name.to_string());
             }
             None => {
-                // 0 or >1 concrete impls → never guess (constraint 2).
+                // [#110] Before recording the drop, try the string-key fallback:
+                // if the multi-impl trait has a DIRECT `impl Trait for String`,
+                // monomorphize to owned String. Gate on C3 (param by-value everywhere)
+                // to exclude `fn f<I>(&self, x: &I)` shapes. Covers
+                // toml/serde_json `Value::get<I: Index>(String)`.
+                if fn_serde_param_all_admissible(fn_data, name) {
+                    if let Some(string_node) = string_key_impl_substitute(&trait_key, index) {
+                        subst.insert(name.to_string(), string_node);
+                        matched_send_keys.push((name.to_string(), trait_key));
+                        removed.insert(name.to_string());
+                        continue; // resolved to String — proceed to next param
+                    }
+                }
+                // 0 or >1 concrete impls and no String fallback → never guess.
                 record_generic_drop(
                     method_name,
                     GenericDrop::TraitBoundedParamAmbiguous(
@@ -11420,7 +11489,8 @@ mod tests {
     fn test_owned_copy_borrowed_return_gate() {
         // Mirror the `owned_copy_admissible` policy used by `is_result_borrow`.
         // (Inlined here as a closure since the real one is a local in
-        // `parse_fn_item`; this test pins the EXACT admit/drop contract of #22.)
+        // `parse_fn_item`; this test pins the EXACT admit/drop contract of #22 +
+        // #110 which adds Option<&T> for Clone opaques.)
         let admit = |t: &str| -> bool {
             let t = t.trim();
             if t == "&str" || t == "&String" {
@@ -11428,7 +11498,19 @@ mod tests {
             }
             if let Some(inner) = t.strip_prefix("Option<").and_then(|s| s.strip_suffix('>')) {
                 let inner = inner.trim();
-                return inner == "&str" || inner == "&String";
+                if inner == "&str" || inner == "&String" {
+                    return true;
+                }
+                // [#110] Option<&T> for a crate-local Clone opaque — treat Foo
+                // as a Clone opaque for this unit (the real gate consults
+                // CLONE_OPAQUE_NAMES; end-to-end covered by fixture 110).
+                if let Some(rest) = inner.strip_prefix('&') {
+                    let t_name = rest.trim();
+                    return !t_name.starts_with("mut ")
+                        && !t_name.starts_with('&')
+                        && !t_name.contains('<');
+                }
+                return false;
             }
             if let Some(rest) = t.strip_prefix('&') {
                 let rest = rest.trim();
@@ -11444,21 +11526,26 @@ mod tests {
             false
         };
 
-        // ADMIT (owned-copy): plain &str/&String, Option<&str>/<&String>, &T.
+        // ADMIT (owned-copy): plain &str/&String, Option<&str>/<&String>, &T,
+        // and (#110) Option<&T> for Clone opaque T.
         assert!(admit("&str"));
         assert!(admit("&String"));
         assert!(admit("Option<&str>"));
         assert!(admit("Option<&String>"));
         assert!(admit("&NaiveDate"));
         assert!(admit("&chrono::NaiveDate"));
+        assert!(admit("Option<&NaiveDate>"));          // [#110] Clone opaque
+        assert!(admit("Option<&toml::Value>"));        // [#110] Clone opaque (qualified)
 
         // DROP (conservative-on-doubt): &mut, nested/tuple borrow, generic borrow,
-        // Option<&T> opaque (owned form not in the closed {String} set here).
+        // Option<&mut T>, Option<nested borrow>, Option<generic>.
         assert!(!admit("&mut Builder"));
         assert!(!admit("&(A, B)"));
         assert!(!admit("&[u8]"));
         assert!(!admit("&Vec<u8>"));
-        assert!(!admit("Option<&NaiveDate>"));
+        assert!(!admit("Option<&mut Value>"));         // &mut inside Option → drop
+        assert!(!admit("Option<&&Value>"));            // nested borrow → drop
+        assert!(!admit("Option<&Vec<u8>>"));           // generic inside → drop
         assert!(!admit("&mut str"));
     }
 

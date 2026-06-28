@@ -1,0 +1,109 @@
+module Main exposing (main)
+
+-- toml shim-free fixture (#110): bind Value::get<I: Index>(&self, index: I)
+-- which was dropped by two cascading gates before this fix:
+--
+--   1. TraitBoundedParamAmbiguous("Index") — I: Index has >1 impl; the
+--      inspector could not pick a concrete type.  Fixed by
+--      `string_key_impl_substitute`: fresh walk of rustdoc `index` finds
+--      `impl Index for String` (impl 498) and substitutes I → String.
+--
+--   2. result_borrow — Option<&Value> return was not owned_copy_admissible
+--      because only Option<&str>/Option<&String> were listed.  Fixed by
+--      extending `owned_copy_admissible` to admit Option<&T> when T is a
+--      crate-local Clone opaque (Value derives Clone).
+--
+-- The resulting binding is:
+--   get_from_value : Value -> String -> Result Error (Maybe Value)
+--
+-- STAYS DROPPED: any imagined `get_mut` (would need &mut borrow of inner
+-- value — not in the closed admissible set).
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Toml as Toml
+import Std.Log exposing (println)
+
+
+check : Task Error ()
+check =
+    case Toml.from_str "port = 8080\nname = \"web\"\nenabled = true\n" of
+
+        Err e ->
+            Task.fail e
+
+        Ok top ->
+            -- Confirm it is a table.
+            case Toml.is_table_from_value top of
+
+                Ok True ->
+                    -- #110 key feature: read a field via get_from_value.
+                    case Toml.get_from_value top "port" of
+
+                        Err e ->
+                            Task.fail e
+
+                        Ok Nothing ->
+                            Task.fail
+                                (Error.unexpected "get_from_value: 'port' absent")
+
+                        Ok (Just portVal) ->
+                            -- The returned Value is the integer 8080.
+                            case Toml.is_integer_from_value portVal of
+
+                                Ok True ->
+                                    -- Read a string field.
+                                    case Toml.get_from_value top "name" of
+
+                                        Err e ->
+                                            Task.fail e
+
+                                        Ok Nothing ->
+                                            Task.fail
+                                                (Error.unexpected
+                                                    "get_from_value: 'name' absent")
+
+                                        Ok (Just nameVal) ->
+                                            -- as_str extracts the string.
+                                            case Toml.as_str_from_value nameVal of
+
+                                                Ok (Just s) ->
+                                                    if s == "web" then
+                                                        -- round-trip: serialize back.
+                                                        case Toml.to_string top of
+
+                                                            Ok rendered ->
+                                                                if String.contains "8080" rendered then
+                                                                    Task.succeed ()
+
+                                                                else
+                                                                    Task.fail
+                                                                        (Error.unexpected
+                                                                            ("round-trip: "
+                                                                                ++ rendered))
+
+                                                            Err e ->
+                                                                Task.fail e
+
+                                                    else
+                                                        Task.fail
+                                                            (Error.unexpected
+                                                                ("name mismatch: "
+                                                                    ++ s))
+
+                                                _ ->
+                                                    Task.fail
+                                                        (Error.unexpected
+                                                            "as_str: not a string")
+
+                                _ ->
+                                    Task.fail
+                                        (Error.unexpected "port is not an integer")
+
+                _ ->
+                    Task.fail (Error.unexpected "parsed TOML is not a table")
+
+
+main : Task Error ()
+main =
+    check |> Task.andThen (\_ -> println "[ALL OK]")

@@ -870,6 +870,27 @@ log** — hold it to the same bar as a code review:
   named re-export `pub use foo::bar` — the type branch leans on the
   no-`--document-private-items` precondition; the fn branch adds the explicit
   gate). Proof: fixture `114-ffi-shimfree-jiff`.
+- **A generic param bounded by a crate-local SEALED trait with MULTIPLE impls
+  (str/String/usize — e.g. `Value::get<I: Index>`) is NOT the #92 unique-impl
+  case → it drops. The string-key fix: monomorphize to OWNED `String` from a
+  DIRECTLY-discovered `impl Trait for String`, never a synthesized `&str`.** A
+  bare `impl Trait for str` does NOT prove `&str: Trait` (that needs a separate
+  `impl Trait for &U` blanket the inspector won't verify) → `host::<&str>` would
+  E0277. Matching `impl <trait> for String` proves `String: <trait>` by
+  construction → sound. Implement in `monomorphize_concrete_impl_params`'s None
+  branch (NOT the parametric-stub pre-pass — that's dead code for this shape;
+  `monomorphize_concrete_impl_params` runs first, at the call site ~1775) via a
+  FRESH rustdoc-`index` walk (`string_key_impl_substitute`) — `TRAIT_CONCRETE_IMPLS`
+  filters out primitive/foreign self types so it can't see the String impl. Gate
+  on the by-value census (`fn_serde_param_all_admissible`, excludes `&I` params)
+  + the is_std exclusion (a std `Index`/`Add` bound never reaches it) + fail-closed.
+  General: string-keyed field navigation on any Value-with-`Index::get` (toml +
+  serde_json). Pairs with: `owned_copy_admissible` admitting `Option<&T>` for a
+  PROVEN-Clone (`CLONE_OPAQUE_NAMES`/`std_trait_tag`, NOT a name heuristic)
+  crate-local opaque → `SkyMaybe<T>` via `.to_owned()` (the same oracle as the
+  `&T→T` path; lifetime-`T`/generic-`T`/tuple/slice all rejected upstream or by
+  membership → worst case is a fail-LOUD cargo-fail, never UB). Proof: fixture
+  `110-ffi-shimfree-toml`.
 - Known unfixed codegen/runtime gaps:
   `2026-06-15-skyshop-rs-codegen-gaps.md` (unconstrained-`Result`→`i64`;
   `Dict.union`/`List.sortBy` absences).

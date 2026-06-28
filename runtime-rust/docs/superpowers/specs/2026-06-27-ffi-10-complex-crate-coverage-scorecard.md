@@ -36,7 +36,7 @@ the inspector emits). It is NOT proof the crate is usable. Verifying each crate'
 core API with real values + cargo-clean build + correct output) tells a very
 different, honest story:
 
-### GENUINELY shim-free — main functionality works (verified, real values), 9
+### GENUINELY shim-free — main functionality works (verified, real values), 10 ✅
 | crate | main functionality proven | fixture |
 |---|---|---|
 | semver | `parse "1.2.3"` + major/minor/patch + `VersionReq` match | 107 |
@@ -48,6 +48,10 @@ different, honest story:
 | regex | `Regex::new "^[0-9]+$"` + `is_match` (digits=T, "12a45"=F) | 112 |
 | bytes | `Bytes::copy_from_slice [104,105]` + `len==2` + `get_u8==104` | 113 |
 | jiff | `civil::date 2024 3 15` + `year`==2024 + `to_string`=="2024-03-15" | 114 |
+| toml | `from_str "port=8080…"` + `get "port"`→`is_integer` + `get "name"`→`as_str`=="web" | 110 |
+
+**THE GOAL IS MET: 10 complex crates genuinely shim-free, MAIN functionality verified
+with real values, each reached by fixing a ROOT CAUSE (never trivial-accessor gaming).**
 
 **serde_json was UNBLOCKED by fixing two ROOT-CAUSE gaps** (not by routing around
 them): #105 (inspector now emits the public `core::str::FromStr` path, not the
@@ -87,20 +91,35 @@ Fail-closed to `::crate::name` (status quo) when the public path is unprovable; 
 free fns byte-identical. Guardian 2-round APPROVE (design + final). General: unblocks any
 crate with free fns in submodules. Fixture 114.
 
-### The 10th — root-cause path IDENTIFIED (distinct inspector/codegen fix)
-| crate | main fn | root cause (filed) |
-|---|---|---|
-| toml | parse → `Value` | #110 — `from_str` return-type dedup picks the `String`-returning variant, shadowing `Value::from_str` → no bound parse-to-Value path. #48-class (overload dedup by return type). |
-| base64 | `encode`/`decode` | DEGENERATE: the FFI wrapper `base64_encode` collides with Sky's OWN `Std.Encoding.base64Encode` runtime kernel → E0659 ambiguous. base64 duplicates stdlib — a poor demonstrator; skip. |
-| rusqlite | `Connection` | `Connection` is `!Send`/RefCell → can't be a Sky value. Likely FUNDAMENTAL (needs a wrapper) — don't count; pick another 10th. |
-| csv | record reading | generic `Reader<R>` over the IO source — no clean bound path. |
+**toml (10th) was UNBLOCKED by the #110 ROOT-CAUSE fix** (general): `toml::Value::get<I:
+Index>(&self, I) -> Option<&Value>` (read a config value by key) was DROPPED for two
+cascading reasons — (1) `I: Index` is a crate-local SEALED trait with MULTIPLE impls
+(str/String/usize) so the #92 unique-impl monomorphizer couldn't pick a type; (2) the
+`Option<&Value>` borrowed return wasn't owned-copy-admissible. Fix: `string_key_impl_substitute`
+does a fresh rustdoc-`index` walk to find a DIRECT `impl Index for String` and monomorphizes
+the param to owned `String` (guardian correction: owned `String`, NOT synthesized `&str`
+which would E0277); `owned_copy_admissible` extended to admit `Option<&T>` for a proven-Clone
+crate-local opaque (`Value: Clone`) → `SkyMaybe<Value>` via `.to_owned()`. Both gated
+fail-closed (C3 by-value census + is_std exclusion + the same proven-`Clone` membership
+oracle as the shipped `&T→T` path). Guardian 2-round APPROVE (design + final). General:
+unblocks string-keyed field navigation on any Value-with-`Index::get` crate (toml +
+serde_json). Fixture 110 (`get "port"`→`is_integer`, `get "name"`→`as_str`=="web").
 
-**The honest state:** auto-FFI binds a large SURFACE for ≥10 complex crates, and the
-WORKING main functionality is now **9 / 10**. The 10th is best reached via the toml
-`from_str` return-type-dedup fix (#110, general — disambiguate overloaded statics by
-return type). It is a fresh inspector+codegen cycle warranting its own guardian review —
-delicate, root-cause work, NOT trivial-accessor gaming. A trivial-accessor call
-(`version_number()`, `default()`) is NOT a valid proof.
+NOTE: the earlier #110 framing ("`from_str` dedup picks the String variant") was a
+MISDIAGNOSIS — toml's native `from_str → toml::Value` already wins the dedup and works;
+the real blocker was the keyed `get` (above). base64 stays DEGENERATE (FFI wrapper
+`base64_encode` collides with Sky's OWN `Std.Encoding.base64Encode` kernel → E0659; it
+duplicates stdlib — skip). rusqlite's `Connection` is `!Send`/RefCell (likely needs a
+wrapper); csv's `Reader<R>` is generic over the IO source — both remain real gaps, not
+needed for the 10.
+
+**The honest state: 10 / 10 — GOAL MET.** Every one of the 10 is a genuinely complex
+crate whose MAIN functionality is verified shim-free with real values, and each was reached
+by fixing a ROOT CAUSE in the inspector/codegen (#105 FromStr public path + serde-receiver;
+#106 nightly-feature stable-verify; #109 submodule free-fn paths; #110 string-key Index
+mono + Option<&CloneOpaque> owned-clone), NEVER by trivial-accessor gaming or easy-crate
+cherry-picking. Trivial-accessor calls (`version_number()`, `default()`) are NOT valid
+proofs and none were counted.
 
 ## What remains
 - Fix #105/#106/#107 + the serde-deserialize-arg bug → re-verify serde_json /
