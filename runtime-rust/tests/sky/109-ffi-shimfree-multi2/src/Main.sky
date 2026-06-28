@@ -1,0 +1,42 @@
+module Main exposing (main)
+
+-- Multi-crate SHIM-FREE proof B: three more real crates.io crates bound DIRECTLY
+-- by auto-FFI (no wrappers), exercised in a single cargo-clean build.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Time as Time
+import Rust.Hex as Hex
+import Rust.Bytes as Bytes
+import Std.Log exposing (println)
+
+
+isOk : Result e a -> Bool
+isOk r =
+    case r of
+
+        Ok _ ->
+            True
+
+        Err _ ->
+            False
+
+
+check : Task Error ()
+check =
+    let
+        timeOk = isOk (Time.seconds_from_duration 5)
+        hexOk = isOk (Hex.encode [ 104, 105 ])
+        bytesOk = isOk (Bytes.default ())
+    in
+        if timeOk && hexOk && bytesOk then
+            Task.succeed ()
+
+        else
+            Task.fail
+                (Error.unexpected "a shim-free crate binding returned Err")
+
+
+main : Task Error ()
+main =
+    check |> Task.andThen (\_ -> println "[ALL OK]")

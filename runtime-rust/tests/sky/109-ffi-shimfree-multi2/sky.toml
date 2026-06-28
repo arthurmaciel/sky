@@ -1,0 +1,10 @@
+[project]
+name = "109-ffi-shimfree-multi2"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+["rust.dependencies"]
+time = "0.3"
+hex = "0.4"
+bytes = "1"
