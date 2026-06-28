@@ -16,7 +16,7 @@
 
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // ── Output schema (FfiGen.hs PkgInfo) ─────────────────────────────────
@@ -576,14 +576,15 @@ fn main() {
     // byte-identical to pre-WALL-G.
     if crate_specs.len() > 1 {
         for spec in &crate_specs {
-            let _ = inspect_crate(&spec.name, &spec.features, spec.git.as_ref());
+            // PHASE-1 populate: discarded — skip the #106 stable check (verify_stable=false).
+            let _ = inspect_crate(&spec.name, &spec.features, spec.git.as_ref(), false);
         }
     }
 
     let crate_args: Vec<String> = crate_specs.iter().map(|s| s.name.clone()).collect();
     let results: Vec<PkgInfo> = crate_specs
         .iter()
-        .map(|spec| inspect_crate(&spec.name, &spec.features, spec.git.as_ref()))
+        .map(|spec| inspect_crate(&spec.name, &spec.features, spec.git.as_ref(), true))
         .collect();
 
     if audit {
@@ -770,13 +771,18 @@ struct XcImpl {
     send_ok: bool,
 }
 
-fn inspect_crate(crate_name: &str, features: &[String], git: Option<&GitSource>) -> PkgInfo {
+// `verify_stable` gates the #106 pinned-stable feature check. The WALL-G
+// PHASE-1 populate pass passes `false` — it only mines the rustdoc JSON for the
+// cross-crate impl index and DISCARDS the PkgInfo, so paying the stable check
+// (and the default-feature re-run) there is pure waste; the real binding pass
+// passes `true`.
+fn inspect_crate(crate_name: &str, features: &[String], git: Option<&GitSource>, verify_stable: bool) -> PkgInfo {
     // [#70 stripe] The arg may carry a `name@version` pin (handled in run_rustdoc).
     // Strip the version HERE so the PkgInfo name + the binding-file slug derived from
     // it stay CLEAN (`async-stripe-shared`, not `async-stripe-shared@1.0.0-rc.6` — an
     // `@` in the slug would mismatch the Haskell copy step's clean-name slug).
     let clean_name = crate_name.split_once('@').map(|(n, _)| n).unwrap_or(crate_name);
-    match run_rustdoc(crate_name, features, git) {
+    match run_rustdoc(crate_name, features, git, verify_stable) {
         Ok((json_content, version, transitive_deps, effective_features)) => match serde_json::from_str::<serde_json::Value>(&json_content) {
             Ok(doc) => {
                 let mut pkg = parse_rustdoc(&doc, clean_name, &version);
@@ -797,7 +803,7 @@ fn inspect_crate(crate_name: &str, features: &[String], git: Option<&GitSource>)
 /// Handles thin re-export facades (e.g. `clap` re-exports `clap_builder`):
 /// if the first rustdoc run produces 0 functions, we scan the JSON for glob
 /// `pub use other_crate::*` re-exports and re-run on the underlying crate.
-fn run_rustdoc(crate_name: &str, features: &[String], git: Option<&GitSource>) -> Result<(String, String, Vec<TransitiveDep>, Vec<String>), String> {
+fn run_rustdoc(crate_name: &str, features: &[String], git: Option<&GitSource>, verify_stable: bool) -> Result<(String, String, Vec<TransitiveDep>, Vec<String>), String> {
     // [#70 stripe] Accept a `name@version` spec (mirrors `cargo add name@version`)
     // so a PRERELEASE crate can be requested. Split the version off BEFORE the name
     // charset check; the version is validated separately to its own semver charset.
@@ -894,6 +900,10 @@ edition = "2021"
         choose_visibility_features(&enumerate_crate_features(&manifest_str, crate_name))
     };
     let injected_nonempty = !injected.is_empty();
+    // [#106] Only an AUTO-injected (#89 visibility) set is stable-verified +
+    // possibly dropped below. A user-EXPLICIT `--features` set is kept verbatim
+    // ("explicit wins", #89 contract) — the user owns their build toolchain.
+    let auto_injected = features.is_empty() && injected_nonempty;
     if injected_nonempty {
         write_manifest(&injected)?;
     }
@@ -904,6 +914,50 @@ edition = "2021"
     // to DEFAULT, so effective = [] (propagate nothing — matches what was bound).
     let (json_content, version, effective_features) =
         match run_rustdoc_package(crate_name, &manifest_str, &target_dir, &safe_name, false) {
+            // [#106] rustdoc (nightly) accepted the AUTO-injected set (#89
+            // visibility) — but `cargo +nightly rustdoc` silently accepts a
+            // crate's NIGHTLY-ONLY feature (regex `pattern` →
+            // `#![cfg_attr(feature = "pattern", feature(pattern))]`). Part B
+            // would then bake that feature into the PORTABLE kernel.json + the
+            // generated Cargo.toml, breaking every STABLE consumer with E0554.
+            // Verify the set against a PINNED-STABLE toolchain (the portable
+            // floor) before propagating: builds-on-stable ⇒ builds-on-nightly,
+            // so this can only ever be more conservative. On a nightly gate (or
+            // an unverifiable check) drop to default features and re-run rustdoc
+            // THERE, so the bound wrappers ↔ propagated features stay consistent
+            // and the `sky build ⇒ cargo build` floor holds.
+            Ok((j, v)) if auto_injected && verify_stable => {
+                match injected_stable_check(&manifest_str, &dir.join("target-verify")) {
+                    StableCheck::Builds => (j, v, injected.clone()),
+                    StableCheck::FeatureGated => {
+                        eprintln!(
+                            "[sky-ffi] feature set [{}] needs a NIGHTLY-ONLY crate feature \
+                             (E0554 on stable); retrying with default features",
+                            injected.join(",")
+                        );
+                        write_manifest(&[])?;
+                        let (j2, v2) = run_rustdoc_package(crate_name, &manifest_str, &target_dir, &safe_name, false)?;
+                        (j2, v2, Vec::new())
+                    }
+                    // Could not reach a stable verdict (no stable toolchain /
+                    // transient cargo error). Floor-safe for the PORTABLE
+                    // artifact: drop to default rather than risk propagating a
+                    // nightly-only feature we couldn't rule out. Self-heals on
+                    // the next `sky install` once the check can run. NOT
+                    // mislabelled as nightly (distinct message + reason).
+                    StableCheck::Unverifiable(why) => {
+                        eprintln!(
+                            "[sky-ffi] could not verify feature set [{}] on stable ({}); \
+                             retrying with default features to keep the binding artifact portable",
+                            injected.join(","),
+                            why
+                        );
+                        write_manifest(&[])?;
+                        let (j2, v2) = run_rustdoc_package(crate_name, &manifest_str, &target_dir, &safe_name, false)?;
+                        (j2, v2, Vec::new())
+                    }
+                }
+            }
             Ok((j, v)) => (j, v, injected.clone()),
             // A mutually-exclusive injected feature subset can fail the doc build;
             // fall back to default features (the pre-#89 behaviour) before giving up.
@@ -938,6 +992,73 @@ edition = "2021"
     }
 
     Ok((json_content, version, transitive_deps, effective_features))
+}
+
+/// [#106] Outcome of verifying an AUTO-injected feature set against a
+/// pinned-stable toolchain.
+enum StableCheck {
+    /// `cargo check` succeeded on stable — the features are safe to propagate.
+    Builds,
+    /// `cargo check` failed with E0554 — a feature pulls a nightly-only
+    /// `#![feature(...)]`. Must NOT propagate (every stable consumer E0554s).
+    FeatureGated,
+    /// The check could not reach a verdict — no stable toolchain installed, or a
+    /// transient / non-E0554 cargo failure. Carries a one-line reason so the
+    /// caller can surface the REAL cause instead of mislabelling it "nightly".
+    Unverifiable(String),
+}
+
+/// [#106] Verify the AUTO-injected feature probe compiles on a PINNED-STABLE
+/// toolchain — NOT the ambient default. The inspector requires
+/// `cargo +nightly rustdoc`, so the box's default toolchain may itself be
+/// nightly; checking against the ambient default would then rubber-stamp a
+/// nightly-only feature. The resulting `effective_features` are baked into the
+/// PORTABLE kernel.json + the generated Cargo.toml and may be consumed on ANY
+/// machine, so they must build on the most-restrictive channel. Stable is that
+/// floor: builds-on-stable ⇒ builds-on-nightly, so pinning stable can only ever
+/// be more conservative — it can never let a nightly-only feature through.
+///
+/// Toolchain is forced via `RUSTUP_TOOLCHAIN=stable` (overrides a
+/// `rust-toolchain.toml` and the global default). `RUSTC` / `RUSTC_WRAPPER` are
+/// removed so a hardcoded nightly `rustc` or an sccache wrapper can't bypass the
+/// pin, and `RUSTC_BOOTSTRAP` is removed so a globally-set bootstrap flag can't
+/// un-gate `#![feature]` on stable and forge a false pass. A separate
+/// `target-verify` dir keeps stable artifacts off the nightly rustdoc target.
+fn injected_stable_check(manifest_str: &str, verify_target: &Path) -> StableCheck {
+    let out = Command::new("cargo")
+        .args(["check", "--quiet", "--manifest-path", manifest_str])
+        .env("CARGO_TARGET_DIR", verify_target)
+        .env("RUSTUP_TOOLCHAIN", "stable")
+        .env_remove("RUSTC")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_BOOTSTRAP")
+        .output();
+    match out {
+        Ok(o) if o.status.success() => StableCheck::Builds,
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if stderr.contains("E0554")
+                || stderr.contains("may not be used on the stable release channel")
+            {
+                StableCheck::FeatureGated
+            } else {
+                // The reason is forwarded verbatim to the user's terminal
+                // (Ffi.hs `forwardInspectorDiagnostics`). cargo's first error
+                // line can embed a source span / path, so strip it to
+                // printable-ASCII before it leaves this typed boundary — no
+                // control / ESC bytes can reach the TTY.
+                let reason: String = stderr
+                    .lines()
+                    .find(|l| l.contains("error"))
+                    .unwrap_or("cargo check could not run")
+                    .chars()
+                    .filter(|c| c.is_ascii_graphic() || *c == ' ')
+                    .collect();
+                StableCheck::Unverifiable(reason.trim().to_string())
+            }
+        }
+        Err(e) => StableCheck::Unverifiable(e.to_string()),
+    }
 }
 
 /// Run `cargo +nightly rustdoc --package pkg` and return the JSON content.

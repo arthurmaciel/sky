@@ -38,6 +38,7 @@ import qualified Data.Text.Encoding as TE
 import System.Directory (createDirectoryIfMissing, doesFileExist, getCurrentDirectory)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>), takeDirectory)
+import System.IO (hPutStrLn, stderr)
 import System.Process (readProcessWithExitCode)
 import Text.Read (readMaybe)
 import qualified Sky.Build.EmbeddedInspectorRust as EIRust
@@ -128,11 +129,24 @@ runRustInspectorWith pkgPath features mGit = do
                 -- invocation (or be an injection vector via a crafted dep name).
                 cmd' = quoteShell bin ++ " " ++ quoteShell pkgPath ++ featuresArg ++ gitArg
             (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd'] ""
+            forwardInspectorDiagnostics err
             if null out
                 then return (Left $ "sky-ffi-inspect-rs: empty output; stderr: " ++ err)
                 else case A.eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) of
                     Left e  -> return (Left $ "sky-ffi-inspect-rs: json: " ++ e)
                     Right p -> return (Right p)
+
+
+-- | [#106] Forward the inspector's own diagnostic lines to OUR stderr even on
+-- the SUCCESS path. `readProcessWithExitCode` captures the child's stderr, so
+-- without this every feature-set downgrade the inspector decides (#89/#100/#106
+-- — e.g. dropping a crate's nightly-only feature to keep the binding artifact
+-- buildable on stable) is swallowed, leaving the user puzzled why a
+-- feature-gated binding is absent. Only the inspector's structured `[sky-ffi]`
+-- lines are forwarded (raw cargo noise stays hidden unless the run failed).
+forwardInspectorDiagnostics :: String -> IO ()
+forwardInspectorDiagnostics err =
+    mapM_ (hPutStrLn stderr) [ l | l <- lines err, "[sky-ffi]" `isPrefixOf` l ]
 
 
 -- Conservative shell-quote: wrap in single-quotes and escape embedded single
@@ -166,6 +180,7 @@ runRustInspectorManifestFile manifestPath = do
         Right bin -> do
             let cmd' = quoteShell bin ++ " --manifest " ++ quoteShell manifestPath
             (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd'] ""
+            forwardInspectorDiagnostics err
             if null out
                 then return (Left $ "sky-ffi-inspect-rs: empty output; stderr: " ++ err)
                 else case A.eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) of

@@ -1,0 +1,44 @@
+module Main exposing (main)
+
+-- regex MAIN functionality: compile a pattern + match a haystack.
+-- Shim-free `sky add regex`. Proves #106: the inspector no longer propagates
+-- regex's nightly-only `pattern` feature into the generated STABLE build.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Regex as Regex
+import Std.Log exposing (println)
+
+
+check : Task Error ()
+check =
+    case Regex.new_from_regex "^[0-9]+$" of
+
+        Ok re ->
+            case Regex.is_match_from_regex re "12345" of
+
+                Ok True ->
+                    case Regex.is_match_from_regex re "12a45" of
+
+                        Ok False ->
+                            Task.succeed ()
+
+                        Ok True ->
+                            Task.fail (Error.unexpected "matched non-digits")
+
+                        Err e ->
+                            Task.fail e
+
+                Ok False ->
+                    Task.fail (Error.unexpected "digits did not match")
+
+                Err e ->
+                    Task.fail e
+
+        Err e ->
+            Task.fail e
+
+
+main : Task Error ()
+main =
+    check |> Task.andThen (\_ -> println "[ALL OK]")

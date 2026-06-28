@@ -566,6 +566,28 @@ log** — hold it to the same bar as a code review:
   features keep the strict emit gate. Missing kernel.json / Go target / no features ⇒
   byte-identical bare dep. This is THE general unlock for any feature-gated complex
   crate. Proof: fixture `106-ffi-feature-propagation`.
+  **#106 refinement — rustdoc-accepted ≠ stable-buildable.** The Part-B soundness
+  keystone ("one rustdoc accepted ⇒ propagatable") had a HOLE: the inspector runs
+  `cargo +nightly rustdoc`, which silently accepts a crate's NIGHTLY-ONLY feature
+  (regex `pattern` → `#![cfg_attr(feature="pattern", feature(pattern))]`). Propagating
+  that into the PORTABLE kernel.json + generated Cargo.toml ⇒ E0554 on every STABLE
+  consumer. General principle: **an inspector that introspects via a PRIVILEGED
+  toolchain must VERIFY any propagated artifact against the RESTRICTIVE consumer
+  toolchain, pinned DETERMINISTICALLY — never the ambient default (which on a box that
+  has nightly may itself BE the privileged channel).** Fix: `injected_stable_check`
+  (`main.rs`) runs `cargo check` with `RUSTUP_TOOLCHAIN=stable` + `RUSTC`/`RUSTC_WRAPPER`/
+  `RUSTC_BOOTSTRAP` removed; builds-on-stable ⇒ builds-on-nightly, so the pin can only
+  be MORE conservative. Soundness rests on EXIT STATUS, not the E0554 substring: only a
+  clean exit KEEPS the set; both `FeatureGated` (E0554) and `Unverifiable` (no
+  stable toolchain / transient) DROP to default + re-run rustdoc there (bindings ↔
+  features stay consistent). Only AUTO-injected (#89) sets are checked — user-EXPLICIT
+  `--features` are kept verbatim (the user owns their toolchain). The check is skipped
+  in the WALL-G PHASE-1 populate pass (discarded result) via a `verify_stable` flag.
+  The downgrade is surfaced (Ffi.hs `forwardInspectorDiagnostics` forwards inspector
+  `[sky-ffi]` stderr on the SUCCESS path — previously every #89/#100/#106 downgrade was
+  swallowed). Guardian-approved (2 rounds). Proof: fixtures `112-ffi-shimfree-regex`
+  (real regex `Regex::new`+`is_match` builds+runs on stable) + `112b-regex-nightly-pin`
+  (ambient `RUSTUP_TOOLCHAIN=nightly` forced → stable pin still drops `pattern`).
 
 ### Pitfalls
 - **`Clone` ≠ `Send` — async FFI gates must use a TIGHTER predicate than sync FFI

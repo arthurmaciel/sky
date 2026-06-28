@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain 94-ffi-inherent-self-output 95-ffi-inherent-self-output-async 96-ffi-external-trait-xcrate 97-ffi-numeric-param-coerce 98-ffi-projected-numeric 99-ffi-nested-numeric-drop 100-ffi-asref-return 101-task-rethunk 102-task-rethunk-free-tvar 103-task-rethunk-discard 104-ffi-owned-query-builder 105-ffi-generic-struct-accessor 106-ffi-feature-propagation 107-ffi-shimfree-semver 108-ffi-shimfree-multi 109-ffi-shimfree-multi2 111-ffi-shimfree-serde-json)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 72-ffi-async 73-ffi-serde 74-ffi-opaque-client 75-ffi-nested-glob-asref 76-ffi-borrowed-ref 78-ffi-async-opaque-ctor 79-ffi-serde-trait 80-ffi-result-alias 81-ffi-serde-ref 82-ffi-async-trait 83-ffi-mixed-generic-turbofish 84-ffi-owned-string-ctor 85-ffi-vec-struct-field 86-ffi-transitive-dep-path 87-ffi-private-module-path 88-ffi-default-assoc-fn 89-ffi-static-str-into 90-ffi-default-trait-method-mono 91-ffi-cross-crate-impl 92-ffi-generic-self-open-t 93-ffi-customize-chain 94-ffi-inherent-self-output 95-ffi-inherent-self-output-async 96-ffi-external-trait-xcrate 97-ffi-numeric-param-coerce 98-ffi-projected-numeric 99-ffi-nested-numeric-drop 100-ffi-asref-return 101-task-rethunk 102-task-rethunk-free-tvar 103-task-rethunk-discard 104-ffi-owned-query-builder 105-ffi-generic-struct-accessor 106-ffi-feature-propagation 107-ffi-shimfree-semver 108-ffi-shimfree-multi 109-ffi-shimfree-multi2 111-ffi-shimfree-serde-json 112-ffi-shimfree-regex 112b-regex-nightly-pin)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -1356,6 +1356,37 @@ run_feature_propagation() {
 }
 
 
+# 112b-regex-nightly-pin — #106 the EXACT vector the guardian flagged. The
+# inspector runs `cargo +nightly rustdoc`, so on a NIGHTLY-default box the
+# stable-verify must NOT inherit the ambient nightly channel — it pins
+# RUSTUP_TOOLCHAIN=stable internally so a crate's nightly-only feature (regex
+# `pattern` → `#![feature(pattern)]`) is still detected (E0554-on-stable) and
+# DROPPED, keeping the portable kernel.json artifact stable-buildable. This
+# check FORCES `RUSTUP_TOOLCHAIN=nightly` in the ambient env and asserts the
+# inspector's emitted `effective_features` for regex stay EMPTY (no `pattern`).
+# Pre-fix (ambient default = verify channel) this would propagate `pattern`.
+run_regex_nightly_pin() {
+  local base=112b-regex-nightly-pin
+  if ! rustup toolchain list 2>/dev/null | rg -q '^nightly'; then
+    _ok "$base  (SKIPPED — nightly toolchain unavailable)"; return
+  fi
+  local insp="${SKY_FFI_INSPECTOR_RS:-}"
+  [ -x "$insp" ] || { _fail "$base (inspector binary not resolved at SKY_FFI_INSPECTOR_RS)"; return; }
+  local out="/tmp/ffi-$base.json"
+  if ! RUSTUP_TOOLCHAIN=nightly "$insp" regex >"$out" 2>/dev/null; then
+    _fail "$base (inspector run failed)"; return
+  fi
+  # effective_features serializes as the `"features"` array; an empty set is
+  # OMITTED (serde skip-if-empty). So the safe assertion is: no `"pattern"`
+  # inside any emitted `"features":[…]` array.
+  local featline; featline="$(rg -o '"features":\[[^]]*\]' "$out" 2>/dev/null | head -1)"
+  if [ -n "$featline" ] && echo "$featline" | rg -q '"pattern"'; then
+    _fail "$base: nightly-only 'pattern' propagated despite stable pin ($featline)"; return
+  fi
+  _ok "$base  (ambient RUSTUP_TOOLCHAIN=nightly → inspector stable-pin still drops nightly-only features · regex effective has no 'pattern')"
+}
+
+
 run_selfref_miri_proof() {
   local base=selfref-builder-proof
   # Sibling of $FIXROOT (a standalone proof crate, not a sky fixture).
@@ -1410,6 +1441,7 @@ for n in "${FIXTURES[@]}"; do
     104-ffi-owned-query-builder) run_owned_query_builder ;;
     105-ffi-generic-struct-accessor) run_generic_struct_accessor ;;
     106-ffi-feature-propagation) run_feature_propagation ;;
+    112b-regex-nightly-pin)   run_regex_nightly_pin ;;
     selfref-builder-proof)    run_selfref_miri_proof ;;
     *)                        run_basic "$n" ;;
   esac

@@ -36,7 +36,7 @@ the inspector emits). It is NOT proof the crate is usable. Verifying each crate'
 core API with real values + cargo-clean build + correct output) tells a very
 different, honest story:
 
-### GENUINELY shim-free — main functionality works (verified, real values), 6
+### GENUINELY shim-free — main functionality works (verified, real values), 7
 | crate | main functionality proven | fixture |
 |---|---|---|
 | semver | `parse "1.2.3"` + major/minor/patch + `VersionReq` match | 107 |
@@ -45,6 +45,7 @@ different, honest story:
 | time | `OffsetDateTime::from_unix_timestamp` | 108 |
 | hex | `encode [104,105] == "6869"` | 109 |
 | serde_json | `from_str "42"` (parse) + `as_i64` read (==42) | 111 |
+| regex | `Regex::new "^[0-9]+$"` + `is_match` (digits=T, "12a45"=F) | 112 |
 
 **serde_json was UNBLOCKED by fixing two ROOT-CAUSE gaps** (not by routing around
 them): #105 (inspector now emits the public `core::str::FromStr` path, not the
@@ -54,21 +55,34 @@ the receiver; `Value::as_i64(&self)` no longer mis-emits a `from_str::<Value>(&v
 prelude — unblocks EVERY serde-Value-receiver accessor: as_str/as_bool/as_f64/get/…).
 Guardian-approved; serde fixtures 73/79/81 regression-clean.
 
+**regex was UNBLOCKED by fixing the #106 ROOT-CAUSE gap** (not routed around): the
+inspector ran `cargo +nightly rustdoc`, so it auto-enabled regex's NIGHTLY-ONLY
+`pattern` feature (`#![cfg_attr(feature="pattern", feature(pattern))]`); Part B then
+propagated it into the PORTABLE kernel.json + generated Cargo.toml → E0554 on every
+stable consumer. Fix: the inspector now VERIFIES the auto-injected feature set
+against a PINNED-STABLE toolchain (`RUSTUP_TOOLCHAIN=stable`, `RUSTC`/`RUSTC_WRAPPER`/
+`RUSTC_BOOTSTRAP` removed) before propagating — builds-on-stable ⇒ builds-on-nightly,
+so it can only ever be more conservative. A nightly-gated set drops to default
+features (re-running rustdoc there so bindings ↔ features stay consistent) and the
+downgrade is surfaced to the user (Ffi.hs forwards inspector `[sky-ffi]` diagnostics
+on success). Guardian-approved (2-round); user-explicit sky.toml features kept
+verbatim; fixtures 112 + 112b (the nightly-ambient lock: `RUSTUP_TOOLCHAIN=nightly`
+forced → `pattern` still dropped).
+
 ### Main functionality BLOCKED by codegen/inspector gaps (NOT shim-free yet)
 | crate | main fn | blocked by |
 |---|---|---|
 | rusqlite | `Connection` (open/insert/query) | #107 — `Connection` is `!Send`/RefCell → can't be a Sky value |
 | bytes | construct from data | #107 — `From<&'static str>` impl picked (E0597) |
-| regex | `Regex::new` | #106 — inspector auto-enables nightly `pattern` feature → E0554 on stable |
 | csv | record reading | generic `Reader<R>` over the IO source — no clean bound path |
 | toml | parse / `Value` | private internal types (`SerBuffer`) on the usable path |
 
-**The honest state:** auto-FFI binds a large SURFACE for ≥10 complex crates, but the
-WORKING main functionality is **5 / 10**. Reaching 10 GENUINE requires fixing the
-gaps (#105, the serde-arg bug, #106, #107) — each unblocks a crate's core API. That
-is the real path; it is delicate inspector/codegen work, multi-session. A
-trivial-accessor call (`version_number()`, `default()`) is NOT a valid proof and
-must never be counted.
+**The honest state:** auto-FFI binds a large SURFACE for ≥10 complex crates, and the
+WORKING main functionality is now **7 / 10**. Reaching 10 GENUINE requires fixing the
+remaining gaps (#107 for bytes/rusqlite, plus csv generic-reader + toml private-type)
+— each unblocks a crate's core API. That is the real path; it is delicate inspector/
+codegen work, multi-session. A trivial-accessor call (`version_number()`, `default()`)
+is NOT a valid proof and must never be counted.
 
 ## What remains
 - Fix #105/#106/#107 + the serde-deserialize-arg bug → re-verify serde_json /

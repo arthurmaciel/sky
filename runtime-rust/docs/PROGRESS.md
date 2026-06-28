@@ -17,6 +17,49 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-27 22:50 — #106 RESOLVED — inspector pins STABLE to verify auto-injected features → regex is the 7th genuine shim-free crate
+
+**What.** Closed the Part-B regression where the FFI inspector propagated a crate's
+NIGHTLY-ONLY Cargo feature into the generated STABLE build → E0554. Root cause: the
+inspector introspects via `cargo +nightly rustdoc`, which silently accepts regex's
+`pattern` feature (`#![cfg_attr(feature="pattern", feature(pattern))]`); Part B then
+baked it into the PORTABLE kernel.json + generated Cargo.toml, breaking every stable
+consumer. regex is now genuinely shim-free (`Regex::new` + `is_match`), taking the
+verified-main-functionality count to **7 / 10**.
+
+**Why / how.** New `injected_stable_check` in the inspector runs `cargo check` against
+a PINNED-STABLE toolchain (`RUSTUP_TOOLCHAIN=stable`; `RUSTC`/`RUSTC_WRAPPER`/
+`RUSTC_BOOTSTRAP` removed so an ambient nightly default / wrapper / bootstrap flag
+can't forge a pass) BEFORE Part B propagates an AUTO-injected (#89) feature set.
+Stable is the portable floor: builds-on-stable ⇒ builds-on-nightly, so the pin can
+only be more conservative. Returns a 3-way `StableCheck { Builds | FeatureGated (E0554)
+| Unverifiable(reason) }`; soundness rests on EXIT STATUS (only a clean exit keeps the
+set — both other variants drop to default features + re-run rustdoc there so bindings ↔
+features stay consistent). User-EXPLICIT `--features` are kept verbatim. The check is
+skipped in the WALL-G PHASE-1 populate pass (discarded result) via a `verify_stable`
+flag. The downgrade is now SURFACED to the user — `Ffi.hs forwardInspectorDiagnostics`
+forwards the inspector's `[sky-ffi]` stderr on the SUCCESS path (previously every
+#89/#100/#106 downgrade was swallowed). The `Unverifiable` reason is sanitized to
+printable-ASCII before it reaches the TTY. Guardian-reviewed over 2 rounds (round 1
+caught the BLOCKING ambient-nightly hole — the original cut checked the ambient default
+toolchain, not a pinned stable; APPROVE in round 2).
+
+**Verification.** Fixtures `112-ffi-shimfree-regex` (real regex builds cargo-clean on
+stable + runs `[ALL OK]`; generated `regex = "1"`, no `pattern`) and
+`112b-regex-nightly-pin` (the exact vector lock: `RUSTUP_TOOLCHAIN=nightly` forced in
+the ambient env → inspector still drops `pattern`, effective features empty). 106
+(stable `extra` feature still propagates) + 111 (serde_json) regression-clean. Inspector
+clippy-clean; `cabal build exe:sky` clean.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs` (StableCheck enum +
+injected_stable_check + verify_stable threading), `src/Sky/Build/Rust/Ffi.hs`
+(forwardInspectorDiagnostics), `runtime-rust/scripts/ffi-fixtures-test.sh` (112 + 112b),
+`runtime-rust/tests/sky/112-ffi-shimfree-regex/`, scorecard
+`docs/superpowers/specs/2026-06-27-ffi-10-complex-crate-coverage-scorecard.md`,
+`runtime-rust/CLAUDE.md` (Agent-learnings #106 refinement). Follow-ups (non-blocking,
+guardian): default-feature fallback is itself unchecked (a crate whose DEFAULT features
+need nightly propagates `[]` yet is non-stable-buildable — fundamental, document).
+
 ## 2026-06-27 17:30 — #68 RESOLVED — firestore fully usable via the OWNED path (locked) + the borrow-binding circumvention designed, MIRI-proven, gated (guardian)
 
 User-authorized a LOCAL real-crate investigation of #68 (overrode no-local-sweeps
