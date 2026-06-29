@@ -5,7 +5,17 @@
 use super::SkyResult;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+
+/// The set of bytes `urlEncode` percent-encodes, matching Go's
+/// `url.QueryEscape` (`encodeQueryComponent`): every byte is escaped EXCEPT
+/// the ASCII alphanumerics and the four unreserved marks `-` `_` `.` `~`
+/// (RFC 3986 §2.3). Space is handled separately (`%20` → `+`) below.
+const QUERY: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
 
 // ── Bytes-on-Rust convention ──────────────────────────────────────────────
 //
@@ -88,11 +98,13 @@ pub fn base64_decode<E: From<String>>(s: String) -> SkyResult<E, String> {
 }
 
 /// Sky `urlEncode : String -> String` — Go url.QueryEscape semantics: space
-/// becomes `+` (not %20), other non-alphanumerics percent-encoded.
+/// becomes `+` (not %20); the ASCII unreserved set (`A-Za-z0-9` plus `-_.~`)
+/// is left verbatim; every other byte is percent-encoded.
 pub fn url_encode(s: String) -> String {
-    // NON_ALPHANUMERIC encodes space as %20; QueryEscape uses '+'. Encode '+'
-    // itself as %2B first so the swap is unambiguous on decode.
-    utf8_percent_encode(&s, NON_ALPHANUMERIC)
+    // QUERY encodes space as %20 (it is in the set); QueryEscape uses '+'.
+    // '+' itself is not in the unreserved set, so it encodes to %2B first —
+    // making the %20 → '+' swap unambiguous on decode.
+    utf8_percent_encode(&s, QUERY)
         .to_string()
         .replace("%20", "+")
 }
