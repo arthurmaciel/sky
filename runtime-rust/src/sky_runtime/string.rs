@@ -61,7 +61,137 @@ pub fn string_right(n: i64, s: String) -> String {
     let start = runes.len().saturating_sub(n as usize);
     runes.get(start..).map(|r| r.iter().collect()).unwrap_or_default()
 }
-pub fn string_from_float(f: f64) -> String { format!("{}", f) }
+/// `String.fromFloat : Float -> String`.
+///
+/// A faithful port of Go's `strconv.FormatFloat(f, 'g', -1, 64)` — the exact
+/// spelling the Go reference's typed codegen routes `String.fromFloat` to
+/// (`runtime-go/rt/rt.go` `String_fromFloatT`). We mirror it byte-for-byte
+/// because the example sweep diffs Rust stdout against the Go oracle.
+///
+/// WHY a hand-written helper: Rust's `{}` never uses exponent form and `{:e}`
+/// always does, so neither can express `'g'`'s rule on its own. `'g'` chooses
+/// positional (`%f`) form when the decimal exponent lands in `[-4, 6)` and
+/// exponent (`%e`) form otherwise — the same `eprec = 6` shortest-mode cut Go's
+/// `internal/strconv` `formatDigits` applies. (Go's older public comment said
+/// 21; the shipped implementation we diff against uses 6, and the oracle agrees
+/// — `1e6` prints `1e+06`, `1e5` prints `100000`.) Non-finite values take Go's
+/// `+Inf` / `-Inf` / `NaN` spellings.
+///
+/// We obtain the *shortest round-trip* significant digits + scientific exponent
+/// from `{:e}` (Rust's std formatter picks the same canonical shortest decimal
+/// as Go's Dragonbox), then re-render under `'g'`'s positional-vs-exponent rule.
+pub fn string_from_float(f: f64) -> String {
+    // Non-finite: Go's strconv spells these with a sign on the infinities.
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f < 0.0 { "-Inf" } else { "+Inf" }.to_string();
+    }
+    // Negative zero must keep its sign ("-0"), matching Go; `is_sign_negative`
+    // is the only check that distinguishes -0.0 from +0.0.
+    let neg = f.is_sign_negative();
+    if f == 0.0 {
+        return if neg { "-0" } else { "0" }.to_string();
+    }
+
+    // `{:e}` yields the shortest round-trip form `d[.ddd]e<exp>` for the
+    // magnitude; split it into significant digits and the scientific exponent.
+    let sci = format!("{:e}", f.abs());
+    let (mantissa, exp_str) = match sci.split_once('e') {
+        Some(parts) => parts,
+        // Unreachable for a finite f64 — `{:e}` always emits an `e`. Falling
+        // back to the raw string keeps the function total rather than panicking.
+        None => return sci,
+    };
+    let sci_exp: i32 = exp_str.parse().unwrap_or(0);
+    // Significant digits with the radix point removed: e.g. "1.256" -> "1256".
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+
+    // Go's `decimalSlice`: digit count and decimal-point position. The value is
+    // `digits * 10^(dp - nd)`; `{:e}` puts one digit before the point, so the
+    // point sits one place right of the leading digit: `dp = sci_exp + 1`.
+    let dp = sci_exp + 1;
+    let exp = dp - 1; // the exponent Go tests against, == sci_exp
+
+    // Go's `'g'` rule (shortest mode): positional `%f` form for an exponent in
+    // `[-4, 6)`, exponent `%e` form otherwise. `!(-4..6).contains` spells the
+    // `exp < -4 || exp >= 6` test the reference applies.
+    if (-4..6).contains(&exp) {
+        fmt_g_positional(neg, &digits, dp)
+    } else {
+        fmt_g_exponent(neg, &digits, exp)
+    }
+}
+
+/// `'g'`'s `%e` rendering (Go `fmtE`, shortest mode): `d[.ddd]e±NN`, with the
+/// sign always present and at least two exponent digits (`1e-05`, `1e+21`).
+fn fmt_g_exponent(neg: bool, digits: &str, exp: i32) -> String {
+    let mut out = String::new();
+    if neg {
+        out.push('-');
+    }
+    let mut chars = digits.chars();
+    if let Some(first) = chars.next() {
+        out.push(first);
+    }
+    let rest: String = chars.collect();
+    if !rest.is_empty() {
+        out.push('.');
+        out.push_str(&rest);
+    }
+    out.push('e');
+    let (sign, mag) = if exp < 0 { ('-', -exp) } else { ('+', exp) };
+    out.push(sign);
+    if mag < 10 {
+        // Pad to the two-digit minimum Go always emits.
+        out.push('0');
+    }
+    out.push_str(&mag.to_string());
+    out
+}
+
+/// `'g'`'s `%f` rendering (Go `fmtF`, shortest mode): `ddd[.ddd]`, padding the
+/// integer part with zeros (`1500`) and reading fraction digits past the point.
+fn fmt_g_positional(neg: bool, digits: &str, dp: i32) -> String {
+    let bytes = digits.as_bytes();
+    let nd = bytes.len() as i32;
+    let frac = (nd - dp).max(0); // fractional digit count
+    let mut out = String::new();
+    if neg {
+        out.push('-');
+    }
+    // Integer part: the first `dp` digits, zero-padded if the value has more
+    // integer places than significant digits (e.g. 1500 from digits "15").
+    if dp > 0 {
+        let take = nd.min(dp);
+        for i in 0..take {
+            if let Some(&b) = bytes.get(i as usize) {
+                out.push(b as char);
+            }
+        }
+        for _ in take..dp {
+            out.push('0');
+        }
+    } else {
+        out.push('0');
+    }
+    // Fraction: each place reads a significant digit when one exists at that
+    // position, otherwise a zero (leading zeros for sub-1 values like 0.0001).
+    if frac > 0 {
+        out.push('.');
+        for i in 0..frac {
+            let j = dp + i;
+            let ch = if j >= 0 && j < nd {
+                bytes.get(j as usize).map_or(b'0', |&b| b)
+            } else {
+                b'0'
+            };
+            out.push(ch as char);
+        }
+    }
+    out
+}
 pub fn string_split(sep: String, s: String) -> Vec<String> { s.split(&sep).map(|x| x.to_string()).collect() }
 // Sky.Core.String.lines / .words — split on line breaks / runs of whitespace.
 pub fn string_lines(s: String) -> Vec<String> { s.lines().map(|x| x.to_string()).collect() }
@@ -360,6 +490,27 @@ mod tests {
     #[test] fn test_repeat_three() { assert_eq!(string_repeat(3, "ab".into()), "ababab"); }
     #[test] fn test_repeat_zero() { assert_eq!(string_repeat(0, "ab".into()), ""); }
     #[test] fn test_repeat_negative() { assert_eq!(string_repeat(-1, "ab".into()), ""); }
+
+    // string_from_float — byte-for-byte parity with Go's
+    // strconv.FormatFloat(f, 'g', -1, 64). Ground-truth values captured from
+    // the Go oracle (`String.fromFloat` typed path) and `go run` on strconv.
+    #[test] fn ff_small_exponent() { assert_eq!(string_from_float(0.00001), "1e-05"); }
+    #[test] fn ff_tiny_exponent() { assert_eq!(string_from_float(1e-10), "1e-10"); }
+    #[test] fn ff_huge_exponent() { assert_eq!(string_from_float(1e21), "1e+21"); }
+    #[test] fn ff_e5_neg_exponent() { assert_eq!(string_from_float(1e-5), "1e-05"); }
+    #[test] fn ff_whole_positional() { assert_eq!(string_from_float(1500.0), "1500"); }
+    #[test] fn ff_simple_fraction() { assert_eq!(string_from_float(1.5), "1.5"); }
+    #[test] fn ff_two_fraction() { assert_eq!(string_from_float(12.56), "12.56"); }
+    #[test] fn ff_sub_one_positional() { assert_eq!(string_from_float(0.0001), "0.0001"); }
+    #[test] fn ff_e6_flips_to_exponent() { assert_eq!(string_from_float(1e6), "1e+06"); }
+    #[test] fn ff_e5_stays_positional() { assert_eq!(string_from_float(1e5), "100000"); }
+    #[test] fn ff_many_fraction() { assert_eq!(string_from_float(123456.789), "123456.789"); }
+    #[test] fn ff_pos_inf() { assert_eq!(string_from_float(f64::INFINITY), "+Inf"); }
+    #[test] fn ff_neg_inf() { assert_eq!(string_from_float(f64::NEG_INFINITY), "-Inf"); }
+    #[test] fn ff_nan() { assert_eq!(string_from_float(f64::NAN), "NaN"); }
+    #[test] fn ff_pos_zero() { assert_eq!(string_from_float(0.0), "0"); }
+    #[test] fn ff_neg_zero() { assert_eq!(string_from_float(-0.0), "-0"); }
+    #[test] fn ff_negative() { assert_eq!(string_from_float(-1.5), "-1.5"); }
 
     // ── New kernels ───────────────────────────────────────────────────────────
 
