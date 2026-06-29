@@ -19,16 +19,24 @@ pub fn string_trim(s: String) -> String { s.trim().to_string() }
 // Sky `contains : String -> String -> Bool  -- contains sub str` (str contains
 // sub). Args arrive as (sub, str), so test the SECOND against the first.
 pub fn string_contains(sub: String, s: String) -> bool { s.contains(&sub) }
-/// `String.toInt : String -> Maybe Int`. Go parity (`String_toIntT`):
-/// `strconv.Atoi(strings.TrimSpace(s))` — leading/trailing Unicode whitespace
-/// is trimmed before parsing. Rust's `str::trim` uses `char::is_whitespace`
-/// (the Unicode White_Space property), matching Go's `unicode.IsSpace` set.
+/// `String.toInt : String -> Maybe Int`. Parity with the Go reference's
+/// OBSERVABLE behaviour (`String_toInt` = `strconv.Atoi(s)`, NO trim): the Go
+/// compiler routes `String.toInt` through this any-typed path, so surrounding
+/// whitespace makes the parse fail — `String.toInt " 42 " == Nothing`. (Go's
+/// unused `String_toIntT` companion happens to `TrimSpace` first, but the
+/// emitted code never reaches it; the golden oracle confirms `Nothing`.) This
+/// also matches Elm-family `String.toInt`, which does not trim. So no `.trim()`
+/// here — a leading/trailing space yields `Nothing`, exactly like the oracle.
 pub fn string_to_int(s: String) -> SkyMaybe<i64> {
-    match s.trim().parse::<i64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
+    match s.parse::<i64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
 }
-/// `String.toFloat : String -> Maybe Float`. Go parity (`String_toFloatT`):
-/// `strconv.ParseFloat(strings.TrimSpace(s), 64)` — trims Unicode whitespace
-/// (via `str::trim` / `char::is_whitespace`) before parsing.
+/// `String.toFloat : String -> Maybe Float`. Go parity (`String_toFloat`):
+/// `strconv.ParseFloat(strings.TrimSpace(s), 64)` — UNLIKE `toInt`, Go's float
+/// path DOES trim Unicode whitespace before parsing (the oracle confirms
+/// `String.toFloat " 1.5 " == Just 1.5`), so we trim here too via `str::trim`
+/// (`char::is_whitespace` = the Unicode White_Space property, matching Go's
+/// `unicode.IsSpace`). The toInt/toFloat trim asymmetry mirrors the Go runtime.
+///
 ///
 /// SANCTIONED-STRICTER vs Go: Rust's `f64::from_str` accepts only the standard
 /// decimal / scientific grammar, rejecting Go's hex-float (`0x1p-2`) and
@@ -637,11 +645,14 @@ mod tests {
     #[test] fn test_split_empty_sep_empty_str() { assert_eq!(string_split("".into(), "".into()), Vec::<String>::new()); }
     #[test] fn test_split_trailing_sep() { assert_eq!(string_split(",".into(), "a,".into()), vec!["a", ""]); }
 
-    // string_to_int — Unicode-whitespace trim (Go strconv.Atoi(TrimSpace))
+    // string_to_int — NO trim: parity with Go's observable `String_toInt`
+    // (`strconv.Atoi(s)`, the path the emitted code uses) and Elm's `String.toInt`.
+    // Surrounding whitespace ⇒ Nothing; only a clean numeric string parses.
     #[test] fn test_to_int_plain() { assert!(matches!(string_to_int("42".into()), SkyMaybe::Just(42))); }
-    #[test] fn test_to_int_trimmed() { assert!(matches!(string_to_int("  42 \t\n".into()), SkyMaybe::Just(42))); }
-    #[test] fn test_to_int_nbsp_not_ascii() { assert!(matches!(string_to_int("\u{2028}7\u{2029}".into()), SkyMaybe::Just(7))); }
-    #[test] fn test_to_int_negative() { assert!(matches!(string_to_int(" -5 ".into()), SkyMaybe::Just(-5))); }
+    #[test] fn test_to_int_negative() { assert!(matches!(string_to_int("-5".into()), SkyMaybe::Just(-5))); }
+    #[test] fn test_to_int_no_trim_leading() { assert!(matches!(string_to_int(" 42".into()), SkyMaybe::Nothing)); }
+    #[test] fn test_to_int_no_trim_trailing() { assert!(matches!(string_to_int("42 ".into()), SkyMaybe::Nothing)); }
+    #[test] fn test_to_int_no_trim_both() { assert!(matches!(string_to_int(" 42 ".into()), SkyMaybe::Nothing)); }
     #[test] fn test_to_int_garbage() { assert!(matches!(string_to_int("4x".into()), SkyMaybe::Nothing)); }
 
     // string_to_float — Unicode-whitespace trim
