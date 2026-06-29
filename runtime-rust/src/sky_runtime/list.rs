@@ -17,6 +17,26 @@ pub fn list_head<T>(xs: Vec<T>) -> SkyMaybe<T> {
     }
 }
 
+/// `Sky.Core.List.tail : List a -> Maybe (List a)` — everything after the first
+/// element, or `Nothing` on the empty list. Total (no indexing panic); mirrors
+/// the pure-Sky `tail` (`[] -> Nothing`, `(_ :: rest) -> Just rest`).
+pub fn list_tail<T>(xs: Vec<T>) -> SkyMaybe<Vec<T>> {
+    if xs.is_empty() {
+        SkyMaybe::Nothing
+    } else {
+        // Drop the head; the remaining elements move into the tail vector.
+        SkyMaybe::Just(xs.into_iter().skip(1).collect())
+    }
+}
+
+/// `Sky.Core.List.reverse : List a -> List a` — the elements in reverse order.
+/// Total; no `T: Clone` bound (the elements only MOVE).
+pub fn list_reverse<T>(xs: Vec<T>) -> Vec<T> {
+    let mut xs = xs;
+    xs.reverse();
+    xs
+}
+
 /// `Sky.Core.List.drop : Int -> List a -> List a` — drops the first `n`
 /// elements. `n <= 0` keeps the whole list; `n >= len` yields `[]`. Total.
 pub fn list_drop<T>(n: i64, xs: Vec<T>) -> Vec<T> {
