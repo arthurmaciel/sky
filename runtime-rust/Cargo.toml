@@ -42,6 +42,12 @@ md-5 = "0.10"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgres"], optional = true }
 redis = { version = "0.27", features = ["tokio-comp"], optional = true }
 regex = "1"
+# Exact Unicode General_Category lookup. NON-optional: char_kernel.rs (always
+# compiled) needs it to match Go's `unicode.Is{Digit,Letter,Lower,Upper}` —
+# which key off precise GCs (Nd / L* / Ll / Lu), narrower than Rust std's
+# `char::is_numeric`/`is_lowercase`/`is_uppercase` (which fold in No/Nl,
+# Other_Lowercase, Other_Uppercase). See char_kernel.rs.
+unicode-general-category = "1"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4", "v7"] }
 hex = "0.4"
