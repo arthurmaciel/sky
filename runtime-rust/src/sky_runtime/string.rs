@@ -19,12 +19,23 @@ pub fn string_trim(s: String) -> String { s.trim().to_string() }
 // Sky `contains : String -> String -> Bool  -- contains sub str` (str contains
 // sub). Args arrive as (sub, str), so test the SECOND against the first.
 pub fn string_contains(sub: String, s: String) -> bool { s.contains(&sub) }
+/// `String.toInt : String -> Maybe Int`. Go parity (`String_toIntT`):
+/// `strconv.Atoi(strings.TrimSpace(s))` — leading/trailing Unicode whitespace
+/// is trimmed before parsing. Rust's `str::trim` uses `char::is_whitespace`
+/// (the Unicode White_Space property), matching Go's `unicode.IsSpace` set.
 pub fn string_to_int(s: String) -> SkyMaybe<i64> {
-    match s.parse::<i64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
+    match s.trim().parse::<i64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
 }
-/// `String.toFloat : String -> Maybe Float`. Mirrors string_to_int.
+/// `String.toFloat : String -> Maybe Float`. Go parity (`String_toFloatT`):
+/// `strconv.ParseFloat(strings.TrimSpace(s), 64)` — trims Unicode whitespace
+/// (via `str::trim` / `char::is_whitespace`) before parsing.
+///
+/// SANCTIONED-STRICTER vs Go: Rust's `f64::from_str` accepts only the standard
+/// decimal / scientific grammar, rejecting Go's hex-float (`0x1p-2`) and
+/// underscore-digit-separator forms. This is a deliberate tightening — those
+/// forms never round-trip from `String.fromFloat` — so no golden is needed.
 pub fn string_to_float(s: String) -> SkyMaybe<f64> {
-    match s.parse::<f64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
+    match s.trim().parse::<f64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
 }
 /// `String.fromChar : Char -> String`.
 pub fn string_from_char(c: char) -> String { c.to_string() }
@@ -192,7 +203,19 @@ fn fmt_g_positional(neg: bool, digits: &str, dp: i32) -> String {
     }
     out
 }
-pub fn string_split(sep: String, s: String) -> Vec<String> { s.split(&sep).map(|x| x.to_string()).collect() }
+/// `String.split : String -> String -> List String`. Go's `strings.Split`
+/// semantics (`String_splitT`): a non-empty separator splits on each
+/// occurrence (`s.split(&sep)`), while an EMPTY separator splits `s` into its
+/// individual runes with NO leading/trailing empty sentinels — and
+/// `split("", "")` yields the empty list. Rust's `str::split("")` instead emits
+/// boundary "" entries (`["", "a", …, ""]`), so the empty-sep case is handled
+/// by rune iteration to match Go exactly.
+pub fn string_split(sep: String, s: String) -> Vec<String> {
+    if sep.is_empty() {
+        return s.chars().map(|c| c.to_string()).collect();
+    }
+    s.split(&sep).map(|x| x.to_string()).collect()
+}
 // Sky.Core.String.lines / .words — split on line breaks / runs of whitespace.
 pub fn string_lines(s: String) -> Vec<String> { s.lines().map(|x| x.to_string()).collect() }
 pub fn string_words(s: String) -> Vec<String> { s.split_whitespace().map(|x| x.to_string()).collect() }
@@ -606,6 +629,26 @@ mod tests {
     #[test] fn test_trim_end_nbsp() { assert_eq!(string_trim_end("hello\u{00A0}".into()), "hello"); }
     #[test] fn test_trim_end_no_leading() { assert_eq!(string_trim_end("  hello  ".into()), "  hello"); }
     #[test] fn test_trim_end_empty() { assert_eq!(string_trim_end("".into()), ""); }
+
+    // string_split — Go strings.Split parity
+    #[test] fn test_split_nonempty_sep() { assert_eq!(string_split(",".into(), "a,b,c".into()), vec!["a", "b", "c"]); }
+    #[test] fn test_split_empty_sep_runes() { assert_eq!(string_split("".into(), "abc".into()), vec!["a", "b", "c"]); }
+    #[test] fn test_split_empty_sep_unicode() { assert_eq!(string_split("".into(), "héi".into()), vec!["h", "é", "i"]); }
+    #[test] fn test_split_empty_sep_empty_str() { assert_eq!(string_split("".into(), "".into()), Vec::<String>::new()); }
+    #[test] fn test_split_trailing_sep() { assert_eq!(string_split(",".into(), "a,".into()), vec!["a", ""]); }
+
+    // string_to_int — Unicode-whitespace trim (Go strconv.Atoi(TrimSpace))
+    #[test] fn test_to_int_plain() { assert!(matches!(string_to_int("42".into()), SkyMaybe::Just(42))); }
+    #[test] fn test_to_int_trimmed() { assert!(matches!(string_to_int("  42 \t\n".into()), SkyMaybe::Just(42))); }
+    #[test] fn test_to_int_nbsp_not_ascii() { assert!(matches!(string_to_int("\u{2028}7\u{2029}".into()), SkyMaybe::Just(7))); }
+    #[test] fn test_to_int_negative() { assert!(matches!(string_to_int(" -5 ".into()), SkyMaybe::Just(-5))); }
+    #[test] fn test_to_int_garbage() { assert!(matches!(string_to_int("4x".into()), SkyMaybe::Nothing)); }
+
+    // string_to_float — Unicode-whitespace trim
+    #[test] fn test_to_float_plain() { assert!(matches!(string_to_float("1.5".into()), SkyMaybe::Just(v) if v == 1.5)); }
+    #[test] fn test_to_float_trimmed() { assert!(matches!(string_to_float("  1.5\n".into()), SkyMaybe::Just(v) if v == 1.5)); }
+    #[test] fn test_to_float_scientific() { assert!(matches!(string_to_float(" 1e3 ".into()), SkyMaybe::Just(v) if v == 1000.0)); }
+    #[test] fn test_to_float_garbage() { assert!(matches!(string_to_float("1.2.3".into()), SkyMaybe::Nothing)); }
 
     // round-trip toList / fromList
     #[test] fn test_list_roundtrip() {
