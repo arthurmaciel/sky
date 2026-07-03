@@ -1111,7 +1111,7 @@ calleeMangledGenTokens ctx fn =
 -- UpperCamelCase type-var (`Msg`) is recognised as a var rather than misread
 -- as a concrete type (which would wrongly turbofish an unbound generic → E0308).
 emitEmptyArg :: EmitCtx -> Set.Set String -> Maybe (ParamSrc, [String]) -> Int -> Can.Expr -> String
-emitEmptyArg _ genToks mps i arg =
+emitEmptyArg ctx genToks mps i arg =
     let kind = case emptyArgKind arg of
             Just k  -> k
             Nothing -> EKList  -- unreachable: only called on empty-ish args
@@ -1177,9 +1177,19 @@ emitEmptyArg _ genToks mps i arg =
                    _ -> bare
                else if allVarsPinned then inferrable
                     else if pinnedBySibling then bare
-                    -- Unpinned var: default only when the sig is known-generic
-                    -- (knownDefSig). For inferred sigs the generated Rust param
-                    -- may be concrete, so stay bare and let Rust infer.
+                    -- Unpinned var that is an ENCLOSING-fn generic param → bare:
+                    -- Rust infers the empty collection's element type from the
+                    -- enclosing signature's return flow. The v0.17 CPS delegators
+                    -- (`map fn list = mapHelp fn list []`) hit this — the acc's
+                    -- `T1` is the enclosing `map`'s own return generic, so a
+                    -- concrete phantom (`Vec::<i64>`) would mismatch the callee's
+                    -- `Vec<T1>` param (E0308). `ecGenParams` holds the enclosing
+                    -- fn's declared generics.
+                    else if not (null vars) && all (`elem` ecGenParams ctx) vars then bare
+                    -- Unpinned var with no enclosing binding: default only when the
+                    -- sig is known-generic (knownDefSig). For inferred sigs the
+                    -- generated Rust param may be concrete, so stay bare and let
+                    -- Rust infer.
                     else if src == SrcKnownSig then defaultFiller else bare
         _ -> bare
 

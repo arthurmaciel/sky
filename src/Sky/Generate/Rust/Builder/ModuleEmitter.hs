@@ -741,7 +741,31 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         -- UpperCamelCase (non_camel_case_types). Both decl here and every USE
         -- via typeToRustString's `Can.TVar` arm route through mangleTVar, so
         -- decl ≡ use.
-        genBound v = mangleTVar v ++ ": Clone + PartialEq + std::fmt::Debug + Send + Sync + 'static"
+        -- The private stdlib recursion helpers (`reverseHelp`/`lengthHelp`/
+        -- `indexedMapHelp`/`zipHelp` — List/Maybe/Result each ship annotated
+        -- copies) are pure-structural: they only MOVE or COUNT elements via the
+        -- bound-free `sky_list_cons`; they never compare, debug, or cross a thread
+        -- boundary. The universal full bound set therefore OVER-constrains them,
+        -- and their v0.17 knownDefSig callers (`length`/`indexedMap`/… + the CPS
+        -- helpers `mapHelp`/`filterHelp`/… registered Clone-only in SigRegistry)
+        -- that delegate through them then fail `T: PartialEq/Debug/Send/Sync`
+        -- (E0277 — the v0.17 CPS/accumulator rewrite introduced the public→helper
+        -- delegation that didn't exist when these were self-recursive). Requiring
+        -- only `Clone` is sound (callers always satisfy more) and fixes the whole
+        -- list-op chain without propagating the heavy bound set up through every
+        -- public wrapper (which would also spuriously reject Task-valued results).
+        -- Scoped to the stdlib List/Maybe/Result modules so a user function of the
+        -- same name (which MIGHT flow a value across a TEA boundary) is untouched.
+        inCoreCollectionMod =
+               "Sky_Core_List"   `isPrefixOf` _modPrefix
+            || "Sky_Core_Maybe"  `isPrefixOf` _modPrefix
+            || "Sky_Core_Result" `isPrefixOf` _modPrefix
+        reverseAccumHelper =
+            inCoreCollectionMod
+            && name `elem` ["reverseHelp", "lengthHelp", "indexedMapHelp", "zipHelp"]
+        genBound v = mangleTVar v ++ ": Clone"
+                       ++ (if reverseAccumHelper then ""
+                           else " + PartialEq + std::fmt::Debug + Send + Sync + 'static")
                        ++ (if v == "any" && bodyHasDbGet then " + SkyRow" else "")
                        ++ (if bodyStringifies then " + SkyStringify" else "")
         genDecl = if null tvarNames then ""

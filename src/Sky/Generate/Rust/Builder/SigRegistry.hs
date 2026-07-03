@@ -37,6 +37,24 @@ knownDefSig _ _ _ = Nothing
 
 listSig :: String -> Int -> Maybe ([String], String)
 listSig "map" 2 = Just (["impl Fn(T0) -> T1 + Clone", "Vec<T0>"], "Vec<T1>")
+-- v0.17 CPS/accumulator helpers. Upstream dropped their explicit `.sky`
+-- signatures (their bodies over-constrained Go-side HM cross-module unification —
+-- see the concatMapHelp note in List.sky). The Go backend infers these per-region
+-- from the solver; the Rust backend's solved-sig path can't render a polymorphic
+-- higher-order param (a `(a -> b)` TLambda is neither concrete nor an open
+-- record), so it fell through to the body-analysis fallback and mis-emitted the
+-- function param as `Vec<T0>` with no return type. Register them here (same
+-- mechanism as the already-listed `indexedMapHelp`/`reverseHelp`) so the recursion
+-- helpers get their proper generic bounds. These are private stdlib helpers — the
+-- shapes mirror their public partners (`map`/`filter`/`concatMap`/`take`/`append`/
+-- `concat`) exactly.
+listSig "mapHelp" 3 = Just (["impl Fn(T0) -> T1 + Clone", "Vec<T0>", "Vec<T1>"], "Vec<T1>")
+listSig "filterHelp" 3 = Just (["impl Fn(T0) -> bool + Clone", "Vec<T0>", "Vec<T0>"], "Vec<T0>")
+listSig "concatMapHelp" 3 = Just (["impl Fn(T0) -> Vec<T1> + Clone", "Vec<T0>", "Vec<T1>"], "Vec<T1>")
+listSig "takeHelp" 3 = Just (["i64", "Vec<T0>", "Vec<T0>"], "Vec<T0>")
+listSig "appendHelp" 2 = Just (["Vec<T0>", "Vec<T0>"], "Vec<T0>")
+listSig "concatHelp" 2 = Just (["Vec<Vec<T0>>", "Vec<T0>"], "Vec<T0>")
+listSig "appendReverseOnto" 2 = Just (["Vec<T0>", "Vec<T0>"], "Vec<T0>")
 -- `filterMap` return T1 doesn't need Clone (Task or other non-Clone types)
 listSig "filterMap" 2 = Just (["impl Fn(T0) -> SkyMaybe<T1> + Clone", "Vec<T0>"], "Vec<T1>")
 -- `map` with discarded side effects: T1 doesn't need Clone (Task results)
@@ -107,6 +125,11 @@ maybeSig "isJust" 1 = Just (["SkyMaybe<T0>"], "bool")
 maybeSig "isNothing" 1 = Just (["SkyMaybe<T0>"], "bool")
 -- combine : List (Maybe a) -> Maybe (List a)
 maybeSig "combine" 1 = Just (["Vec<SkyMaybe<T0>>"], "SkyMaybe<Vec<T0>>")
+-- v0.17 CPS helpers for `combine` (unsigned in Maybe.sky). `combineHelp` builds
+-- the unwrapped list in a reversed accumulator; `reverseHelp` is Maybe.sky's own
+-- inlined list-reverse (kept private to avoid a Maybe↔List import cycle).
+maybeSig "combineHelp" 2 = Just (["Vec<SkyMaybe<T0>>", "Vec<T0>"], "SkyMaybe<Vec<T0>>")
+maybeSig "reverseHelp" 2 = Just (["Vec<T0>", "Vec<T0>"], "Vec<T0>")
 maybeSig _ _ = Nothing
 
 resultSig :: String -> Int -> Maybe ([String], String)
@@ -125,6 +148,11 @@ resultSig "map5" 6 = Just (["impl Fn(T0, T1, T2, T3, T4) -> T5 + Clone", "SkyRes
 resultSig "andMap" 2 = Just (["SkyResult<SkyError, T0>", "SkyResult<SkyError, impl Fn(T0) -> T1 + Clone>"], "SkyResult<SkyError, T1>")
 resultSig "combine" 1 = Just (["Vec<SkyResult<SkyError, T0>>"], "SkyResult<SkyError, Vec<T0>>")
 resultSig "traverse" 2 = Just (["impl Fn(T0) -> SkyResult<SkyError, T1> + Clone", "Vec<T0>"], "SkyResult<SkyError, Vec<T1>>")
+-- v0.17 CPS helpers for `combine` (unsigned in Result.sky). `combineHelp` builds
+-- the unwrapped list in a reversed accumulator; `reverseHelp` is Result.sky's own
+-- inlined list-reverse (kept private to avoid a Result↔List import cycle).
+resultSig "combineHelp" 2 = Just (["Vec<SkyResult<SkyError, T0>>", "Vec<T0>"], "SkyResult<SkyError, Vec<T0>>")
+resultSig "reverseHelp" 2 = Just (["Vec<T0>", "Vec<T0>"], "Vec<T0>")
 resultSig _ _ = Nothing
 
 errorSig :: String -> Int -> Maybe ([String], String)
