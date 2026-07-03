@@ -43,6 +43,25 @@
 # IMPROVE THIS SCRIPT / lib/checks.sh / the overrides manifest.
 #
 # Exit: 0 = no RED row · 1 = a RED row (build/run/equiv failure) · 2 = setup/gate.
+
+# ── Modern-bash re-exec (macOS ships bash 3.2) ──────────────────────────────
+# lib/examples.sh builds the stdlib index in a `declare -gA` associative array —
+# bash 4.0+ only. macOS's system /bin/bash is 3.2 (no assoc arrays, no `declare
+# -g`), so the whole sweep dies at setup with "declare: -g: invalid option" →
+# "sky: unbound variable" → "EXAMPLES[@]: unbound variable". Re-exec under a
+# modern bash (Homebrew on the macOS runners: /opt/homebrew/bin/bash on Apple
+# Silicon, /usr/local/bin/bash on Intel) before any bash-4 construct is reached.
+# No-op on Linux and Windows Git Bash (both already >= 4).
+if [ -z "${SKY_SWEEP_BASH_REEXEC:-}" ] && [ "${BASH_VERSINFO:-0}" -lt 4 ]; then
+  for _b in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null)"; do
+    if [ -x "$_b" ] && [ "$("$_b" -c 'echo "${BASH_VERSINFO:-0}"' 2>/dev/null)" -ge 4 ] 2>/dev/null; then
+      SKY_SWEEP_BASH_REEXEC=1 exec "$_b" "$0" "$@"
+    fi
+  done
+  echo "ERROR: examples-sweep needs bash >= 4 (associative arrays); found bash ${BASH_VERSION:-?} and no bash>=4 on PATH / Homebrew. Install one (e.g. \`brew install bash\`)." >&2
+  exit 2
+fi
+
 set -uo pipefail
 
 # ── Env + manifest + shared checks (SINGLE SOURCE OF TRUTH under lib/) ───────
