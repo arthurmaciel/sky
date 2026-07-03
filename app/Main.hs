@@ -2004,63 +2004,74 @@ runCommand cmd = case cmd of
         return (Right ())
 
     Build path mTarget -> do
-        config <- readConfigStrict
-        -- CLI target overrides config
-        let config' = case mTarget of
-                Just t -> config { Toml._backend = parseBackend t }
-                Nothing -> config
-        let outDir = "sky-out"
-        createDirectoryIfMissing True outDir
-        -- Auto-regen missing Go FFI bindings before compile. Idempotent:
-        -- skips deps whose .kernel.json is already present.
-        let goDeps = Toml._goDeps config'
-        when (not (null goDeps)) $ do
-            hasGoMod <- doesFileExist "sky-out/go.mod"
-            when (not hasGoMod) $ do
-                hasRt <- doesFileExist "runtime-go/go.mod"
-                if hasRt
-                    then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
-                    else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-            regenMissingBindings (Toml._backend config') goDeps
-        let rustDeps = Toml._rustDeps config'
-        when (not (null rustDeps)) $
-            regenMissingRustBindings rustDeps
-        result <- Compile.compile config' path outDir
-        case result of
-            Left err -> return (Left err)
-            Right _ -> do
-                case Toml._backend config' of
-                    Toml.BackendGo -> do
-                        let goPath = outDir </> "main.go"
-                        putStrLn "Running go build..."
-                        runGoBuildWithDiagnostics outDir (Toml._binName config') goPath
-                        -- v0.15.42 (audit §3.4): Sky lowering succeeded above; we
-                        -- only print the success banner after `go build` returns 0.
-                        putStrLn "Compilation successful"
-                        putStrLn $ "Build complete: " ++ outDir ++ "/" ++ Toml._binName config'
-                    Toml.BackendRust -> do
-                        let rustDir = outDir ++ "/rust"
-                        hFlush stdout
-                        -- Bake the sky version into the binary (compile-time
-                        -- `option_env!("SKY_VERSION")` — drives /_sky/buildinfo
-                        -- AND the console cache key in live/console_proxy.rs, so
-                        -- the runtime looks for the console A1 cached under the
-                        -- same version).
-                        System.Environment.setEnv "SKY_VERSION" skyBuildVersion
-                        checkWebviewLibsRust rustDir
-                        (staticArgs, targetSub) <- planRustBuild (Toml._rustStatic config') (Toml._rustTarget config') (Toml._rustAllocator config') rustDir
-                            >>= either (\m -> hPutStrLn stderr m >> exitFailure) return
-                        putStrLn "Running cargo build..."
-                        callProcess "cargo" (["build", "--manifest-path", rustDir ++ "/Cargo.toml"] ++ staticArgs)
-                        putStrLn $ "Build complete: " ++ rustDir ++ "/target/" ++ targetSub ++ "debug/sky-app"
-                        -- Epic A1: for a Sky.Live app, pre-build the bundled
-                        -- console binary into the version-keyed cache so the
-                        -- Live runtime's reverse-proxy can spawn it. One-time
-                        -- per sky version; best-effort (failure → in-process
-                        -- console fallback, never fails this build).
-                        live <- isLiveRustProject rustDir
-                        when live $ RustConsole.ensureConsoleBinary skyBuildVersion
-                return (Right ())
+        inRepoRoot <- doesFileExist "sky-compiler.cabal"
+        if inRepoRoot
+            then return (Left
+                ( "sky build: refusing to run from the Sky compiler "
+                ++ "repo root.\n\nThis directory contains "
+                ++ "`sky-compiler.cabal`; running `sky build` here "
+                ++ "would overwrite the compiler binary at sky-out/sky.\n\n"
+                ++ "cd into an example or user project first:\n"
+                ++ "  cd examples/01-hello-world\n"
+                ++ "  sky build src/Main.sky" ))
+            else do
+                config <- readConfigStrict
+                -- CLI target overrides config
+                let config' = case mTarget of
+                        Just t -> config { Toml._backend = parseBackend t }
+                        Nothing -> config
+                let outDir = "sky-out"
+                createDirectoryIfMissing True outDir
+                -- Auto-regen missing Go FFI bindings before compile. Idempotent:
+                -- skips deps whose .kernel.json is already present.
+                let goDeps = Toml._goDeps config'
+                when (not (null goDeps)) $ do
+                    hasGoMod <- doesFileExist "sky-out/go.mod"
+                    when (not hasGoMod) $ do
+                        hasRt <- doesFileExist "runtime-go/go.mod"
+                        if hasRt
+                            then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
+                            else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
+                    regenMissingBindings (Toml._backend config') goDeps
+                let rustDeps = Toml._rustDeps config'
+                when (not (null rustDeps)) $
+                    regenMissingRustBindings rustDeps
+                result <- Compile.compile config' path outDir
+                case result of
+                    Left err -> return (Left err)
+                    Right _ -> do
+                        case Toml._backend config' of
+                            Toml.BackendGo -> do
+                                let goPath = outDir </> "main.go"
+                                putStrLn "Running go build..."
+                                runGoBuildWithDiagnostics outDir (Toml._binName config') goPath
+                                -- v0.15.42 (audit §3.4): Sky lowering succeeded above; we
+                                -- only print the success banner after `go build` returns 0.
+                                putStrLn "Compilation successful"
+                                putStrLn $ "Build complete: " ++ outDir ++ "/" ++ Toml._binName config'
+                            Toml.BackendRust -> do
+                                let rustDir = outDir ++ "/rust"
+                                hFlush stdout
+                                -- Bake the sky version into the binary (compile-time
+                                -- `option_env!("SKY_VERSION")` — drives /_sky/buildinfo
+                                -- AND the console cache key in live/console_proxy.rs, so
+                                -- the runtime looks for the console A1 cached under the
+                                -- same version).
+                                System.Environment.setEnv "SKY_VERSION" skyBuildVersion
+                                checkWebviewLibsRust rustDir
+                                (staticArgs, targetSub) <- planRustBuild (Toml._rustStatic config') (Toml._rustTarget config') (Toml._rustAllocator config') rustDir
+                                    >>= either (\m -> hPutStrLn stderr m >> exitFailure) return
+                                putStrLn "Running cargo build..."
+                                callProcess "cargo" (["build", "--manifest-path", rustDir ++ "/Cargo.toml"] ++ staticArgs)
+                                putStrLn $ "Build complete: " ++ rustDir ++ "/target/" ++ targetSub ++ "debug/sky-app"
+                                -- Epic A1: for a Sky.Live app, pre-build the bundled
+                                -- console binary into the version-keyed cache so the
+                                -- Live runtime's reverse-proxy can spawn it. One-time
+                                -- per sky version; best-effort (failure → in-process
+                                -- console fallback, never fails this build).
+                                live <- isLiveRustProject rustDir
+                                when live $ RustConsole.ensureConsoleBinary skyBuildVersion
+                        return (Right ())
 
     Run path mTarget -> do
         config <- readConfigStrict
