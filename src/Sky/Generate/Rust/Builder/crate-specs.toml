@@ -62,6 +62,9 @@ tokio-tungstenite = "0.24"
 # crate as `reqwest::Url`). Lets a WebSocket-only project validate URLs without reqwest.
 url = "2"
 
+# Char kernel — Go general-category parity (char_kernel.rs, always compiled)
+unicode-general-category = "1"
+
 # Tui
 crossterm = "0.28"
 unicode-width = "0.1"

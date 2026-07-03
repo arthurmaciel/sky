@@ -1091,6 +1091,7 @@ stdlibEmittedCrateNames =
     , "bcrypt", "toml", "serde_yaml"
     , "uuid", "axum", "tower-http", "serde_urlencoded", "reqwest", "lettre"
     , "futures-util", "tokio-tungstenite", "url", "crossterm", "unicode-width"
+    , "unicode-general-category"
     , "wry", "tao", "libc"
     ]
 
@@ -1207,6 +1208,9 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore resolvedTransitiveCrates = 
         , "rust_decimal", "hmac", "sha1", "md-5", "subtle", "rsa", "aes-gcm"
         , "chacha20poly1305", "pbkdf2", "flate2", "zstd", "csv", "jsonwebtoken"
         , "bcrypt", "toml", "serde_yaml"
+        -- char_kernel.rs uses unicode_general_category unconditionally (Go
+        -- general-category parity) — always compiled, so always emitted.
+        , "unicode-general-category"
         ]
     , name `notElem` userDepNames
     ] ++
