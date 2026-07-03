@@ -655,8 +655,25 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
                           Nothing -> case bodyAnyCarrier of
                                          Just c  -> substTVarAny c ty
                                          Nothing -> ty
-        pats  = map (\(p, t) -> (p, applyAny t)) pats0
-        retTy = applyAny retTy0
+        -- Bare `Html` written in a signature (`view : Model -> Html`, an
+        -- author shorthand Go accepts because HM solves the missing `msg` from
+        -- the body) renders the generic `StdHtmlHtml<msg>` alias with NO arg →
+        -- E0107 (missing generics). The solver knows the app's concrete Msg
+        -- (ecAppMsg); pin the under-applied `Html` to it so the alias gets its
+        -- one type arg. Scoped to `Html` with zero args and only when the app
+        -- Msg is known — `Html Msg` (the idiomatic form) and non-TEA modules are
+        -- untouched.
+        -- Module-gated to the stdlib `Html` ("Std.Html" annotation-canonical, ""
+        -- kernel-synth) — mirrors the sibling call-region Html-pin arms — so a
+        -- user-defined zero-arg `type Html` in their own module (legal; `Html`
+        -- isn't in the Prelude-shadow protected set) is NOT rewritten arity-0→1.
+        pinBareHtml ty = case ty of
+            Can.TType m "Html" []
+                | ModuleName._name m `elem` ["Std.Html", ""]
+                , Just msgTy <- ecAppMsg ctx -> Can.TType m "Html" [msgTy]
+            _ -> ty
+        pats  = map (\(p, t) -> (p, pinBareHtml (applyAny t))) pats0
+        retTy = pinBareHtml (applyAny retTy0)
         argTriples = zipWith
             (\i (pat, ty) -> let (nm, pre) = patternToRustArg (ecSingleVariantEnums ctx) i pat
                              in (nm ++ ": " ++ paramTypeToRust rm ty, pre))
