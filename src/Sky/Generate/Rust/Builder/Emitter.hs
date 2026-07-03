@@ -1148,6 +1148,14 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore resolvedTransitiveCrates = 
     , "redis_store = []"
     , "webview = []"
     , "tui = []"
+    -- `websocket_client` gates the always-copied `ssrf.rs` dead-code allow
+    -- (`#[cfg_attr(not(feature = "websocket_client"), allow(dead_code))]` on the
+    -- SSRF validators, shared by the http_client + websocket paths). Declared
+    -- unconditionally like `tui`/`live` above so `unexpected cfg condition value:
+    -- websocket_client` doesn't fire in every generated build (2 occ each in
+    -- non-ws projects — the 8-warning sweep gate). Enabled via the ws-detection
+    -- deps when the app actually uses Sky.Core.WebSocket.
+    , "websocket_client = []"
     -- `static_alloc` activates the optional mimalloc dep + the cfg-gated global
     -- allocator (crate preamble). Declared unconditionally, enabled only by
     -- `sky build --static` via `--features static_alloc`. Off by default.
