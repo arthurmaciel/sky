@@ -7,6 +7,7 @@ module Sky.Generate.Rust.Builder.SigRegistry
   , errorSig
   , sigTVars
   , scanTVars
+  , matchesModulePrefix
   ) where
 
 import Data.Char (isDigit)

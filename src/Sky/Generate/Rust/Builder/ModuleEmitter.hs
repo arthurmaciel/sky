@@ -34,7 +34,7 @@ import Sky.Generate.Rust.Builder.Pattern
     ( bodyUsesList, patBindingVars, patternToRustParam, patternToRustArg
     )
 import Sky.Generate.Rust.Builder.SigRegistry
-    ( knownDefSig, sigTVars
+    ( knownDefSig, sigTVars, matchesModulePrefix
     )
 import Sky.Generate.Rust.Builder.ExprEmitter
     ( exprToRustString, collectVarLocalsMulti, taskExprInnerType, mainEntryTailReturnsTask, solveArgType
@@ -756,10 +756,12 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         -- public wrapper (which would also spuriously reject Task-valued results).
         -- Scoped to the stdlib List/Maybe/Result modules so a user function of the
         -- same name (which MIGHT flow a value across a TEA boundary) is untouched.
+        -- `matchesModulePrefix` (exact OR `seg_`-boundary), NOT raw `isPrefixOf`:
+        -- the loose prefix would hijack a user module `Sky.Core.ListExtra`
+        -- (mangles to `Sky_Core_ListExtra`) defining a same-named private helper.
         inCoreCollectionMod =
-               "Sky_Core_List"   `isPrefixOf` _modPrefix
-            || "Sky_Core_Maybe"  `isPrefixOf` _modPrefix
-            || "Sky_Core_Result" `isPrefixOf` _modPrefix
+            any (`matchesModulePrefix` _modPrefix)
+                ["Sky_Core_List", "Sky_Core_Maybe", "Sky_Core_Result"]
         reverseAccumHelper =
             inCoreCollectionMod
             && name `elem` ["reverseHelp", "lengthHelp", "indexedMapHelp", "zipHelp"]
