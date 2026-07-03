@@ -71,8 +71,10 @@ pub fn json_enc_encode(indent: i64, val: JsonVal) -> String {
         let mut ser = serde_json::Serializer::with_formatter(&mut buf, GoFormatter(inner));
         serde::Serialize::serialize(&val, &mut ser).ok();
     } else {
-        let mut ser =
-            serde_json::Serializer::with_formatter(&mut buf, GoFormatter(serde_json::ser::CompactFormatter));
+        let mut ser = serde_json::Serializer::with_formatter(
+            &mut buf,
+            GoFormatter(serde_json::ser::CompactFormatter),
+        );
         serde::Serialize::serialize(&val, &mut ser).ok();
     }
     String::from_utf8(buf).unwrap_or_default()
