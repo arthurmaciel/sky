@@ -14,7 +14,7 @@ import qualified Data.Map.Strict as Map
 import qualified Sky.AST.Canonical as Can
 import Sky.Generate.Rust.Builder.Types (RustTypeDef(..), runtimeOpaqueTypes)
 import Sky.Generate.Rust.Builder.Naming (toCamelCase, mangleTVar, rustVariantName)
-import Sky.Generate.Rust.Builder.TypeRenderer (typeToRustString, flattenArrowType, resultIsTaskTy)
+import Sky.Generate.Rust.Builder.TypeRenderer (typeToRustString, flattenArrowType, resultIsTaskTy, isEventArgType)
 
 unionsToRustTypes :: Map.Map String String -> String -> String -> Map.Map String Can.Union -> [RustTypeDef]
 unionsToRustTypes recordMap skyModName modPrefix unions =
@@ -244,4 +244,27 @@ paramTypeToRust rm t = case t of
         let (ps, ret) = flattenArrowType t
         in "impl Fn(" ++ intercalate ", " (map (typeToRustString rm) ps) ++ ") -> "
            ++ typeToRustString rm ret ++ " + Send + Sync + 'static"
+    -- An EVENT-HANDLER param (`String -> msg` / `Bool -> msg` — single arg of an
+    -- event-arg type, result a bare TVar) keeps `typeToRustString`'s special
+    -- `Arc<dyn Fn(..) -> msg + Send + Sync>` rendering: it is STORED into an
+    -- `Event::OnString`/`OnBool` ADT variant (an `Arc<dyn Fn>` slot), so the param
+    -- must already be that Arc type, not a fresh `impl Fn` generic. Delegate.
+    Can.TLambda arg (Can.TVar _) | isEventArgType arg -> typeToRustString rm t
+    -- A PURE function param (non-Task result, not an event handler) renders as
+    -- `impl Fn(..) -> R + Clone`, NOT the bare `fn(..)` pointer that
+    -- `typeToRustString` emits. Param-position ONLY (paramTypeToRust is never used
+    -- for a struct field / ADT variant / return type — those keep the `fn` pointer
+    -- the ADT-derive gate relies on). The v0.17 CPS rewrite made the annotated
+    -- `indexedMapHelp : (Int -> a -> b) -> …` be CALLED by `indexedMap`, whose own
+    -- HOF param is rendered `impl Fn(i64, T0) -> T1 + Clone` by SigRegistry — a
+    -- capturing closure that does NOT coerce to the callee's `fn` pointer (E0308).
+    -- `impl Fn` is strictly more permissive than `fn` in argument position (it also
+    -- accepts bare fn-items), so this widens acceptance without rejecting any
+    -- caller. `+ Clone` matches the SigRegistry convention (these helpers clone the
+    -- fn across the tail-recursive loop) and is satisfied by every Sky closure
+    -- (which captures only Clone Sky values).
+    Can.TLambda _ _ ->
+        let (ps, ret) = flattenArrowType t
+        in "impl Fn(" ++ intercalate ", " (map (typeToRustString rm) ps) ++ ") -> "
+           ++ typeToRustString rm ret ++ " + Clone"
     _ -> typeToRustString rm t
