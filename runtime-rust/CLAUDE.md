@@ -590,6 +590,28 @@ log** — hold it to the same bar as a code review:
   (ambient `RUSTUP_TOOLCHAIN=nightly` forced → stable pin still drops `pattern`).
 
 ### Pitfalls
+- **When an upstream sync DROPS an explicit `.sky` signature on a stdlib helper,
+  the Rust backend usually breaks even though Go stays green.** The Go backend
+  type-directs lowering from per-region solver types, so it doesn't need the sig.
+  The Rust `defToRustItem` solved-sig path can only render a param that is fully
+  concrete OR an open record — a polymorphic higher-order param (`(a -> b)`
+  TLambda) is neither, so it silently falls through to body-analysis and
+  mis-emits a function param as `Vec<T0>` (no `impl Fn`, no return type) →
+  `undefined`/E0618/E0308. Fix: register the helper in
+  `Sky.Generate.Rust.Builder.SigRegistry` (`listSig`/`maybeSig`/`resultSig`),
+  same mechanism as the pre-existing `indexedMapHelp`. Watch the whole family: a
+  registered helper is `T: Clone` only (via knownDefSig), but the annotated
+  structural helpers it delegates to (`reverseHelp`/`lengthHelp`/`zipHelp` —
+  emitted through the ANNOTATED path with the universal `Clone + PartialEq +
+  Debug + Send + Sync + 'static` bound) then reject the Clone-only caller
+  (E0277). Those structural helpers only move/count elements via the bound-free
+  `sky_list_cons`, so loosen them to `Clone` in `ModuleEmitter.genBound` (scoped
+  by `_modPrefix` to `Sky_Core_{List,Maybe,Result}`) rather than propagating the
+  heavy bound up every public wrapper (which would also spuriously reject
+  Task-valued results). Also: an empty-collection call-arg whose element var is
+  the ENCLOSING fn's own generic must emit bare `vec![]` (Rust infers from the
+  return flow), not a `Vec::<i64>` phantom (E0308) — gate on `ecGenParams`.
+  Verified for the v0.17 CPS list-op rewrite (`b52515ca`).
 - **`Clone` ≠ `Send` — async FFI gates must use a TIGHTER predicate than sync FFI
   gates.** `tokio::task::spawn` requires `Output: Send + 'static`. If you use the same
   coercibility predicate (`is_sky_coercible_elem`) for both sync and async gates, you
