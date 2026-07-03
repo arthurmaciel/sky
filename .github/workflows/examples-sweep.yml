@@ -240,12 +240,13 @@ jobs:
 
       # ── GNU coreutils on macOS (the sweep + libs use bare `timeout`) ────────
       # macOS ships no GNU `timeout`; symlink coreutils' so `timeout` resolves.
-      - name: Install GNU coreutils (macOS)
+      - name: Install GNU coreutils + Homebrew bash (macOS)
         if: matrix.os == 'macos-latest'
         uses: ./.github/actions/setup-system-deps
         with:
           ripgrep: "false"
           coreutils: "true"
+          bash: "true"
 
       # ── Build the compiler + symlink sky-out/sky (what the sweep expects) ───
       # The sweep invokes $SKY_BIN = $REPO/sky-out/sky. Build exe:sky and symlink
@@ -571,12 +572,13 @@ jobs:
           apache_bench: "true"
 
       # ── GNU coreutils on macOS (the script uses bare `timeout`) ─────────────
-      - name: Install GNU coreutils (macOS)
+      - name: Install GNU coreutils + Homebrew bash (macOS)
         if: matrix.os == 'macos-latest'
         uses: ./.github/actions/setup-system-deps
         with:
           ripgrep: "false"
           coreutils: "true"
+          bash: "true"
 
       # ── Cache the isolated static-perf cargo target + registry ──────────────
       - name: Cache cargo target

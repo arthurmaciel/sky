@@ -29,6 +29,9 @@ inputs:
   coreutils:
     description: "macOS: GNU coreutils + a `timeout` shim added to PATH (scripts use bare GNU `timeout`)."
     default: "false"
+  bash:
+    description: "macOS: Homebrew bash >= 4 (system /bin/bash is 3.2 — no associative arrays / `declare -g`, which the sweep libs need; examples-sweep.sh re-execs under it)."
+    default: "false"
 
 runs:
   using: composite
@@ -42,6 +45,7 @@ runs:
         IN_APACHE_BENCH: ${{ inputs.apache_bench }}
         IN_MUSL: ${{ inputs.musl }}
         IN_COREUTILS: ${{ inputs.coreutils }}
+        IN_BASH: ${{ inputs.bash }}
       run: |
         set -euo pipefail
         case "$RUNNER_OS" in
@@ -69,6 +73,13 @@ runs:
               mkdir -p "$HOME/.local/bin"
               ln -sf "$(brew --prefix coreutils)/libexec/gnubin/timeout" "$HOME/.local/bin/timeout"
               echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            fi
+            # Homebrew bash >= 4 — the sweep libs use `declare -gA` associative
+            # arrays; macOS /bin/bash is 3.2. examples-sweep.sh re-execs under the
+            # Homebrew bash (found at $(brew --prefix)/bin/bash).
+            if [ "$IN_BASH" = "true" ]; then
+              brew install bash
+              "$(brew --prefix)/bin/bash" --version | head -1
             fi
             ;;
           Windows)
