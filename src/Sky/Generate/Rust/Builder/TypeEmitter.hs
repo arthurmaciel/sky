@@ -7,6 +7,7 @@ module Sky.Generate.Rust.Builder.TypeEmitter
   , aliasToRustTypeDef
   , fieldTypeToRust
   , paramTypeToRust
+  , implFnParamType
   ) where
 
 import Data.List (intercalate, isPrefixOf, sortBy, stripPrefix)
@@ -244,27 +245,23 @@ paramTypeToRust rm t = case t of
         let (ps, ret) = flattenArrowType t
         in "impl Fn(" ++ intercalate ", " (map (typeToRustString rm) ps) ++ ") -> "
            ++ typeToRustString rm ret ++ " + Send + Sync + 'static"
-    -- An EVENT-HANDLER param (`String -> msg` / `Bool -> msg` — single arg of an
-    -- event-arg type, result a bare TVar) keeps `typeToRustString`'s special
-    -- `Arc<dyn Fn(..) -> msg + Send + Sync>` rendering: it is STORED into an
-    -- `Event::OnString`/`OnBool` ADT variant (an `Arc<dyn Fn>` slot), so the param
-    -- must already be that Arc type, not a fresh `impl Fn` generic. Delegate.
-    Can.TLambda arg (Can.TVar _) | isEventArgType arg -> typeToRustString rm t
-    -- A PURE function param (non-Task result, not an event handler) renders as
-    -- `impl Fn(..) -> R + Clone`, NOT the bare `fn(..)` pointer that
-    -- `typeToRustString` emits. Param-position ONLY (paramTypeToRust is never used
-    -- for a struct field / ADT variant / return type — those keep the `fn` pointer
-    -- the ADT-derive gate relies on). The v0.17 CPS rewrite made the annotated
-    -- `indexedMapHelp : (Int -> a -> b) -> …` be CALLED by `indexedMap`, whose own
-    -- HOF param is rendered `impl Fn(i64, T0) -> T1 + Clone` by SigRegistry — a
-    -- capturing closure that does NOT coerce to the callee's `fn` pointer (E0308).
-    -- `impl Fn` is strictly more permissive than `fn` in argument position (it also
-    -- accepts bare fn-items), so this widens acceptance without rejecting any
-    -- caller. `+ Clone` matches the SigRegistry convention (these helpers clone the
-    -- fn across the tail-recursive loop) and is satisfied by every Sky closure
-    -- (which captures only Clone Sky values).
+    _ -> typeToRustString rm t
+
+-- | Render a PURE (non-Task) function PARAMETER as `impl Fn(..) -> R + Clone`
+-- rather than the bare `fn(..)` pointer `typeToRustString`/`paramTypeToRust`
+-- emit. Used ONLY for a param the function BODY calls (uses in callee position),
+-- where a capturing-closure caller (e.g. `indexedMap` passing SigRegistry's
+-- `impl Fn(i64, T0) -> T1 + Clone` into the annotated `indexedMapHelp`) cannot
+-- coerce to a `fn` pointer (E0308). It must NOT be used for a param that is
+-- STORED into a `fn`-pointer ADT variant / struct field (`ShouldRetry::RetryWhen`,
+-- `Test::Leaf`) — those require the exact `fn` pointer the field derives
+-- Debug/PartialEq on, so the caller side stays limited to non-capturing closures.
+-- Event-handler params (`String/Bool -> msg`) keep `typeToRustString`'s
+-- `Arc<dyn Fn>` and never reach here (the call-site gate excludes them).
+implFnParamType :: Map.Map String String -> Can.Type -> String
+implFnParamType rm t = case t of
     Can.TLambda _ _ ->
         let (ps, ret) = flattenArrowType t
         in "impl Fn(" ++ intercalate ", " (map (typeToRustString rm) ps) ++ ") -> "
            ++ typeToRustString rm ret ++ " + Clone"
-    _ -> typeToRustString rm t
+    _ -> paramTypeToRust rm t

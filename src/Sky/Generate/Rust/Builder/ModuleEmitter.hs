@@ -47,7 +47,7 @@ import Sky.Generate.Rust.Builder.TypeRenderer
     )
 import Sky.Generate.Rust.Builder.TypeEmitter
     ( unionsToRustTypes, aliasesToRustTypes, sortFieldsByIndex, paramTypeToRust
-    , fieldTypeToRust
+    , fieldTypeToRust, implFnParamType
     )
 import Sky.Generate.Rust.Builder.Walker
     ( analyzeKernelUsage, collectZeroArgDefs, collectAnonRecordTypes
@@ -227,6 +227,37 @@ resolveOpenRecordParam :: Map.Map String String -> Can.Type -> Maybe String
 resolveOpenRecordParam recordMap t = case t of
     Can.TRecord fields _ -> matchStructByFields recordMap (Set.fromList (Map.keys fields))
     _ -> Nothing
+
+-- | Does the body USE `pn` in CALLEE position (`pn a b …`)? Distinguishes a HOF
+-- param the body CALLS (needs `impl Fn` so a capturing-closure caller — e.g.
+-- `indexedMap` passing SigRegistry's `impl Fn(..) + Clone` into the annotated
+-- `indexedMapHelp` — coerces) from one it merely STORES into a `fn`-pointer ADT
+-- variant / struct field (`ShouldRetry::RetryWhen`, `Test::Leaf`), which requires
+-- the exact `fn` pointer the field derives Debug/PartialEq on. Only a direct
+-- `Can.Call (VarLocal pn) _` counts; the param appearing as a call ARG (stored)
+-- does not.
+exprCallsVar :: String -> Can.Expr -> Bool
+exprCallsVar pn = go
+  where
+    go (Ann.At _ e) = case e of
+      Can.Call (Ann.At _ (Can.VarLocal v)) args
+        | v == pn   -> True
+        | otherwise -> any go args
+      Can.Call c args       -> go c || any go args
+      Can.Lambda _ b        -> go b
+      Can.Let d b           -> go (canDefBody d) || go b
+      Can.LetRec ds b       -> any (go . canDefBody) ds || go b
+      Can.LetDestruct _ x b -> go x || go b
+      Can.Case s bs         -> go s || any (\(Can.CaseBranch _ b) -> go b) bs
+      Can.If brs el         -> any (\(c, tb) -> go c || go tb) brs || go el
+      Can.Binop _ _ _ _ a b -> go a || go b
+      Can.Access r _        -> go r
+      Can.Update _ r ups    -> go r || any (\(_, fu) -> case fu of Can.FieldUpdate _ x -> go x) (Map.toList ups)
+      Can.Record fs         -> any (\(_, x) -> go x) (Map.toList fs)
+      Can.List xs           -> any go xs
+      Can.Tuple a b rest    -> any go (a : b : rest)
+      Can.Negate x          -> go x
+      _                     -> False
 
 -- | Find the struct with the FEWEST extra fields whose field set is a SUPERSET
 -- of `fieldSet`. Shared by resolveOpenRecordParam (param is an open record) and
@@ -675,8 +706,22 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         pats  = map (\(p, t) -> (p, pinBareHtml (applyAny t))) pats0
         retTy = pinBareHtml (applyAny retTy0)
         argTriples = zipWith
-            (\i (pat, ty) -> let (nm, pre) = patternToRustArg (ecSingleVariantEnums ctx) i pat
-                             in (nm ++ ": " ++ paramTypeToRust rm ty, pre))
+            (\i (pat, ty) ->
+                let (nm, pre) = patternToRustArg (ecSingleVariantEnums ctx) i pat
+                    base = paramTypeToRust rm ty
+                    pn   = case pat of Ann.At _ (Can.PVar v) -> v; _ -> ""
+                    -- A pure function param renders `fn(..)` (pointer) via
+                    -- paramTypeToRust. If the body CALLS it, widen to
+                    -- `impl Fn(..) + Clone` so a capturing-closure caller coerces
+                    -- (the v0.17 `indexedMap`→`indexedMapHelp` shape). Keyed on the
+                    -- rendered `fn(` so Task params (`impl Fn..Send+Sync`) and event
+                    -- handlers (`Arc<dyn Fn`) are untouched, and a STORED-only param
+                    -- (constructor args → `fn`-pointer ADT field) keeps its pointer.
+                    tyStr = if not (null pn) && "fn(" `isPrefixOf` base
+                                 && exprCallsVar pn body
+                            then implFnParamType rm ty
+                            else base
+                in (nm ++ ": " ++ tyStr, pre))
             [0..] pats
         params0 = map fst argTriples
         -- P4-T3 / #24 tenet 4 (annotated TypedDef path; same rule as the Def
