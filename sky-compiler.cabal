@@ -179,6 +179,7 @@ executable sky
     Sky.Type.Type
     Sky.Type.Unify
     Sky.Type.Solve
+    Sky.Type.Solve.GoTypeBuild
     Sky.Type.Instantiate
     Sky.Type.Constrain.Module
     Sky.Type.Constrain.Expression
@@ -192,6 +193,8 @@ executable sky
     -- Go code generation
     Sky.Generate.Go.Ir
     Sky.Generate.Go.Builder
+    Sky.Generate.Go.RuntimeMaps
+    Sky.Generate.Go.AnonRecords
     Sky.Generate.Go.Type
     Sky.Generate.Go.Kernel
     Sky.Generate.Go.Record
@@ -226,7 +229,9 @@ executable sky
     -- Build system
     Sky.Build.ModuleGraph
     Sky.Build.Compile
+    Sky.Build.CompileCtx
     Sky.Build.LowerCtx
+    Sky.Build.MsgDispatch
     Sky.Build.Dce
     Sky.Build.EmbedDirTH
     Sky.Build.EmbeddedRuntime
@@ -287,6 +292,7 @@ test-suite sky-tests
   build-depends:
       base >= 4.14 && < 5
     , hspec >= 2.9
+    , QuickCheck >= 2.14
     , process >= 1.6
     , directory >= 1.3
     , filepath >= 1.4
@@ -322,6 +328,10 @@ test-suite sky-tests
       Sky.Build.Helpers.InProcessCompile
       Sky.Build.Validator
       Sky.Build.CompileSpec
+      Sky.Build.GoTypeRoundTripSpec
+      Sky.Build.KnownDivergence
+      Sky.Build.MappingContextSpec
+      Sky.Build.RendererParitySpec
       Sky.Build.MainPanicRecoverSpec
       Sky.Build.DepHmFatalSpec
       Sky.Build.ExampleSweepSpec
@@ -347,6 +357,9 @@ test-suite sky-tests
       Sky.Type.UiOnSubmitTypedRecordSpec
       Sky.Type.UfCycleGuardSpec
       Sky.Type.RecordFieldExactnessSpec
+      Sky.Type.StrictHmArityGateSpec
+      Sky.Type.Limitation7CurrentLooseAcceptanceSpec
+      Sky.Build.GoTypeAdtSpec
       Sky.Build.UiFillCascadeSpec
       Sky.Build.UiFillCssSpec
       Sky.Build.UiAlignSelfSpec
@@ -354,6 +367,10 @@ test-suite sky-tests
       Sky.Build.UiPseudoClassSpec
       Sky.Build.UiTransitionAnimationSpec
       Sky.Build.UiAspectGridSpec
+      Sky.Build.UiShowcaseRtCoerceClosedProofSpec
+      Sky.Build.RtCoerceBudgetSpec
+      Sky.Build.RtCoerceScanner
+      Sky.Build.PhaseABaselineRegressionSpec
       Sky.Build.UiMultilineTextareaSpec
       Sky.Build.InputAttrsSplitSpec
       Sky.Build.ExposingTypeCtorsSpec
@@ -361,6 +378,22 @@ test-suite sky-tests
       Sky.Build.EntryLocalShadowsDepSpec
       Sky.Build.RtFieldAdtBug342Spec
       Sky.Build.CaseSubjectNameShadowSpec
+      Sky.Build.CpsStackConstantBound.Shared
+      Sky.Build.CpsStackConstantBound.MapBaselineSpec
+      Sky.Build.CpsStackConstantBound.FilterSpec
+      Sky.Build.CpsStackConstantBound.FoldrSpec
+      Sky.Build.CpsStackConstantBound.ConcatSpec
+      Sky.Build.CpsStackConstantBound.TakeSpec
+      Sky.Build.CpsStackConstantBound.AppendSpec
+      Sky.Build.CpsStackConstantBound.LengthSpec
+      Sky.Build.CpsStackConstantBound.RangeSpec
+      Sky.Build.CpsStackConstantBound.ZipSpec
+      Sky.Build.CpsStackConstantBound.IndexedMapSpec
+      Sky.Build.CpsStackConstantBound.ConcatMapSpec
+      Sky.Type.ArityMismatchScaffoldSpec
+      Sky.Type.DeclaredArityHelperSpec
+      Sky.Build.CpsStackConstantBound.ResultCombineSpec
+      Sky.Build.CpsStackConstantBound.MaybeCombineSpec
       Sky.Build.FfiKernelAliasSpec
       Sky.Build.HttpTypesSpec
       Sky.Build.CryptoAeadSpec
@@ -377,6 +410,8 @@ test-suite sky-tests
       Sky.Build.DictSourceSpec
       Sky.Build.DbDecoderSpec
       Sky.Build.WebSocketSpec
+      Sky.Build.WellTypedFuzzerGen
+      Sky.Build.WellTypedFuzzerSpec
       Sky.Parse.MultiLineCaseSubjectSpec
       Sky.Parse.MultiLineCaseKeywordSpec
       Sky.Parse.MultiLineSignatureSpec
@@ -390,6 +425,9 @@ test-suite sky-tests
       Sky.Build.LiveInitRequestSpec
       Sky.Build.LiveInitRuntimeSpec
       Sky.Stdlib.RecordAliasBuilderConventionSpec
+      Sky.Stdlib.MaybeLawsSpec
+      Sky.Stdlib.ResultLawsSpec
+      Sky.Stdlib.TaskLawsSpec
       Sky.Type.InstanceCaptureSpec
       Sky.Type.SolvedTypesRegionMapSpec
       Sky.Format.FormatSpec
@@ -412,6 +450,9 @@ test-suite sky-tests
       Sky.Generate.Rust.TransitiveDepCrateSpec
       Sky.Build.TaskResultBridgesSpec
       Sky.Build.CheckIsBuildSpec
+      Sky.Build.Pr17bDepSymmetrySpec
+      Sky.Build.NoT1LeakInEmittedGoSpec
+      Sky.Build.NoT1LeakInNotesAppSpec
       Sky.Build.RecordFieldOrderSpec
       Sky.Build.RecordCtorEmptyListSpec
       Sky.Build.RuntimeFingerprintSpec
@@ -423,17 +464,24 @@ test-suite sky-tests
       Sky.Build.CoerceArgParametricSpec
       Sky.Build.UnannotatedParametricCfgViewSpec
       Sky.Build.UnannotatedParametricCfgUserHelperSpec
+      Sky.Build.TVarSubstitutionLeakSpec
+      Sky.Build.AnonRecordEmissionGuaranteeSpec
+      Sky.Build.AnonRecordSubprocessFixtureSpec
       Sky.Build.LiveApiHandlerShapeSpec
       Sky.Build.IsPlainIdentSpec
       Sky.Build.InferExprTypeBinopSpec
       Sky.Build.CoerceArgListMapInterplaySpec
       Sky.Build.CrossModuleSetSpec
       Sky.Build.LowerCtxCascadeSpec
+      Sky.Build.MsgDispatchSpec
       Sky.Build.LetBodyCascadeResumeSpec
       Sky.Build.SnapshotCallerCtxSpec
       Sky.Build.SkyshopCompilesSpec
       Sky.Build.AnonLambdaSpec
       Sky.Build.CrossModuleLambdaCollisionC_Spec
+      Sky.Build.DepSolvedTypesWiringSpec
+      Sky.Build.DepCurrentModuleHintSpec
+      Sky.Build.DepNarrowEnvSpec
       Sky.Build.AnonRecordSpec
       Sky.Build.AuthUntypedBoundarySpec
       Sky.Build.Issue52Spec
@@ -447,7 +495,21 @@ test-suite sky-tests
       Sky.Build.KernelStdlibCoverageSpec
       Sky.Build.PureModuleSpec
       Sky.Build.HeapBoundedHmSpec
+      Sky.Build.RepoRootGuardSpec
       Sky.Build.IORefBoundarySpec
+      Sky.Build.LowerPhaseGoSigMapDeletedSpec
+      Sky.Build.EraseBandAidAbsentSpec
+      Sky.Build.SealedIfaceCarveoutSpec
+      Sky.Build.SealedIfaceEmissionSpec
+      Sky.Build.SealedIfaceFlipAllowListSpec
+      Sky.Build.SealedIfaceFlipParametricAllowListSpec
+      Sky.Build.SealedIfaceMetadataSpec
+      Sky.Build.SubjectIsSealedIfaceSpec
+      Sky.Build.CaseToGoSealedIfaceSpec
+      Sky.Build.AnonRecordWriterAuditSpec
+      Sky.Build.ScopeStateRefAuditSpec
+      Sky.Build.PanicClassGateSpec
+      Sky.Build.PolyKernelCrossTVarRenameSpec
       Sky.Build.SolverBudgetSpec
       Sky.Build.UnreachableGateSpec
       Sky.Parse.CommentsSpec

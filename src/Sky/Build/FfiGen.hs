@@ -157,6 +157,20 @@ data FnInfo = FnInfo
         -- by the inspector; codegen prepends @::<crate>::@). Empty for methods,
         -- crate-root free fns, and Go. When non-empty the codegen emits
         -- @::<crate>::civil::date(...)@ instead of @::<crate>::date(...)@.
+    , _fnParamSkyQualified  :: [String]
+        -- ^ v0.17 C17b — per-param qualified opaque marker.
+        -- Same length as '_fnParams'; entry is "" when the
+        -- inspector did not emit a qualified marker (i.e. the
+        -- Go type is a basic / basic-alias / built-in).
+        -- Format: @Name\@pkgPath@ (e.g.
+        -- @*Customer\@github.com/stripe/stripe-go/v84@).
+        -- When non-empty, 'wrapperSkyType' uses this verbatim
+        -- so distinct opaque types from different Go packages
+        -- carry their qualifier into the kernel.json skyType
+        -- string, where 'parseFty' + 'ftyToType' recognise the
+        -- '\@' suffix and emit distinct 'TType' homes.
+    , _fnResultSkyQualified :: [String]
+        -- ^ Same shape, for results.
     }
     deriving (Show)
 
@@ -185,6 +199,18 @@ data PkgInfo = PkgInfo
         -- build time. Empty when rustdoc ran on default features (no injection or
         -- the injected set was dropped on the exclusive-feature fallback). Empty
         -- for Go.
+    , _pkgImplements :: Map.Map String [String]
+        -- ^ v0.17 PR-9 / PR-21b — qualified-name → list of qualified
+        -- interface names satisfied by that type.  Populated by the
+        -- inspector's @computeImplements@ + @buildInterfaceInventory@.
+        -- Empty map when the inspector didn't surface any (older
+        -- kernel.json files or packages with no exported interfaces).
+        -- Consumed by Sky.Type.Unify in PR-21b for cross-FFI interface
+        -- satisfaction.
+    , _pkgPkgAlias :: Map.Map String String
+        -- ^ v0.17 PR-9 — Go import-path → canonical alias.  Includes
+        -- self plus every direct import.  Consumed by codegen-flatten
+        -- (PR-21a) to recover the Go alias for qualified opaque types.
     }
     deriving (Show)
 
@@ -195,8 +221,8 @@ instance A.FromJSON FnInfo where
         results <- o A..: "results" >>= mapM parseParamFull
         FnInfo
             <$> o A..: "name"
-            <*> pure (map (\(n, t, _, _) -> (n, t)) params)
-            <*> pure (map (\(n, t, _, _) -> (n, t)) results)
+            <*> pure (map (\(n, t, _, _, _) -> (n, t)) params)
+            <*> pure (map (\(n, t, _, _, _) -> (n, t)) results)
             <*> o A..:? "variadic" A..!= False
             <*> o A..: "effect"
             <*> o A..:? "recvType" A..!= ""
@@ -204,10 +230,11 @@ instance A.FromJSON FnInfo where
             <*> o A..:? "isField" A..!= False
             <*> o A..:? "isFieldSet" A..!= False
             <*> o A..:? "isPkgVar" A..!= False
-            <*> pure (map (\(_, _, s, _) -> s) params)
-            <*> pure (map (\(_, _, s, _) -> s) results)
-            <*> pure (map (\(_, _, _, r) -> r) params)
-            <*> pure (map (\(_, _, _, r) -> r) results)
+            <*> pure (map (\(_, _, s, _, _) -> s) params)
+            <*> pure (map (\(_, _, s, _, _) -> s) results)
+            -- HEAD (Rust backend) fields — 4th tuple slot carries rustType.
+            <*> pure (map (\(_, _, _, r, _) -> r) params)
+            <*> pure (map (\(_, _, _, r, _) -> r) results)
             <*> o A..:? "recvRustType" A..!= ""
             <*> o A..:? "selfReturning" A..!= False
             <*> o A..:? "isEnumCtor" A..!= False
@@ -221,13 +248,20 @@ instance A.FromJSON FnInfo where
             <*> o A..:? "enumWildcard" A..!= False
             <*> o A..:? "generic"   -- Wall #3: raw `generic` object, verbatim
             <*> o A..:? "callPath" A..!= ""
+            -- upstream (v0.17 C17b) qualified-opaque markers — 5th tuple slot.
+            <*> pure (map (\(_, _, _, _, q) -> q) params)
+            <*> pure (map (\(_, _, _, _, q) -> q) results)
       where
         parseParamFull = A.withObject "param" $ \o -> do
             n <- o A..:? "name" A..!= ""
             t <- o A..: "type"
             s <- o A..:? "skyType" A..!= ""
             r <- o A..:? "rustType" A..!= ""
-            return (n, t, s, r)
+            -- v0.17 C17b — qualified opaque marker.
+            -- Inspector emits this for opaque named types only;
+            -- absent for basic-aliases and built-ins.
+            q <- o A..:? "skyTypeQualified" A..!= ""
+            return (n, t, s, r, q)
 
 
 instance A.FromJSON PkgInfo where
@@ -243,6 +277,9 @@ instance A.FromJSON PkgInfo where
         <*> (o A..:? "transitiveDeps" A..!= [] >>= mapM parseTransDep)
         -- #100 Part B: effective crate feature set; absent for Go / default-feature builds.
         <*> o A..:? "features" A..!= []
+        -- upstream v0.17 PR-9 / PR-21b — qualified interface + alias maps.
+        <*> o A..:? "implements" A..!= Map.empty
+        <*> o A..:? "pkgAlias" A..!= Map.empty
       where
         parseTransDep = A.withObject "TransitiveDep" $ \d ->
             (,,) <$> d A..: "ident" <*> d A..: "name" <*> d A..: "version"
@@ -457,7 +494,43 @@ emitKernelJson disambMethods moduleName kernelName pkg =
             in if isSkyParseable st
                   then base ++ ", \"skyType\": " ++ quote st ++ "}"
                   else base ++ "}"
-    in unlines
+        -- v0.17 PR-21b — emit the implements + pkgAlias registries
+        -- the inspector populated (PR-9).  Pre-fix these were dropped
+        -- on the Haskell side, so even when the inspector found
+        -- e.g. @Label@fyne.widget -> [CanvasObject@fyne]@, the
+        -- kernel.json never carried that data.  Sky.Type.Unify
+        -- consumes it in PR-21b's HM axiom.
+        impls = _pkgImplements pkg
+        aliases = _pkgPkgAlias pkg
+        emitMapStrList m =
+            let kvs = Map.toAscList m
+                emitOne (k, vs) =
+                    "      " ++ quote k ++ ": ["
+                    ++ intercalate ", " (map quote vs) ++ "]"
+            in intercalate ",\n" (map emitOne kvs)
+        emitMapStrStr m =
+            let kvs = Map.toAscList m
+                emitOne (k, v) = "      " ++ quote k ++ ": " ++ quote v
+            in intercalate ",\n" (map emitOne kvs)
+        implsSection =
+            if Map.null impls
+                then []
+                else
+                    [ "  ,"
+                    , "  \"implements\": {"
+                    , emitMapStrList impls
+                    , "  }"
+                    ]
+        aliasesSection =
+            if Map.null aliases
+                then []
+                else
+                    [ "  ,"
+                    , "  \"pkgAlias\": {"
+                    , emitMapStrStr aliases
+                    , "  }"
+                    ]
+    in unlines $
         [ "{"
         , "  \"moduleName\": " ++ quote moduleName ++ ","
         , "  \"kernelName\": " ++ quote kernelName ++ ","
@@ -465,8 +538,7 @@ emitKernelJson disambMethods moduleName kernelName pkg =
         , "  \"functions\": ["
         , fnEntries
         , "  ]"
-        , "}"
-        ]
+        ] ++ implsSection ++ aliasesSection ++ [ "}" ]
 
 
 -- | Sky-side type for an FFI wrapper, including the runtime Result
@@ -500,25 +572,43 @@ emitKernelJson disambMethods moduleName kernelName pkg =
 -- both targets regardless of the flag.
 wrapperSkyType :: Bool -> FnInfo -> String
 wrapperSkyType liftEffectful fn =
-    -- Per-param / per-result Sky-side override from the inspector
-    -- (e.g. CheckoutSessionStatus -> string). Length matches
-    -- _fnParams / _fnResults; "" means use the bare Go type.
-    let resolveSky goT skyOverride
-            | null skyOverride = goTypeToSky goT
-            | otherwise        = goTypeToSky skyOverride
+    -- Per-param / per-result Sky-side override from the inspector.
+    -- Precedence (highest first):
+    --   1. skyTypeQualified — opaque distinctness marker
+    --      (v0.17 C17b — e.g. @*Customer\@github.com/stripe/stripe-go/v84@)
+    --   2. skyType        — basic-alias collapse
+    --      (e.g. CheckoutSessionStatus -> string)
+    --   3. bare Go type   — via 'goTypeToSky'.
+    -- Length matches _fnParams / _fnResults; "" at each tier means
+    -- fall through to the next.
+    let resolveSky goT skyOverride qualOverride
+            -- v0.17 C17b — qualified marker carries Go-container
+            -- prefix(es) (e.g. @[]*Customer\@pkg.path@). Route
+            -- through 'goTypeToSky' so '[]' / 'map[string]' / '*'
+            -- translate to Sky shape (@List@ / @Dict String@ /
+            -- drop-star).  goTypeToSky preserves '\@pkgPath'
+            -- suffixes verbatim — stripPkg is gated to skip when
+            -- the name carries an '\@'.
+            | not (null qualOverride) = goTypeToSky qualOverride
+            | not (null skyOverride)  = goTypeToSky skyOverride
+            | otherwise               = goTypeToSky goT
         paramOverrides =
             _fnParamSkyTypes fn ++ repeat ""
         resultOverrides =
             _fnResultSkyTypes fn ++ repeat ""
+        paramQualified =
+            _fnParamSkyQualified fn ++ repeat ""
+        resultQualified =
+            _fnResultSkyQualified fn ++ repeat ""
         paramSig = if null (_fnParams fn)
             then "()"
             else intercalate " -> "
-                    (zipWith (\(_, t) sk -> resolveSky t sk)
-                        (_fnParams fn) paramOverrides)
+                    (zipWith3 (\(_, t) sk q -> resolveSky t sk q)
+                        (_fnParams fn) paramOverrides paramQualified)
         results = _fnResults fn
-        zippedResults = zip results resultOverrides
-        nonErr = [ ((n, t), sk) | ((n, t), sk) <- zippedResults, t /= "error" ]
-        skyOf ((_, t), sk) = resolveSky t sk
+        zippedResults = zip3 results resultOverrides resultQualified
+        nonErr = [ ((n, t), sk, q) | ((n, t), sk, q) <- zippedResults, t /= "error" ]
+        skyOf ((_, t), sk, q) = resolveSky t sk q
         innerOk = case (results, nonErr) of
             ([], _)               -> "()"
             ([(_, "error")], _)   -> "()"
@@ -1916,7 +2006,14 @@ goTypeToSky t
         "struct{}"    -> "()"
         _         -> stripPkg t
   where
-    stripPkg = reverse . takeWhile (/= '.') . reverse
+    -- v0.17 C17b — qualified opaque markers carry the package
+    -- path in their NAME (e.g. @Customer\@github.com/stripe/...@).
+    -- Skip dot-stripping when '@' is present so the qualifier
+    -- reaches parseFty intact; the FfiTypeResolve layer splits
+    -- on '@' to mint distinct opaque TType homes per package.
+    stripPkg s
+        | '@' `elem` s = s
+        | otherwise    = reverse . takeWhile (/= '.') . reverse $ s
 
     -- Multi-word Sky types (`List X`, `Dict String V`) need parens
     -- when nested inside another constructor: `List (List X)`,
