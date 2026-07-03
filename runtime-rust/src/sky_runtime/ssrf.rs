@@ -60,7 +60,7 @@ pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
                 || (a == 100 && (b & 0xc0) == 0x40)   // 100.64.0.0/10
                 || (a == 192 && b == 0 && c == 0)     // 192.0.0.0/24
                 || (a == 198 && (b & 0xfe) == 18)     // 198.18.0.0/15
-                || a >= 240                           // 240.0.0.0/4 (incl. 255.255.255.255)
+                || a >= 240 // 240.0.0.0/4 (incl. 255.255.255.255)
         }
         IpAddr::V6(v6) => {
             if v6.is_loopback() || v6.is_unspecified() {
@@ -140,7 +140,10 @@ pub(crate) fn resolve_first_non_private_addr(host: &str) -> Result<SocketAddr, S
 /// if any resolved address is private/loopback/link-local. Used by the WebSocket
 /// pin (which dials the returned addr directly so the connect cannot re-resolve
 /// to a rebind target).
-pub(crate) fn resolve_first_non_private_addr_with_port(host: &str, port: u16) -> Result<SocketAddr, String> {
+pub(crate) fn resolve_first_non_private_addr_with_port(
+    host: &str,
+    port: u16,
+) -> Result<SocketAddr, String> {
     // Try parsing as an IP literal first (avoids a DNS round-trip for bare IPs).
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_private_ip(ip) {
@@ -202,7 +205,10 @@ pub(crate) fn ssrf_pinned_ws_addr(url: &str) -> Result<Option<SocketAddr>, Strin
         return Ok(None);
     }
     let parsed = Url::parse(url).map_err(|e| {
-        format!("ws: blocked: invalid URL {:?}: {} (SKY_HTTP_DENY_PRIVATE)", url, e)
+        format!(
+            "ws: blocked: invalid URL {:?}: {} (SKY_HTTP_DENY_PRIVATE)",
+            url, e
+        )
     })?;
     let scheme = parsed.scheme();
     let host = parsed
@@ -264,9 +270,7 @@ pub(crate) fn ssrf_check_url(url: &str) -> Result<(), String> {
     let host = match parsed.host_str() {
         Some(h) => h,
         None => {
-            return Err(
-                "http: blocked: URL has no host (SKY_HTTP_DENY_PRIVATE)".to_string()
-            );
+            return Err("http: blocked: URL has no host (SKY_HTTP_DENY_PRIVATE)".to_string());
         }
     };
 
@@ -358,21 +362,21 @@ mod tests {
     #[test]
     fn is_private_ip_nat64_embedded_private() {
         // 64:ff9b::/96 embeds the destination IPv4 in the low 32 bits.
-        assert!(is_private_ip("64:ff9b::7f00:1".parse().unwrap()));   // → 127.0.0.1
+        assert!(is_private_ip("64:ff9b::7f00:1".parse().unwrap())); // → 127.0.0.1
         assert!(is_private_ip("64:ff9b::a9fe:a9fe".parse().unwrap())); // → 169.254.169.254 (AWS IMDS)
-        assert!(is_private_ip("64:ff9b::c0a8:101".parse().unwrap()));  // → 192.168.1.1
-        // NAT64 wrapping a public v4 stays public.
-        assert!(!is_private_ip("64:ff9b::101:101".parse().unwrap()));  // → 1.1.1.1
+        assert!(is_private_ip("64:ff9b::c0a8:101".parse().unwrap())); // → 192.168.1.1
+                                                                      // NAT64 wrapping a public v4 stays public.
+        assert!(!is_private_ip("64:ff9b::101:101".parse().unwrap())); // → 1.1.1.1
     }
 
     #[test]
     fn is_private_ip_6to4_embedded_private() {
         // 2002::/16 embeds the IPv4 in segments 1..=2 (2002:V4HI:V4LO::).
-        assert!(is_private_ip("2002:7f00:1::1".parse().unwrap()));   // → 127.0.0.1
+        assert!(is_private_ip("2002:7f00:1::1".parse().unwrap())); // → 127.0.0.1
         assert!(is_private_ip("2002:a9fe:a9fe::1".parse().unwrap())); // → 169.254.169.254
-        assert!(is_private_ip("2002:c0a8:101::1".parse().unwrap()));  // → 192.168.1.1
-        // 6to4 wrapping a public v4 stays public.
-        assert!(!is_private_ip("2002:101:101::1".parse().unwrap()));  // → 1.1.1.1
+        assert!(is_private_ip("2002:c0a8:101::1".parse().unwrap())); // → 192.168.1.1
+                                                                     // 6to4 wrapping a public v4 stays public.
+        assert!(!is_private_ip("2002:101:101::1".parse().unwrap())); // → 1.1.1.1
     }
 
     #[test]
@@ -385,27 +389,33 @@ mod tests {
     #[test]
     fn is_private_ip_extra_reserved_ranges_blocked() {
         // audit L1 (2026-06-22): non-RFC-1918 ranges that std's is_private misses.
-        assert!(is_private_ip("100.64.0.1".parse().unwrap()));       // CGNAT lo
-        assert!(is_private_ip("100.127.255.255".parse().unwrap()));  // CGNAT hi
-        assert!(is_private_ip("192.0.0.192".parse().unwrap()));      // IETF protocol
-        assert!(is_private_ip("198.18.0.1".parse().unwrap()));       // benchmarking lo
-        assert!(is_private_ip("198.19.255.255".parse().unwrap()));   // benchmarking hi
-        assert!(is_private_ip("240.0.0.1".parse().unwrap()));        // reserved
-        assert!(is_private_ip("255.255.255.255".parse().unwrap()));  // broadcast
-        // Boundaries that must STAY public (no over-block):
-        assert!(!is_private_ip("100.63.255.255".parse().unwrap()));  // just below CGNAT
-        assert!(!is_private_ip("100.128.0.0".parse().unwrap()));     // just above CGNAT
-        assert!(!is_private_ip("192.0.1.1".parse().unwrap()));       // 192.0.1/24 is public
-        assert!(!is_private_ip("198.20.0.0".parse().unwrap()));      // just above benchmarking
+        assert!(is_private_ip("100.64.0.1".parse().unwrap())); // CGNAT lo
+        assert!(is_private_ip("100.127.255.255".parse().unwrap())); // CGNAT hi
+        assert!(is_private_ip("192.0.0.192".parse().unwrap())); // IETF protocol
+        assert!(is_private_ip("198.18.0.1".parse().unwrap())); // benchmarking lo
+        assert!(is_private_ip("198.19.255.255".parse().unwrap())); // benchmarking hi
+        assert!(is_private_ip("240.0.0.1".parse().unwrap())); // reserved
+        assert!(is_private_ip("255.255.255.255".parse().unwrap())); // broadcast
+                                                                    // Boundaries that must STAY public (no over-block):
+        assert!(!is_private_ip("100.63.255.255".parse().unwrap())); // just below CGNAT
+        assert!(!is_private_ip("100.128.0.0".parse().unwrap())); // just above CGNAT
+        assert!(!is_private_ip("192.0.1.1".parse().unwrap())); // 192.0.1/24 is public
+        assert!(!is_private_ip("198.20.0.0".parse().unwrap())); // just above benchmarking
         assert!(!is_private_ip("239.255.255.255".parse().unwrap())); // just below reserved (multicast, routable-ish)
     }
 
     #[test]
     fn ssrf_check_url_rejects_non_http_scheme() {
         let err = ssrf_check_url("ftp://example.com/file").unwrap_err();
-        assert!(err.contains("scheme"), "expected scheme rejection, got: {err}");
+        assert!(
+            err.contains("scheme"),
+            "expected scheme rejection, got: {err}"
+        );
         let err2 = ssrf_check_url("file:///etc/passwd").unwrap_err();
-        assert!(err2.contains("scheme") || err2.contains("invalid"), "got: {err2}");
+        assert!(
+            err2.contains("scheme") || err2.contains("invalid"),
+            "got: {err2}"
+        );
     }
 
     #[test]
@@ -480,12 +490,12 @@ mod tests {
         let cases = [
             "http://user:pass@example.com:8080/path?q=1",
             "https://xn--n3h.example/", // punycode/IDN host
-            "http://0x7f.0.0.1/",        // hex-ish IPv4-looking host
-            "http://0177.0.0.1/",        // octal-ish IPv4-looking host
+            "http://0x7f.0.0.1/",       // hex-ish IPv4-looking host
+            "http://0177.0.0.1/",       // octal-ish IPv4-looking host
             "http://[::ffff:127.0.0.1]/",
             "wss://[::1]:8443/socket",
-            "ws://example.com./",        // trailing-dot host
-            "https://例え.テスト/",       // raw IDN
+            "ws://example.com./",   // trailing-dot host
+            "https://例え.テスト/", // raw IDN
             "http://127.0.0.1:8080/admin",
             "https://1.1.1.1/",
         ];

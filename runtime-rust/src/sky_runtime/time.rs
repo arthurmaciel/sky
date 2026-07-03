@@ -23,19 +23,27 @@ pub fn time_sleep<E: Send + 'static>(ms: i64) -> SkyTask<E, ()> {
 }
 
 #[cfg(feature = "tokio")]
-pub fn time_unix_millis<E: Send + 'static>(_: ()) -> SkyTask<E, i64> { time_now(()) }
+pub fn time_unix_millis<E: Send + 'static>(_: ()) -> SkyTask<E, i64> {
+    time_now(())
+}
 
-pub fn time_time_string(ms: i64) -> String { format!("timestamp:{}", ms) }
+pub fn time_time_string(ms: i64) -> String {
+    format!("timestamp:{}", ms)
+}
 
 /// `Time.addMillis : Int -> Int -> Int` — pure integer addition.
 /// Go: `return AsInt(ms) + AsInt(delta)`. Args order: delta first, ms second
 /// (matches the Sky sig `addMillis : Int -> Int -> Int`, called
 /// `Time.addMillis delta ms`).
-pub fn time_add_millis(delta: i64, ms: i64) -> i64 { ms.saturating_add(delta) }
+pub fn time_add_millis(delta: i64, ms: i64) -> i64 {
+    ms.saturating_add(delta)
+}
 
 /// `Time.diffMillis : Int -> Int -> Int` — `later - earlier`.
 /// Go: `return AsInt(later) - AsInt(earlier)`. Args: (later, earlier).
-pub fn time_diff_millis(later: i64, earlier: i64) -> i64 { later.saturating_sub(earlier) }
+pub fn time_diff_millis(later: i64, earlier: i64) -> i64 {
+    later.saturating_sub(earlier)
+}
 
 /// `Time.format : String -> Int -> String` — custom Go-style layout.
 /// Go uses `t.UTC().Format(layout)`. We map the Go reference-time layout to
@@ -134,10 +142,18 @@ pub fn time_in_zone<E: From<String>>(zone: String, ms: i64) -> SkyResult<E, Stri
 // overflow-panic in debug / wrap silently in release. Saturation keeps these
 // total (no panic path) and is the closest bare-`i64` analogue of the
 // `time_add_months` "return ms on out-of-range" fallback.
-pub fn time_add_days(days: i64, ms: i64) -> i64 { ms.saturating_add(days.saturating_mul(86_400_000)) }
-pub fn time_add_hours(h: i64, ms: i64) -> i64 { ms.saturating_add(h.saturating_mul(3_600_000)) }
-pub fn time_add_minutes(m: i64, ms: i64) -> i64 { ms.saturating_add(m.saturating_mul(60_000)) }
-pub fn time_add_seconds(s: i64, ms: i64) -> i64 { ms.saturating_add(s.saturating_mul(1000)) }
+pub fn time_add_days(days: i64, ms: i64) -> i64 {
+    ms.saturating_add(days.saturating_mul(86_400_000))
+}
+pub fn time_add_hours(h: i64, ms: i64) -> i64 {
+    ms.saturating_add(h.saturating_mul(3_600_000))
+}
+pub fn time_add_minutes(m: i64, ms: i64) -> i64 {
+    ms.saturating_add(m.saturating_mul(60_000))
+}
+pub fn time_add_seconds(s: i64, ms: i64) -> i64 {
+    ms.saturating_add(s.saturating_mul(1000))
+}
 
 pub fn time_add_months(months: i64, ms: i64) -> i64 {
     let utc = match Utc.timestamp_millis_opt(ms).single() {
@@ -163,17 +179,25 @@ pub fn time_add_months(months: i64, ms: i64) -> i64 {
     let first = NaiveDate::from_ymd_opt(new_y, new_m, 1);
     let max_day = match first {
         Some(d) => {
-            let (ny, nm) = if new_m == 12 { (new_y + 1, 1u32) } else { (new_y, new_m + 1) };
+            let (ny, nm) = if new_m == 12 {
+                (new_y + 1, 1u32)
+            } else {
+                (new_y, new_m + 1)
+            };
             let first_next = NaiveDate::from_ymd_opt(ny, nm, 1).unwrap_or(d);
             first_next.signed_duration_since(d).num_days() as u32
         }
         None => return ms,
     };
     let day = utc.day().min(max_day);
-    match NaiveDate::from_ymd_opt(new_y, new_m, day)
-        .and_then(|d| d.and_hms_milli_opt(utc.hour(), utc.minute(), utc.second(),
-                                          utc.timestamp_subsec_millis()))
-    {
+    match NaiveDate::from_ymd_opt(new_y, new_m, day).and_then(|d| {
+        d.and_hms_milli_opt(
+            utc.hour(),
+            utc.minute(),
+            utc.second(),
+            utc.timestamp_subsec_millis(),
+        )
+    }) {
         Some(ndt) => Utc.from_utc_datetime(&ndt).timestamp_millis(),
         None => ms,
     }
@@ -246,8 +270,15 @@ pub fn time_days_in_month(year: i64, month: i64) -> i64 {
     }
     // saturating_add: `year` is caller-controlled; y+1 at i32::MAX would panic
     // (debug) / wrap (release). A saturated year makes from_ymd_opt return None → 0.
-    let (ny, nm) = if m == 12 { (y.saturating_add(1), 1) } else { (y, m + 1) };
-    match (NaiveDate::from_ymd_opt(ny, nm, 1), NaiveDate::from_ymd_opt(y, m, 1)) {
+    let (ny, nm) = if m == 12 {
+        (y.saturating_add(1), 1)
+    } else {
+        (y, m + 1)
+    };
+    match (
+        NaiveDate::from_ymd_opt(ny, nm, 1),
+        NaiveDate::from_ymd_opt(y, m, 1),
+    ) {
         (Some(next), Some(this)) => next.signed_duration_since(this).num_days(),
         _ => 0,
     }
@@ -352,25 +383,50 @@ pub fn time_format_iso8601(ms: i64) -> String {
 /// `diffSeconds later earlier` — integer seconds between two epoch-ms timestamps.
 // Division truncates toward zero (Go parity; negative spans truncate toward
 // zero too). `saturating_sub` avoids an overflow-panic on extreme epoch inputs.
-pub fn time_diff_seconds(later_ms: i64, earlier_ms: i64) -> i64 { later_ms.saturating_sub(earlier_ms) / 1_000 }
-pub fn time_diff_minutes(later_ms: i64, earlier_ms: i64) -> i64 { later_ms.saturating_sub(earlier_ms) / 60_000 }
-pub fn time_diff_hours(later_ms: i64, earlier_ms: i64) -> i64 { later_ms.saturating_sub(earlier_ms) / 3_600_000 }
-pub fn time_diff_days(later_ms: i64, earlier_ms: i64) -> i64 { later_ms.saturating_sub(earlier_ms) / 86_400_000 }
+pub fn time_diff_seconds(later_ms: i64, earlier_ms: i64) -> i64 {
+    later_ms.saturating_sub(earlier_ms) / 1_000
+}
+pub fn time_diff_minutes(later_ms: i64, earlier_ms: i64) -> i64 {
+    later_ms.saturating_sub(earlier_ms) / 60_000
+}
+pub fn time_diff_hours(later_ms: i64, earlier_ms: i64) -> i64 {
+    later_ms.saturating_sub(earlier_ms) / 3_600_000
+}
+pub fn time_diff_days(later_ms: i64, earlier_ms: i64) -> i64 {
+    later_ms.saturating_sub(earlier_ms) / 86_400_000
+}
 
 /// Sky source: `fromParts zone y m d h mins s -> Result Error Int`.
 /// Computes the UTC epoch-ms for the given local date/time in the given IANA
 /// zone. Invalid parts return Err. Unknown timezone returns Err.
-pub fn time_from_parts<E: From<String>>(zone: String, y: i64, m: i64, d: i64, h: i64, mins: i64, s: i64) -> SkyResult<E, i64> {
+pub fn time_from_parts<E: From<String>>(
+    zone: String,
+    y: i64,
+    m: i64,
+    d: i64,
+    h: i64,
+    mins: i64,
+    s: i64,
+) -> SkyResult<E, i64> {
     let tz: Tz = match zone.parse() {
         Ok(t) => t,
-        Err(_) => return SkyResult::Err(format!("Time.fromParts: unknown timezone {:?}", zone).into()),
+        Err(_) => {
+            return SkyResult::Err(format!("Time.fromParts: unknown timezone {:?}", zone).into())
+        }
     };
     let naive = match NaiveDate::from_ymd_opt(y as i32, m as u32, d as u32)
-        .and_then(|day| day.and_hms_opt(h as u32, mins as u32, s as u32)) {
+        .and_then(|day| day.and_hms_opt(h as u32, mins as u32, s as u32))
+    {
         Some(n) => n,
-        None => return SkyResult::Err(format!(
-            "Time.fromParts: invalid date parts {}-{:02}-{:02} {:02}:{:02}:{:02}",
-            y, m, d, h, mins, s).into()),
+        None => {
+            return SkyResult::Err(
+                format!(
+                    "Time.fromParts: invalid date parts {}-{:02}-{:02} {:02}:{:02}:{:02}",
+                    y, m, d, h, mins, s
+                )
+                .into(),
+            )
+        }
     };
     match tz.from_local_datetime(&naive).single() {
         Some(zoned) => SkyResult::Ok(zoned.with_timezone(&Utc).timestamp_millis()),
@@ -389,8 +445,15 @@ pub fn time_zone_offset<E: From<String>>(zone_name: String, ms: i64) -> SkyResul
         None => return SkyResult::Err(format!("Time.zoneOffset: invalid epoch ms {}", ms).into()),
     };
     match zone_name.parse::<Tz>() {
-        Ok(tz) => SkyResult::Ok(tz.from_utc_datetime(&utc.naive_utc()).offset().fix().local_minus_utc() as i64),
-        Err(_) => SkyResult::Err(format!("Time.zoneOffset: unknown timezone {:?}", zone_name).into()),
+        Ok(tz) => SkyResult::Ok(
+            tz.from_utc_datetime(&utc.naive_utc())
+                .offset()
+                .fix()
+                .local_minus_utc() as i64,
+        ),
+        Err(_) => {
+            SkyResult::Err(format!("Time.zoneOffset: unknown timezone {:?}", zone_name).into())
+        }
     }
 }
 
@@ -402,7 +465,11 @@ pub fn time_zone_name<E: From<String>>(zone_name: String, ms: i64) -> SkyResult<
         None => return SkyResult::Err(format!("Time.zoneName: invalid epoch ms {}", ms).into()),
     };
     match zone_name.parse::<Tz>() {
-        Ok(tz) => SkyResult::Ok(tz.from_utc_datetime(&utc.naive_utc()).format("%Z").to_string()),
+        Ok(tz) => SkyResult::Ok(
+            tz.from_utc_datetime(&utc.naive_utc())
+                .format("%Z")
+                .to_string(),
+        ),
         Err(_) => SkyResult::Err(format!("Time.zoneName: unknown timezone {:?}", zone_name).into()),
     }
 }
@@ -429,7 +496,11 @@ mod time_advanced_tests {
     #[test]
     fn test_day_of_week_friday() {
         let r: SkyResult<String, i64> = time_day_of_week("UTC".to_string(), T1);
-        assert!(matches!(r, SkyResult::Ok(d) if (1..=7).contains(&d)), "got {:?}", r);
+        assert!(
+            matches!(r, SkyResult::Ok(d) if (1..=7).contains(&d)),
+            "got {:?}",
+            r
+        );
     }
 
     #[test]
@@ -472,12 +543,12 @@ mod time_advanced_tests {
 
     #[test]
     fn test_from_parts_invalid_returns_err() {
-        let r1: SkyResult<String, i64> = time_from_parts("UTC".into(), 2024, 13, 1, 0, 0, 0);  // month 13
-        let r2: SkyResult<String, i64> = time_from_parts("UTC".into(), 2024, 2, 30, 0, 0, 0);  // Feb 30
+        let r1: SkyResult<String, i64> = time_from_parts("UTC".into(), 2024, 13, 1, 0, 0, 0); // month 13
+        let r2: SkyResult<String, i64> = time_from_parts("UTC".into(), 2024, 2, 30, 0, 0, 0); // Feb 30
         let r3: SkyResult<String, i64> = time_from_parts("Not/AZone".into(), 2024, 1, 1, 0, 0, 0);
         assert!(matches!(r1, SkyResult::Err(_)));
         assert!(matches!(r2, SkyResult::Err(_)));
-        assert!(matches!(r3, SkyResult::Err(_)));  // unknown timezone
+        assert!(matches!(r3, SkyResult::Err(_))); // unknown timezone
     }
 
     #[test]

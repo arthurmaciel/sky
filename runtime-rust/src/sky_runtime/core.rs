@@ -8,8 +8,8 @@
 // List kernels live in their named Sky-module homes — `string.rs` and
 // `list.rs` — re-exported through `mod.rs`'s glob so call sites are unaffected.
 
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
 
 // ===========================================
 // Task type (generic over error type E)
@@ -18,11 +18,15 @@ pub type SkyTask<E, A> = Pin<Box<dyn Future<Output = SkyResult<E, A>> + Send + '
 
 /// Construct Ok with generic error type.  Use `ok_res::<SkyError>` to
 /// instantiate with the project's concrete error type.
-pub fn ok_res<E, A>(a: A) -> SkyResult<E, A> { SkyResult::Ok(a) }
+pub fn ok_res<E, A>(a: A) -> SkyResult<E, A> {
+    SkyResult::Ok(a)
+}
 
 /// Construct an error value from a string.  Requires `E: From<String>`.
 /// When E = SkyCoreErrorError, the generated code provides the impl.
-pub fn str_err<E: From<String>>(s: &str) -> E { s.to_string().into() }
+pub fn str_err<E: From<String>>(s: &str) -> E {
+    s.to_string().into()
+}
 
 /// Convert a foreign FFI error into the project's error type — REDACTED.
 ///
@@ -70,7 +74,10 @@ fn log_foreign_error(err_id: &str, detail: &str) {
             crate::sky_runtime::telemetry::json_escape(detail)
         );
     } else {
-        eprintln!("[error] ForeignError (ref {err_id}): {}", scrub_log_controls(detail));
+        eprintln!(
+            "[error] ForeignError (ref {err_id}): {}",
+            scrub_log_controls(detail)
+        );
     }
 }
 
@@ -81,7 +88,9 @@ fn log_foreign_error(err_id: &str, detail: &str) {
 /// the plain-branch counterpart, shared by `log_foreign_error` and
 /// `classify_and_log_panic`. Total — no unwrap/index/panic.
 fn scrub_log_controls(s: &str) -> String {
-    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// Bake a config-derived default for an env var: set `key=val` ONLY when the
@@ -113,25 +122,42 @@ const DISCONNECTED_MSG: &str =
 pub fn disconnected_fn0<T: Send + 'static, E: From<String> + Send + 'static>(
 ) -> std::sync::Arc<dyn Fn() -> SkyTask<E, T> + Send + Sync> {
     std::sync::Arc::new(|| -> SkyTask<E, T> {
-        Box::pin(std::future::ready(SkyResult::Err(str_err::<E>(DISCONNECTED_MSG))))
+        Box::pin(std::future::ready(SkyResult::Err(str_err::<E>(
+            DISCONNECTED_MSG,
+        ))))
     })
 }
 pub fn disconnected_fn1<A: 'static, T: Send + 'static, E: From<String> + Send + 'static>(
 ) -> std::sync::Arc<dyn Fn(A) -> SkyTask<E, T> + Send + Sync> {
     std::sync::Arc::new(|_a| -> SkyTask<E, T> {
-        Box::pin(std::future::ready(SkyResult::Err(str_err::<E>(DISCONNECTED_MSG))))
+        Box::pin(std::future::ready(SkyResult::Err(str_err::<E>(
+            DISCONNECTED_MSG,
+        ))))
     })
 }
-pub fn disconnected_fn2<A1: 'static, A2: 'static, T: Send + 'static, E: From<String> + Send + 'static>(
-) -> std::sync::Arc<dyn Fn(A1, A2) -> SkyTask<E, T> + Send + Sync> {
+pub fn disconnected_fn2<
+    A1: 'static,
+    A2: 'static,
+    T: Send + 'static,
+    E: From<String> + Send + 'static,
+>() -> std::sync::Arc<dyn Fn(A1, A2) -> SkyTask<E, T> + Send + Sync> {
     std::sync::Arc::new(|_a1, _a2| -> SkyTask<E, T> {
-        Box::pin(std::future::ready(SkyResult::Err(str_err::<E>(DISCONNECTED_MSG))))
+        Box::pin(std::future::ready(SkyResult::Err(str_err::<E>(
+            DISCONNECTED_MSG,
+        ))))
     })
 }
-pub fn disconnected_fn3<A1: 'static, A2: 'static, A3: 'static, T: Send + 'static, E: From<String> + Send + 'static>(
-) -> std::sync::Arc<dyn Fn(A1, A2, A3) -> SkyTask<E, T> + Send + Sync> {
+pub fn disconnected_fn3<
+    A1: 'static,
+    A2: 'static,
+    A3: 'static,
+    T: Send + 'static,
+    E: From<String> + Send + 'static,
+>() -> std::sync::Arc<dyn Fn(A1, A2, A3) -> SkyTask<E, T> + Send + Sync> {
     std::sync::Arc::new(|_a1, _a2, _a3| -> SkyTask<E, T> {
-        Box::pin(std::future::ready(SkyResult::Err(str_err::<E>(DISCONNECTED_MSG))))
+        Box::pin(std::future::ready(SkyResult::Err(str_err::<E>(
+            DISCONNECTED_MSG,
+        ))))
     })
 }
 
@@ -266,10 +292,7 @@ impl<'de, T: serde::de::Deserialize<'de>> serde::de::Visitor<'de> for SkyMaybeVi
     }
 
     // --- externally-tagged map `{"Just": v}` → Just(T) ---
-    fn visit_map<A: serde::de::MapAccess<'de>>(
-        self,
-        mut map: A,
-    ) -> Result<SkyMaybe<T>, A::Error> {
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<SkyMaybe<T>, A::Error> {
         use serde::de::Error as _;
         let key: Option<String> = map.next_key()?;
         match key.as_deref() {
@@ -310,10 +333,17 @@ impl<'de, T: serde::de::Deserialize<'de>> serde::de::Visitor<'de> for SkyMaybeVi
 
 impl<T> SkyMaybe<T> {
     pub fn with_default(self, def: T) -> T {
-        match self { SkyMaybe::Just(v) => v, SkyMaybe::Nothing => def }
+        match self {
+            SkyMaybe::Just(v) => v,
+            SkyMaybe::Nothing => def,
+        }
     }
-    pub fn is_just(&self) -> bool { matches!(self, SkyMaybe::Just(_)) }
-    pub fn is_nothing(&self) -> bool { matches!(self, SkyMaybe::Nothing) }
+    pub fn is_just(&self) -> bool {
+        matches!(self, SkyMaybe::Just(_))
+    }
+    pub fn is_nothing(&self) -> bool {
+        matches!(self, SkyMaybe::Nothing)
+    }
 }
 
 // `Nothing` is the natural zero of an absent `Maybe`, mirroring Go's
@@ -331,15 +361,23 @@ impl<T> SkyMaybe<T> {
 // constructed in the `Nothing` zero). This MANUAL impl is unbounded in `T`.
 #[allow(clippy::derivable_impls)]
 impl<T> Default for SkyMaybe<T> {
-    fn default() -> Self { SkyMaybe::Nothing }
+    fn default() -> Self {
+        SkyMaybe::Nothing
+    }
 }
 
 pub fn sky_maybe_map<T, U>(m: SkyMaybe<T>, f: impl FnOnce(T) -> U) -> SkyMaybe<U> {
-    match m { SkyMaybe::Just(v) => SkyMaybe::Just(f(v)), SkyMaybe::Nothing => SkyMaybe::Nothing }
+    match m {
+        SkyMaybe::Just(v) => SkyMaybe::Just(f(v)),
+        SkyMaybe::Nothing => SkyMaybe::Nothing,
+    }
 }
 
 pub fn sky_maybe_and_then<T, U>(m: SkyMaybe<T>, f: impl FnOnce(T) -> SkyMaybe<U>) -> SkyMaybe<U> {
-    match m { SkyMaybe::Just(v) => f(v), SkyMaybe::Nothing => SkyMaybe::Nothing }
+    match m {
+        SkyMaybe::Just(v) => f(v),
+        SkyMaybe::Nothing => SkyMaybe::Nothing,
+    }
 }
 
 /// `SkyMaybe<T>` -> `Option<T>` for FFI parameter coercion: a Sky `Maybe X`
@@ -364,35 +402,65 @@ pub enum SkyResult<E, A> {
 }
 
 impl<E, A> SkyResult<E, A> {
-    pub fn is_ok(&self) -> bool { matches!(self, SkyResult::Ok(_)) }
-    pub fn is_err(&self) -> bool { matches!(self, SkyResult::Err(_)) }
+    pub fn is_ok(&self) -> bool {
+        matches!(self, SkyResult::Ok(_))
+    }
+    pub fn is_err(&self) -> bool {
+        matches!(self, SkyResult::Err(_))
+    }
     pub fn with_default(self, def: A) -> A {
-        match self { SkyResult::Ok(v) => v, SkyResult::Err(_) => def }
+        match self {
+            SkyResult::Ok(v) => v,
+            SkyResult::Err(_) => def,
+        }
     }
 }
 
 pub fn sky_result_map<E, A, B>(r: SkyResult<E, A>, f: impl FnOnce(A) -> B) -> SkyResult<E, B> {
-    match r { SkyResult::Ok(v) => SkyResult::Ok(f(v)), SkyResult::Err(e) => SkyResult::Err(e) }
+    match r {
+        SkyResult::Ok(v) => SkyResult::Ok(f(v)),
+        SkyResult::Err(e) => SkyResult::Err(e),
+    }
 }
 
-pub fn sky_result_and_then<E, A, B>(r: SkyResult<E, A>, f: impl FnOnce(A) -> SkyResult<E, B>) -> SkyResult<E, B> {
-    match r { SkyResult::Ok(v) => f(v), SkyResult::Err(e) => SkyResult::Err(e) }
+pub fn sky_result_and_then<E, A, B>(
+    r: SkyResult<E, A>,
+    f: impl FnOnce(A) -> SkyResult<E, B>,
+) -> SkyResult<E, B> {
+    match r {
+        SkyResult::Ok(v) => f(v),
+        SkyResult::Err(e) => SkyResult::Err(e),
+    }
 }
 
 // ===========================================
 // Maybe / Result default + traverse helpers
 // ===========================================
 pub fn result_with_default<E, A>(def: A, r: SkyResult<E, A>) -> A {
-    match r { SkyResult::Ok(v) => v, SkyResult::Err(_) => def }
+    match r {
+        SkyResult::Ok(v) => v,
+        SkyResult::Err(_) => def,
+    }
 }
 
 pub fn maybe_with_default<A>(def: A, m: SkyMaybe<A>) -> A {
-    match m { SkyMaybe::Just(v) => v, SkyMaybe::Nothing => def }
+    match m {
+        SkyMaybe::Just(v) => v,
+        SkyMaybe::Nothing => def,
+    }
 }
 
-pub fn result_traverse<T0: Clone, T1: Clone, E>(f: impl Fn(T0) -> SkyResult<E, T1>, items: Vec<T0>) -> SkyResult<E, Vec<T1>> {
+pub fn result_traverse<T0: Clone, T1: Clone, E>(
+    f: impl Fn(T0) -> SkyResult<E, T1>,
+    items: Vec<T0>,
+) -> SkyResult<E, Vec<T1>> {
     let mut out = Vec::with_capacity(items.len());
-    for item in items { match f(item) { SkyResult::Ok(v) => out.push(v), SkyResult::Err(e) => return SkyResult::Err(e) } }
+    for item in items {
+        match f(item) {
+            SkyResult::Ok(v) => out.push(v),
+            SkyResult::Err(e) => return SkyResult::Err(e),
+        }
+    }
     SkyResult::Ok(out)
 }
 
@@ -469,7 +537,10 @@ pub fn classify_and_log_panic(payload: &(dyn std::any::Any + Send)) -> String {
             crate::sky_runtime::telemetry::json_escape(&msg)
         );
     } else {
-        eprintln!("[error] {kind} (ref {err_id}): {}", scrub_log_controls(&msg));
+        eprintln!(
+            "[error] {kind} (ref {err_id}): {}",
+            scrub_log_controls(&msg)
+        );
     }
     err_id
 }
@@ -626,8 +697,7 @@ mod tests {
 
     #[test]
     fn sky_maybe_struct_tagged_just() {
-        let v: SkyMaybe<SmallPoint> =
-            serde_json::from_str(r#"{"Just":{"x":1,"y":2}}"#).unwrap();
+        let v: SkyMaybe<SmallPoint> = serde_json::from_str(r#"{"Just":{"x":1,"y":2}}"#).unwrap();
         assert_eq!(v, SkyMaybe::Just(SmallPoint { x: 1, y: 2 }));
     }
 
@@ -636,9 +706,11 @@ mod tests {
         // A bare `{"x":1,"y":2}` must NOT decode as Just(SmallPoint{1,2}).
         // The visitor's map arm checks the first key: "x" is not "Just"/"Nothing"
         // → unknown_variant error.  Correct, safe behaviour confirmed by guardian.
-        let result: Result<SkyMaybe<SmallPoint>, _> =
-            serde_json::from_str(r#"{"x":1,"y":2}"#);
-        assert!(result.is_err(), "bare struct map must not silently decode as Just");
+        let result: Result<SkyMaybe<SmallPoint>, _> = serde_json::from_str(r#"{"x":1,"y":2}"#);
+        assert!(
+            result.is_err(),
+            "bare struct map must not silently decode as Just"
+        );
     }
 
     #[test]
@@ -682,16 +754,14 @@ mod tests {
     #[test]
     fn sky_maybe_nested_just_just() {
         // {"Just":{"Just":5}} → Just(Just(5))
-        let v: SkyMaybe<SkyMaybe<i64>> =
-            serde_json::from_str(r#"{"Just":{"Just":5}}"#).unwrap();
+        let v: SkyMaybe<SkyMaybe<i64>> = serde_json::from_str(r#"{"Just":{"Just":5}}"#).unwrap();
         assert_eq!(v, SkyMaybe::Just(SkyMaybe::Just(5_i64)));
     }
 
     #[test]
     fn sky_maybe_nested_just_nothing() {
         // {"Just":"Nothing"} → Just(Nothing)
-        let v: SkyMaybe<SkyMaybe<i64>> =
-            serde_json::from_str(r#"{"Just":"Nothing"}"#).unwrap();
+        let v: SkyMaybe<SkyMaybe<i64>> = serde_json::from_str(r#"{"Just":"Nothing"}"#).unwrap();
         assert_eq!(v, SkyMaybe::Just(SkyMaybe::Nothing));
     }
 
@@ -735,7 +805,8 @@ mod tests {
             // its charset MUST be [0-9a-f] — proving the body can carry nothing
             // attacker-influenced.
             assert!(
-                id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                id.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
                 "errId not lowercase hex: {id}"
             );
         }
@@ -743,9 +814,18 @@ mod tests {
 
     #[test]
     fn classify_panic_maps_known_kinds() {
-        assert_eq!(classify_panic("attempt to divide by zero"), "DivisionByZero");
-        assert_eq!(classify_panic("index out of bounds: the len is 3"), "IndexOutOfRange");
-        assert_eq!(classify_panic("attempt to add with overflow"), "ArithmeticOverflow");
+        assert_eq!(
+            classify_panic("attempt to divide by zero"),
+            "DivisionByZero"
+        );
+        assert_eq!(
+            classify_panic("index out of bounds: the len is 3"),
+            "IndexOutOfRange"
+        );
+        assert_eq!(
+            classify_panic("attempt to add with overflow"),
+            "ArithmeticOverflow"
+        );
         assert_eq!(classify_panic("something else entirely"), "Unexpected");
     }
 
@@ -760,7 +840,9 @@ mod tests {
 
     #[test]
     fn foreign_error_redacts_secret_from_sky_message() {
-        let e = SecretBearingError { bearer: "Bearer sk_live_SUPERSECRET_KEY" };
+        let e = SecretBearingError {
+            bearer: "Bearer sk_live_SUPERSECRET_KEY",
+        };
         let msg: String = sky_error_from_foreign(e);
         assert!(
             !msg.contains("SUPERSECRET") && !msg.contains("Bearer") && !msg.contains("bearer"),
@@ -777,6 +859,9 @@ mod tests {
             .trim_start_matches("external operation failed (ref ")
             .trim_end_matches(')');
         assert_eq!(id.len(), 8, "correlation id is 8 hex chars — got: {id:?}");
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "id must be hex — got: {id:?}");
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit()),
+            "id must be hex — got: {id:?}"
+        );
     }
 }

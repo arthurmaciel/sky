@@ -28,9 +28,7 @@ impl<M: Clone> HandlerIndex<M> {
         match self.map.get(sky_id)?.get(event)? {
             Event::OnMsg(_, m) => Some(m.clone()),
             Event::OnString(_, f) => Some(f(args.first().cloned().unwrap_or_default())),
-            Event::OnBool(_, f) => {
-                Some(f(args.first().map(|s| s == "true").unwrap_or(false)))
-            }
+            Event::OnBool(_, f) => Some(f(args.first().map(|s| s == "true").unwrap_or(false))),
             Event::OnForm(_, _) => None, // dispatched via resolve_form
             Event::OnRaw(_, _) => None,  // heterogeneous payload — not dispatchable
         }
@@ -41,7 +39,7 @@ impl<M: Clone> HandlerIndex<M> {
     /// positional `args` slice.
     pub fn resolve_form(&self, sky_id: &str, event: &str, fd: FormData) -> Option<M> {
         match self.map.get(sky_id)?.get(event)? {
-            Event::OnForm(_, f) => f(fd),   // f already returns Option<M> (None on decode failure)
+            Event::OnForm(_, f) => f(fd), // f already returns Option<M> (None on decode failure)
             _ => None,
         }
     }
@@ -117,7 +115,10 @@ mod tests {
                 ),
                 Html::HElement(
                     "input".into(),
-                    vec![Attribute::EventAttr(Event::OnString("input".into(), std::sync::Arc::new(Msg::Typed)))],
+                    vec![Attribute::EventAttr(Event::OnString(
+                        "input".into(),
+                        std::sync::Arc::new(Msg::Typed),
+                    ))],
                     vec![],
                 ),
             ],
@@ -129,10 +130,7 @@ mod tests {
     #[test]
     fn resolves_onmsg_and_onstring() {
         let idx = build_index(&tree());
-        assert_eq!(
-            idx.resolve("r_0_button", "click", &[]),
-            Some(Msg::Inc)
-        );
+        assert_eq!(idx.resolve("r_0_button", "click", &[]), Some(Msg::Inc));
         assert_eq!(
             idx.resolve("r_1_input", "input", &["hi".into()]),
             Some(Msg::Typed("hi".into()))
@@ -147,7 +145,13 @@ mod tests {
             "input".into(),
             vec![Attribute::EventAttr(Event::OnBool(
                 "change".into(),
-                std::sync::Arc::new(|b| if b { Msg::Inc } else { Msg::Typed("off".into()) }),
+                std::sync::Arc::new(|b| {
+                    if b {
+                        Msg::Inc
+                    } else {
+                        Msg::Typed("off".into())
+                    }
+                }),
             ))],
             vec![],
         );
@@ -190,7 +194,10 @@ mod tests {
     fn onstring_empty_args_gives_default() {
         let mut t = Html::HElement(
             "input".into(),
-            vec![Attribute::EventAttr(Event::OnString("input".into(), std::sync::Arc::new(Msg::Typed)))],
+            vec![Attribute::EventAttr(Event::OnString(
+                "input".into(),
+                std::sync::Arc::new(Msg::Typed),
+            ))],
             vec![],
         );
         assign_sky_ids(&mut t, "r");

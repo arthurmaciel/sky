@@ -15,7 +15,9 @@ use std::hash::Hash;
 pub type SkyDict<T> = HashMap<String, T>;
 
 /// `Dict.empty : Dict k v`.
-pub fn dict_empty<K, V>() -> HashMap<K, V> { HashMap::new() }
+pub fn dict_empty<K, V>() -> HashMap<K, V> {
+    HashMap::new()
+}
 
 /// `Dict.insert : k -> v -> Dict k v -> Dict k v`.
 /// Functional update — the input dict is consumed and the modified copy returned.
@@ -29,7 +31,7 @@ pub fn dict_insert<K: Hash + Eq, V>(k: K, v: V, d: HashMap<K, V>) -> HashMap<K, 
 pub fn dict_get<K: Hash + Eq, V: Clone>(k: K, d: HashMap<K, V>) -> SkyMaybe<V> {
     match d.get(&k) {
         Some(v) => SkyMaybe::Just(v.clone()),
-        None    => SkyMaybe::Nothing,
+        None => SkyMaybe::Nothing,
     }
 }
 
@@ -102,20 +104,20 @@ pub fn dict_union<K: Hash + Eq + Clone, V: Clone>(
 /// Applies `f k v` to every entry; returns a new dict with the transformed
 /// values. Iteration order is sorted by key for determinism (matches `dict_keys`
 /// / `dict_values` / `dict_foldl`).
-pub fn dict_map<K: Ord + Hash + Eq + Clone, V: Clone, W, F>(
-    f: F,
-    d: HashMap<K, V>,
-) -> HashMap<K, W>
+pub fn dict_map<K: Ord + Hash + Eq + Clone, V: Clone, W, F>(f: F, d: HashMap<K, V>) -> HashMap<K, W>
 where
     F: Fn(K, V) -> W,
 {
     // Sort for determinism, then apply.
     let mut pairs: Vec<(K, V)> = d.into_iter().collect();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
-    pairs.into_iter().map(|(k, v)| {
-        let w = f(k.clone(), v);
-        (k, w)
-    }).collect()
+    pairs
+        .into_iter()
+        .map(|(k, v)| {
+            let w = f(k.clone(), v);
+            (k, w)
+        })
+        .collect()
 }
 
 /// `Dict.foldl : (k -> v -> a -> a) -> a -> Dict k v -> a`.
@@ -123,11 +125,7 @@ where
 /// `_fieldIndex`/sorted-key iteration contract; Go's `Dict_foldl` iterates
 /// map-order but the sorted-key guarantee is a Rust-backend strengthening that
 /// matches `dict_keys` / `dict_values` / `dict_to_list` / `dict_map` here).
-pub fn dict_foldl<K: Ord + Hash + Eq, V, A, F>(
-    f: F,
-    acc: A,
-    d: HashMap<K, V>,
-) -> A
+pub fn dict_foldl<K: Ord + Hash + Eq, V, A, F>(f: F, acc: A, d: HashMap<K, V>) -> A
 where
     F: Fn(K, V, A) -> A,
 {
@@ -195,10 +193,7 @@ mod tests {
 
     #[test]
     fn test_dict_union_left_biased() {
-        let a: SkyDict<i64> = dict_from_list(vec![
-            ("x".into(), 1),
-            ("y".into(), 2),
-        ]);
+        let a: SkyDict<i64> = dict_from_list(vec![("x".into(), 1), ("y".into(), 2)]);
         let b: SkyDict<i64> = dict_from_list(vec![
             ("y".into(), 99), // should be overwritten by a's y=2
             ("z".into(), 3),
@@ -212,10 +207,7 @@ mod tests {
 
     #[test]
     fn test_dict_map_sorted() {
-        let d: SkyDict<i64> = dict_from_list(vec![
-            ("b".into(), 2),
-            ("a".into(), 1),
-        ]);
+        let d: SkyDict<i64> = dict_from_list(vec![("b".into(), 2), ("a".into(), 1)]);
         let result: HashMap<String, i64> = dict_map(|_k, v| v * 10, d);
         assert_eq!(result.get("a"), Some(&10));
         assert_eq!(result.get("b"), Some(&20));
@@ -223,13 +215,17 @@ mod tests {
 
     #[test]
     fn test_dict_foldl_sorted_order() {
-        let d: SkyDict<i64> = dict_from_list(vec![
-            ("c".into(), 3),
-            ("a".into(), 1),
-            ("b".into(), 2),
-        ]);
+        let d: SkyDict<i64> =
+            dict_from_list(vec![("c".into(), 3), ("a".into(), 1), ("b".into(), 2)]);
         // Collect keys in fold order; should be sorted (a, b, c).
-        let keys_seen = dict_foldl(|k, _v, mut acc: Vec<String>| { acc.push(k); acc }, vec![], d);
+        let keys_seen = dict_foldl(
+            |k, _v, mut acc: Vec<String>| {
+                acc.push(k);
+                acc
+            },
+            vec![],
+            d,
+        );
         assert_eq!(keys_seen, vec!["a".to_string(), "b".into(), "c".into()]);
     }
 }

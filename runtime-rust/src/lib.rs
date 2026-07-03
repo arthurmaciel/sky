@@ -118,7 +118,10 @@ mod tests {
     // List tests — the live, codegen-emitted kernels (list.rs)
     #[test]
     fn list_filter_keeps_matching() {
-        assert_eq!(list_filter(|x: i64| x % 2 == 0, vec![1, 2, 3, 4]), vec![2, 4]);
+        assert_eq!(
+            list_filter(|x: i64| x % 2 == 0, vec![1, 2, 3, 4]),
+            vec![2, 4]
+        );
     }
 
     #[test]
@@ -170,8 +173,10 @@ mod tests {
     #[test]
     fn result_traverse_ok() {
         let items = vec![1, 2, 3];
-        let r = result_traverse(|x: i64| -> SkyResult<&str, i64> { SkyResult::Ok(x * 2) }, items);
+        let r = result_traverse(
+            |x: i64| -> SkyResult<&str, i64> { SkyResult::Ok(x * 2) },
+            items,
+        );
         assert_eq!(r.with_default(vec![]), vec![2, 4, 6]);
     }
-
 }

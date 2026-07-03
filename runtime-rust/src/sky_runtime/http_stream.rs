@@ -88,8 +88,8 @@ pub fn http_stream_open<E: From<String> + Send + 'static>(req: HttpRequest) -> S
         // SSRF guard (was MISSING here — this surface built its own client and
         // bypassed SKY_HTTP_DENY_PRIVATE entirely). Resolve+validate+pin + the
         // per-redirect re-check via the shared helper, identical to Http.get/post.
-        let builder = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(30));
+        let builder =
+            reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(30));
         let builder = match crate::sky_runtime::http_client::ssrf_apply(
             builder,
             &req.url,
@@ -162,7 +162,11 @@ where
     Box::pin(async move {
         // Take ownership of the response — forEachChunk consumes it. An unknown /
         // already-drained id is a no-op (matches close's idempotent contract).
-        let resp = match client_streams().lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
+        let resp = match client_streams()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id)
+        {
             Some(r) => r,
             None => return SkyResult::Ok(()),
         };
@@ -189,8 +193,14 @@ where
 /// Idempotent — closing an unknown / already-closed id is a no-op.
 pub fn http_stream_close<E: From<String> + Send + 'static>(id: i64) -> SkyTask<E, ()> {
     Box::pin(async move {
-        client_streams().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-        chunk_subscribed().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        client_streams()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+        chunk_subscribed()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         SkyResult::Ok(())
     })
 }
@@ -222,12 +232,23 @@ where
     F: Fn(ChunkEvent<E>) -> M + Send + Sync + 'static,
 {
     SkySub::Source(Box::new(move |emit| {
-        if chunk_subscribed().lock().unwrap_or_else(|e| e.into_inner()).insert(id) {
+        if chunk_subscribed()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id)
+        {
             tokio::spawn(async move {
-                let resp = match client_streams().lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
+                let resp = match client_streams()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&id)
+                {
                     Some(r) => r,
                     None => {
-                        chunk_subscribed().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                        chunk_subscribed()
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&id);
                         return;
                     }
                 };
@@ -249,7 +270,10 @@ where
                         }
                     }
                 }
-                chunk_subscribed().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                chunk_subscribed()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&id);
             });
         }
         tokio::spawn(async {}) // dummy handle for the SubManager to abort harmlessly

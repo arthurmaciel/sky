@@ -12,10 +12,10 @@
 //! toMsg shapes never share one bounded fn (no stdlib override needed).
 
 use super::*;
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-use std::sync::atomic::{AtomicI64, Ordering};
 use futures_util::{SinkExt, StreamExt};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use tokio_tungstenite::tungstenite::Message;
 
 /// Sky.Core.WebSocket.WebSocketMessage — bridged so the runtime can build frames.
@@ -96,8 +96,14 @@ fn registry() -> &'static Mutex<HashMap<i64, ClientEntry>> {
 /// Remove a socket from the registry and drop its subscribe-once markers so the
 /// associated tasks wind down and the maps don't grow across reconnects.
 fn deregister(id: i64) {
-    registry().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-    ws_subscribed().lock().unwrap_or_else(|e| e.into_inner()).retain(|&(sid, _)| sid != id);
+    registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
+    ws_subscribed()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|&(sid, _)| sid != id);
 }
 
 static WS_CLIENT_NEXT_ID: AtomicI64 = AtomicI64::new(1);
@@ -121,7 +127,9 @@ async fn do_connect<E: From<String> + Send + 'static>(
     // connectWith's cfg.headers are sent.
     let mut req = match url.as_str().into_client_request() {
         Ok(r) => r,
-        Err(e) => return SkyResult::Err(format!("WebSocket.connect {}: bad url: {}", url, e).into()),
+        Err(e) => {
+            return SkyResult::Err(format!("WebSocket.connect {}: bad url: {}", url, e).into())
+        }
     };
     // Fail CLOSED on an unparseable caller-supplied header: a credential (e.g.
     // an Authorization bearer) that can't be attached must abort the connect,
@@ -140,7 +148,11 @@ async fn do_connect<E: From<String> + Send + 'static>(
             Ok(val) => val,
             Err(_) => {
                 return SkyResult::Err(
-                    format!("WebSocket.connect {}: invalid value for header {:?}", url, k).into(),
+                    format!(
+                        "WebSocket.connect {}: invalid value for header {:?}",
+                        url, k
+                    )
+                    .into(),
                 )
             }
         };
@@ -175,7 +187,9 @@ async fn do_connect<E: From<String> + Send + 'static>(
     };
     type WsConnOut = Result<
         (
-            tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
             tokio_tungstenite::tungstenite::handshake::client::Response,
         ),
         tokio_tungstenite::tungstenite::Error,
@@ -211,21 +225,33 @@ async fn do_connect<E: From<String> + Send + 'static>(
                     .await
                 })
             }
-            None => {
-                Box::pin(tokio_tungstenite::connect_async_with_config(req, Some(ws_config), false))
-            }
+            None => Box::pin(tokio_tungstenite::connect_async_with_config(
+                req,
+                Some(ws_config),
+                false,
+            )),
         };
     // Floor the handshake timeout: a non-positive cfg.timeout must NOT disable it
     // (an unreachable / silently-stalling host would otherwise hang connect_async
     // forever, leaking the task + FD). Default 30 s.
-    let to_ms: u64 = if timeout_ms > 0 { timeout_ms as u64 } else { 30_000 };
+    let to_ms: u64 = if timeout_ms > 0 {
+        timeout_ms as u64
+    } else {
+        30_000
+    };
     let (stream, _resp) =
         match tokio::time::timeout(std::time::Duration::from_millis(to_ms), connect_fut).await {
             Ok(Ok(ok)) => ok,
-            Ok(Err(e)) => return SkyResult::Err(format!("WebSocket.connect {}: {}", url, e).into()),
+            Ok(Err(e)) => {
+                return SkyResult::Err(format!("WebSocket.connect {}: {}", url, e).into())
+            }
             Err(_) => {
                 return SkyResult::Err(
-                    format!("WebSocket.connect {}: handshake timed out after {}ms", url, to_ms).into(),
+                    format!(
+                        "WebSocket.connect {}: handshake timed out after {}ms",
+                        url, to_ms
+                    )
+                    .into(),
                 )
             }
         };
@@ -241,7 +267,8 @@ async fn do_connect<E: From<String> + Send + 'static>(
         // `interval` ticks immediately on the first poll; skip that first tick so
         // we ping after the interval, not at t=0.
         let mut ping_iv = if ping_interval_ms > 0 {
-            let mut iv = tokio::time::interval(std::time::Duration::from_millis(ping_interval_ms as u64));
+            let mut iv =
+                tokio::time::interval(std::time::Duration::from_millis(ping_interval_ms as u64));
             iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             Some(iv)
         } else {
@@ -260,7 +287,10 @@ async fn do_connect<E: From<String> + Send + 'static>(
                 },
                 None => cmd_rx.recv().await,
             };
-            let cmd = match cmd { Some(c) => c, None => break };
+            let cmd = match cmd {
+                Some(c) => c,
+                None => break,
+            };
             let msg = match cmd {
                 WsCmd::Text(s) => Message::Text(s),
                 WsCmd::Binary(b) => Message::Binary(b),
@@ -292,14 +322,22 @@ async fn do_connect<E: From<String> + Send + 'static>(
     let reader = tokio::spawn(async move {
         while let Some(item) = read.next().await {
             match item {
-                Ok(Message::Text(t)) => { let _ = frames.send(WsEvent::Message(WsClientMessage::Text(t))); }
-                Ok(Message::Binary(b)) => { let _ = frames.send(WsEvent::Message(WsClientMessage::Binary(bytes_to_sky(&b)))); }
+                Ok(Message::Text(t)) => {
+                    let _ = frames.send(WsEvent::Message(WsClientMessage::Text(t)));
+                }
+                Ok(Message::Binary(b)) => {
+                    let _ =
+                        frames.send(WsEvent::Message(WsClientMessage::Binary(bytes_to_sky(&b))));
+                }
                 Ok(Message::Close(cf)) => {
                     let code = cf.map(|f| u16::from(f.code) as i64).unwrap_or(1000);
                     let _ = frames.send(WsEvent::Closed(code));
                     break;
                 }
-                Err(e) => { let _ = frames.send(WsEvent::Error(format!("ws read error: {}", e))); break; }
+                Err(e) => {
+                    let _ = frames.send(WsEvent::Error(format!("ws read error: {}", e)));
+                    break;
+                }
                 _ => {} // Ping/Pong handled by tungstenite
             }
         }
@@ -309,7 +347,12 @@ async fn do_connect<E: From<String> + Send + 'static>(
     let reader_abort = reader.abort_handle();
     registry().lock().unwrap_or_else(|e| e.into_inner()).insert(
         id,
-        ClientEntry { cmd_tx, frames_tx, writer_abort, reader_abort },
+        ClientEntry {
+            cmd_tx,
+            frames_tx,
+            writer_abort,
+            reader_abort,
+        },
     );
     ok_res(id)
 }
@@ -323,8 +366,15 @@ pub fn web_socket_connect<E: From<String> + Send + 'static>(url: String) -> SkyT
 /// custom headers, handshake timeout, and pingInterval (when > 0, the client
 /// sends a periodic Ping frame to keep the connection alive through idle proxies;
 /// tungstenite auto-pongs inbound pings on the read side).
-pub fn web_socket_connect_with<E: From<String> + Send + 'static>(cfg: WsClientCfg) -> SkyTask<E, i64> {
-    Box::pin(do_connect(cfg.url, cfg.headers, cfg.timeout, cfg.pingInterval))
+pub fn web_socket_connect_with<E: From<String> + Send + 'static>(
+    cfg: WsClientCfg,
+) -> SkyTask<E, i64> {
+    Box::pin(do_connect(
+        cfg.url,
+        cfg.headers,
+        cfg.timeout,
+        cfg.pingInterval,
+    ))
 }
 
 fn send_cmd(id: i64, cmd: WsCmd) -> bool {
@@ -370,16 +420,25 @@ fn send_cmd(id: i64, cmd: WsCmd) -> bool {
 /// WebSocket.send : Int -> String -> Task Error ()
 pub fn web_socket_send<E: From<String> + Send + 'static>(id: i64, msg: String) -> SkyTask<E, ()> {
     Box::pin(async move {
-        if send_cmd(id, WsCmd::Text(msg)) { ok_res(()) }
-        else { SkyResult::Err(format!("WebSocket.send: no socket {}", id).into()) }
+        if send_cmd(id, WsCmd::Text(msg)) {
+            ok_res(())
+        } else {
+            SkyResult::Err(format!("WebSocket.send: no socket {}", id).into())
+        }
     })
 }
 
 /// WebSocket.sendBinary : Int -> String -> Task Error ()
-pub fn web_socket_send_binary<E: From<String> + Send + 'static>(id: i64, msg: String) -> SkyTask<E, ()> {
+pub fn web_socket_send_binary<E: From<String> + Send + 'static>(
+    id: i64,
+    msg: String,
+) -> SkyTask<E, ()> {
     Box::pin(async move {
-        if send_cmd(id, WsCmd::Binary(sky_bytes(&msg))) { ok_res(()) }
-        else { SkyResult::Err(format!("WebSocket.sendBinary: no socket {}", id).into()) }
+        if send_cmd(id, WsCmd::Binary(sky_bytes(&msg))) {
+            ok_res(())
+        } else {
+            SkyResult::Err(format!("WebSocket.sendBinary: no socket {}", id).into())
+        }
     })
 }
 
@@ -393,7 +452,11 @@ pub fn web_socket_close<E: From<String> + Send + 'static>(id: i64) -> SkyTask<E,
 }
 
 /// WebSocket.closeWithCode : Int -> String -> Int -> Task Error ()
-pub fn web_socket_close_with_code<E: From<String> + Send + 'static>(code: i64, reason: String, id: i64) -> SkyTask<E, ()> {
+pub fn web_socket_close_with_code<E: From<String> + Send + 'static>(
+    code: i64,
+    reason: String,
+    id: i64,
+) -> SkyTask<E, ()> {
     Box::pin(async move {
         // A WebSocket close code is a u16 (RFC 6455 §7.4). A bare `code as u16`
         // SILENTLY TRUNCATES a Sky `Int` outside 0..=65535 (e.g. 70000 → 4464),
@@ -413,7 +476,11 @@ pub fn web_socket_close_with_code<E: From<String> + Send + 'static>(code: i64, r
 // filters the events it cares about.
 
 fn subscribe_events(socket_id: i64) -> Option<tokio::sync::broadcast::Receiver<WsEvent>> {
-    registry().lock().unwrap_or_else(|e| e.into_inner()).get(&socket_id).map(|e| e.frames_tx.subscribe())
+    registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&socket_id)
+        .map(|e| e.frames_tx.subscribe())
 }
 
 // WS subscriptions are set up ONCE per (socket, kind): the SubManager aborts +
@@ -424,14 +491,22 @@ fn subscribe_events(socket_id: i64) -> Option<tokio::sync::broadcast::Receiver<W
 // are no-ops". The emit callback funnels into the loop channel, stable for the
 // program's lifetime.
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
-enum WsSubKind { Message, Open, Close, Error }
+enum WsSubKind {
+    Message,
+    Open,
+    Close,
+    Error,
+}
 
 fn ws_subscribed() -> &'static Mutex<std::collections::HashSet<(i64, WsSubKind)>> {
     static S: OnceLock<Mutex<std::collections::HashSet<(i64, WsSubKind)>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 fn ws_mark_subscribed(socket_id: i64, kind: WsSubKind) -> bool {
-    ws_subscribed().lock().unwrap_or_else(|e| e.into_inner()).insert((socket_id, kind))
+    ws_subscribed()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert((socket_id, kind))
 }
 // True iff the socket is currently in the registry. Gate ws_mark_subscribed on
 // this (registry-check FIRST, short-circuiting the insert) so subscribing to a
@@ -440,16 +515,25 @@ fn ws_mark_subscribed(socket_id: i64, kind: WsSubKind) -> bool {
 // deregister). The guard drops at return, so the registry + ws_subscribed locks
 // are never held simultaneously.
 fn ws_registered(socket_id: i64) -> bool {
-    registry().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&socket_id)
+    registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(&socket_id)
 }
 
 /// onMessage : (WebSocketMessage -> msg) -> Sub msg
 pub fn sub_subscribe_ws_message<M, F>(socket_id: i64, to_msg: F) -> SkySub<M>
-where M: Send + 'static, F: Fn(WsClientMessage) -> M + Send + Sync + 'static {
+where
+    M: Send + 'static,
+    F: Fn(WsClientMessage) -> M + Send + Sync + 'static,
+{
     SkySub::Source(Box::new(move |emit| {
         if ws_registered(socket_id) && ws_mark_subscribed(socket_id, WsSubKind::Message) {
             tokio::spawn(async move {
-                let mut rx = match subscribe_events(socket_id) { Some(rx) => rx, None => return };
+                let mut rx = match subscribe_events(socket_id) {
+                    Some(rx) => rx,
+                    None => return,
+                };
                 loop {
                     match rx.recv().await {
                         Ok(WsEvent::Message(m)) => emit(to_msg(m)),
@@ -469,7 +553,9 @@ where M: Send + 'static, F: Fn(WsClientMessage) -> M + Send + Sync + 'static {
 
 /// onOpen : msg -> Sub msg — dispatch `msg` once when connected.
 pub fn sub_subscribe_ws_open<M>(socket_id: i64, msg: M) -> SkySub<M>
-where M: Send + 'static {
+where
+    M: Send + 'static,
+{
     SkySub::Source(Box::new(move |emit| {
         if ws_registered(socket_id) && ws_mark_subscribed(socket_id, WsSubKind::Open) {
             emit(msg);
@@ -480,14 +566,23 @@ where M: Send + 'static {
 
 /// onClose : (CloseCode -> msg) -> Sub msg
 pub fn sub_subscribe_ws_close<M, F>(socket_id: i64, to_msg: F) -> SkySub<M>
-where M: Send + 'static, F: Fn(WsCloseCode) -> M + Send + Sync + 'static {
+where
+    M: Send + 'static,
+    F: Fn(WsCloseCode) -> M + Send + Sync + 'static,
+{
     SkySub::Source(Box::new(move |emit| {
         if ws_registered(socket_id) && ws_mark_subscribed(socket_id, WsSubKind::Close) {
             tokio::spawn(async move {
-                let mut rx = match subscribe_events(socket_id) { Some(rx) => rx, None => return };
+                let mut rx = match subscribe_events(socket_id) {
+                    Some(rx) => rx,
+                    None => return,
+                };
                 loop {
                     match rx.recv().await {
-                        Ok(WsEvent::Closed(code)) => { emit(to_msg(ws_close_code(code))); break; }
+                        Ok(WsEvent::Closed(code)) => {
+                            emit(to_msg(ws_close_code(code)));
+                            break;
+                        }
                         Ok(_) => {}
                         // Transient lag: skip the gap, keep waiting for the close event.
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -502,14 +597,24 @@ where M: Send + 'static, F: Fn(WsCloseCode) -> M + Send + Sync + 'static {
 
 /// onError : (Error -> msg) -> Sub msg. E is the project error (From<String>).
 pub fn sub_subscribe_ws_error<E, M, F>(socket_id: i64, to_msg: F) -> SkySub<M>
-where E: From<String> + Send + 'static, M: Send + 'static, F: Fn(E) -> M + Send + Sync + 'static {
+where
+    E: From<String> + Send + 'static,
+    M: Send + 'static,
+    F: Fn(E) -> M + Send + Sync + 'static,
+{
     SkySub::Source(Box::new(move |emit| {
         if ws_registered(socket_id) && ws_mark_subscribed(socket_id, WsSubKind::Error) {
             tokio::spawn(async move {
-                let mut rx = match subscribe_events(socket_id) { Some(rx) => rx, None => return };
+                let mut rx = match subscribe_events(socket_id) {
+                    Some(rx) => rx,
+                    None => return,
+                };
                 loop {
                     match rx.recv().await {
-                        Ok(WsEvent::Error(s)) => { emit(to_msg(s.into())); break; }
+                        Ok(WsEvent::Error(s)) => {
+                            emit(to_msg(s.into()));
+                            break;
+                        }
                         Ok(_) => {}
                         // Transient lag: skip the gap, keep waiting for the error event.
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,

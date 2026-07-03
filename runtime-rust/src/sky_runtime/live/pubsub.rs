@@ -39,7 +39,9 @@ pub(crate) struct Broker<T> {
 
 impl<T: Clone + Send + 'static> Broker<T> {
     fn new() -> Self {
-        Broker { topics: Mutex::new(HashMap::new()) }
+        Broker {
+            topics: Mutex::new(HashMap::new()),
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, broadcast::Sender<Event<T>>>> {
@@ -80,7 +82,11 @@ impl<T: Clone + Send + 'static> Broker<T> {
                     g.remove(topic); // lazy prune
                     return 0;
                 }
-                let _ = tx.send(Event { payload, origin: origin.to_string(), skip_origin });
+                let _ = tx.send(Event {
+                    payload,
+                    origin: origin.to_string(),
+                    skip_origin,
+                });
                 n
             }
             None => 0,
@@ -178,7 +184,9 @@ pub fn cmd_publish<T, M>(topic: String, payload: T) -> SkyCmd<M>
 where
     T: Clone + Send + 'static,
 {
-    SkyCmd::Publish(Box::new(move |origin| broker::<T>().publish(&topic, payload, origin, false)))
+    SkyCmd::Publish(Box::new(move |origin| {
+        broker::<T>().publish(&topic, payload, origin, false)
+    }))
 }
 
 /// `Cmd.publishNoEcho topic payload` — sets the SkipOrigin bit; the publisher's
@@ -187,7 +195,9 @@ pub fn cmd_publish_no_echo<T, M>(topic: String, payload: T) -> SkyCmd<M>
 where
     T: Clone + Send + 'static,
 {
-    SkyCmd::Publish(Box::new(move |origin| broker::<T>().publish(&topic, payload, origin, true)))
+    SkyCmd::Publish(Box::new(move |origin| {
+        broker::<T>().publish(&topic, payload, origin, true)
+    }))
 }
 
 tokio::task_local! {
@@ -351,7 +361,7 @@ mod tests {
         let (hb, got_b) = collect_one("sid-B", "ne-topic").await; // a different session
         broker::<String>().publish("ne-topic", "m".to_string(), "sid-A", true); // publishNoEcho from A
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert!(got_a.lock().unwrap().is_empty());                 // A suppressed
+        assert!(got_a.lock().unwrap().is_empty()); // A suppressed
         assert_eq!(*got_b.lock().unwrap(), vec!["m".to_string()]); // B receives
         ha.abort();
         hb.abort();

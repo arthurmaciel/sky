@@ -56,8 +56,17 @@ CREATE INDEX IF NOT EXISTS idx_span_service_time ON telemetry_span (service_name
 
 /// One record queued for the batcher.
 enum SpillEntry {
-    Log { ts_ms: u64, level: String, message: String },
-    Span { ts_ms: u64, name: String, dur_us: u64, ok: bool },
+    Log {
+        ts_ms: u64,
+        level: String,
+        message: String,
+    },
+    Span {
+        ts_ms: u64,
+        name: String,
+        dur_us: u64,
+        ok: bool,
+    },
 }
 
 static SENDER: OnceLock<mpsc::Sender<SpillEntry>> = OnceLock::new();
@@ -134,20 +143,27 @@ pub async fn enable_from_env() {
 /// to the hub schema lives here so it's directly testable without the channel.
 async fn write_entry(pool: &SqlitePool, svc: &str, entry: SpillEntry) -> Result<(), sqlx::Error> {
     match entry {
-        SpillEntry::Log { ts_ms, level, message } => {
-            sqlx::query(
-                "INSERT INTO telemetry_log (service_name, time, level, message, attrs) \
+        SpillEntry::Log {
+            ts_ms,
+            level,
+            message,
+        } => sqlx::query(
+            "INSERT INTO telemetry_log (service_name, time, level, message, attrs) \
                  VALUES (?, ?, ?, ?, '{}')",
-            )
-            .bind(svc)
-            .bind(rfc3339(ts_ms))
-            .bind(level)
-            .bind(message)
-            .execute(pool)
-            .await
-            .map(|_| ())
-        }
-        SpillEntry::Span { ts_ms, name, dur_us, ok } => {
+        )
+        .bind(svc)
+        .bind(rfc3339(ts_ms))
+        .bind(level)
+        .bind(message)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+        SpillEntry::Span {
+            ts_ms,
+            name,
+            dur_us,
+            ok,
+        } => {
             let start = rfc3339(ts_ms);
             let end = rfc3339(ts_ms.saturating_add(dur_us / 1000));
             // Hand-built (no serde_json): the `db` feature doesn't pull serde_json,
@@ -197,7 +213,10 @@ async fn pruner(pool: SqlitePool) {
         // unbounded between automatic checkpoints. A TRUNCATE checkpoint after the
         // hourly prune resets it to zero bytes (best-effort — a long-lived reader
         // holding back the checkpoint just defers it to the next tick, never blocks).
-        if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(&pool).await {
+        if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&pool)
+            .await
+        {
             eprintln!("[sky.spill] wal_checkpoint: {e}");
         }
     }
@@ -229,8 +248,8 @@ pub fn offer_span(ts_ms: u64, name: &str, dur_us: u64, ok: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::core::SkyResult;
+    use super::*;
     use sqlx::Row;
 
     /// The batcher's unit of work mapped onto the hub schema — schema creation +
@@ -251,25 +270,51 @@ mod tests {
             sqlx::query(stmt).execute(&pool).await.unwrap();
         }
 
-        write_entry(&pool, "tsvc", SpillEntry::Log {
-            ts_ms: 1_700_000_000_000, level: "error".into(), message: "spilled boom".into(),
-        }).await.unwrap();
-        write_entry(&pool, "tsvc", SpillEntry::Span {
-            ts_ms: 1_700_000_000_000, name: "db.query".into(), dur_us: 5000, ok: true,
-        }).await.unwrap();
+        write_entry(
+            &pool,
+            "tsvc",
+            SpillEntry::Log {
+                ts_ms: 1_700_000_000_000,
+                level: "error".into(),
+                message: "spilled boom".into(),
+            },
+        )
+        .await
+        .unwrap();
+        write_entry(
+            &pool,
+            "tsvc",
+            SpillEntry::Span {
+                ts_ms: 1_700_000_000_000,
+                name: "db.query".into(),
+                dur_us: 5000,
+                ok: true,
+            },
+        )
+        .await
+        .unwrap();
 
         let lr = sqlx::query("SELECT service_name, level, message FROM telemetry_log LIMIT 1")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(lr.try_get::<String, _>("service_name").unwrap(), "tsvc");
         assert_eq!(lr.try_get::<String, _>("level").unwrap(), "error");
         assert_eq!(lr.try_get::<String, _>("message").unwrap(), "spilled boom");
 
-        let sr = sqlx::query("SELECT service_name, name, start_time, end_time, attrs FROM telemetry_span LIMIT 1")
-            .fetch_one(&pool).await.unwrap();
+        let sr = sqlx::query(
+            "SELECT service_name, name, start_time, end_time, attrs FROM telemetry_span LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(sr.try_get::<String, _>("name").unwrap(), "db.query");
         assert_eq!(sr.try_get::<String, _>("service_name").unwrap(), "tsvc");
         // 5000us = 5ms → end = start + 5ms; attrs carries ok→status.
-        assert!(sr.try_get::<String, _>("attrs").unwrap().contains("\"status\":\"ok\""));
+        assert!(sr
+            .try_get::<String, _>("attrs")
+            .unwrap()
+            .contains("\"status\":\"ok\""));
         assert_ne!(
             sr.try_get::<String, _>("start_time").unwrap(),
             sr.try_get::<String, _>("end_time").unwrap()
@@ -277,8 +322,12 @@ mod tests {
 
         // The reader (open_spill mode=rw) sees the same rows — the read↔write
         // contract end-to-end.
-        let n: SkyResult<String, Vec<String>> = super::super::live::hub::hub_list_services(path.clone()).await;
-        assert!(matches!(n, SkyResult::Ok(ref v) if v == &vec!["tsvc".to_string()]), "{n:?}");
+        let n: SkyResult<String, Vec<String>> =
+            super::super::live::hub::hub_list_services(path.clone()).await;
+        assert!(
+            matches!(n, SkyResult::Ok(ref v) if v == &vec!["tsvc".to_string()]),
+            "{n:?}"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

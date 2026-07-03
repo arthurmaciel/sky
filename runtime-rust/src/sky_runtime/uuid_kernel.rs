@@ -44,7 +44,10 @@ mod tests {
         let id = uuid_v4();
         assert_eq!(id.len(), 36); // 8-4-4-4-12
         assert!(matches!(uuid_parse(id), SkyMaybe::Just(_)));
-        assert!(matches!(uuid_parse("not-a-uuid".to_string()), SkyMaybe::Nothing));
+        assert!(matches!(
+            uuid_parse("not-a-uuid".to_string()),
+            SkyMaybe::Nothing
+        ));
     }
 
     #[test]

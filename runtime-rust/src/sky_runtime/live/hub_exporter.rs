@@ -54,8 +54,17 @@ const MAX_BATCH_ENTRIES: usize = 4096;
 
 /// One telemetry record queued for the exporter.
 pub(crate) enum Entry {
-    Log { ts_ms: u64, level: String, message: String },
-    Span { ts_ms: u64, name: String, dur_us: u64, ok: bool },
+    Log {
+        ts_ms: u64,
+        level: String,
+        message: String,
+    },
+    Span {
+        ts_ms: u64,
+        name: String,
+        dur_us: u64,
+        ok: bool,
+    },
     /// Synchronous flush request: batcher drains its buffer then acks via the
     /// oneshot. Used by `flush_now` for a bounded pre-exit drain.
     Flush(tokio::sync::oneshot::Sender<()>),
@@ -95,7 +104,10 @@ pub async fn enable_from_env() {
         Ok(u) => {
             u.scheme() == "https"
                 || (u.scheme() == "http"
-                    && matches!(u.host_str(), Some("localhost") | Some("127.0.0.1") | Some("[::1]")))
+                    && matches!(
+                        u.host_str(),
+                        Some("localhost") | Some("127.0.0.1") | Some("[::1]")
+                    ))
         }
         Err(_) => false,
     };
@@ -213,11 +225,23 @@ async fn flush(
     spool: &mut VecDeque<OtlpBatch>,
 ) {
     if !logs.is_empty() {
-        spool_push(spool, OtlpBatch { path: "/v1/logs", json: otlp_logs_json(service, logs) });
+        spool_push(
+            spool,
+            OtlpBatch {
+                path: "/v1/logs",
+                json: otlp_logs_json(service, logs),
+            },
+        );
         logs.clear();
     }
     if !spans.is_empty() {
-        spool_push(spool, OtlpBatch { path: "/v1/traces", json: otlp_spans_json(service, spans) });
+        spool_push(
+            spool,
+            OtlpBatch {
+                path: "/v1/traces",
+                json: otlp_spans_json(service, spans),
+            },
+        );
         spans.clear();
     }
     // Drain the spool in order; re-spool anything that fails this round.
@@ -358,8 +382,14 @@ mod tests {
     fn otlp_logs_shape_is_valid() {
         let body = otlp_logs_json("svc", &[(1_700_000_000_000, "error".into(), "boom".into())]);
         let v: serde_json::Value = serde_json::from_str(&body).expect("valid json");
-        assert_eq!(v["resourceLogs"][0]["resource"]["attributes"][0]["key"], "service.name");
-        assert_eq!(v["resourceLogs"][0]["resource"]["attributes"][0]["value"]["stringValue"], "svc");
+        assert_eq!(
+            v["resourceLogs"][0]["resource"]["attributes"][0]["key"],
+            "service.name"
+        );
+        assert_eq!(
+            v["resourceLogs"][0]["resource"]["attributes"][0]["value"]["stringValue"],
+            "svc"
+        );
         let rec = &v["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
         assert_eq!(rec["severityText"], "error");
         assert_eq!(rec["body"]["stringValue"], "boom");
@@ -369,12 +399,15 @@ mod tests {
 
     #[test]
     fn otlp_spans_shape_and_status() {
-        let body = otlp_spans_json("svc", &[(1_700_000_000_000, "db.query".into(), 5000, false)]);
+        let body = otlp_spans_json(
+            "svc",
+            &[(1_700_000_000_000, "db.query".into(), 5000, false)],
+        );
         let v: serde_json::Value = serde_json::from_str(&body).expect("valid json");
         let rec = &v["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
         assert_eq!(rec["name"], "db.query");
         assert_eq!(rec["status"]["code"], 2); // not ok → ERROR
-        // end = start + 5000us(5ms) → +5_000_000 ns
+                                              // end = start + 5000us(5ms) → +5_000_000 ns
         assert_eq!(rec["startTimeUnixNano"], "1700000000000000000");
         assert_eq!(rec["endTimeUnixNano"], "1700000000005000000");
     }
@@ -383,7 +416,13 @@ mod tests {
     fn spool_is_bounded() {
         let mut s: VecDeque<OtlpBatch> = VecDeque::new();
         for i in 0..(SPOOL_MAX_BATCHES + 10) {
-            spool_push(&mut s, OtlpBatch { path: "/v1/logs", json: i.to_string() });
+            spool_push(
+                &mut s,
+                OtlpBatch {
+                    path: "/v1/logs",
+                    json: i.to_string(),
+                },
+            );
         }
         assert_eq!(s.len(), SPOOL_MAX_BATCHES);
         // Oldest evicted → front is batch #10, not #0.
@@ -419,7 +458,9 @@ mod tests {
             "OK"
         }
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let app = Router::new().fallback(any(capture)).with_state(rec.clone());
         tokio::spawn(async move {
@@ -429,18 +470,28 @@ mod tests {
         let client = reqwest::Client::new();
         let base = format!("http://127.0.0.1:{port}");
         let token = "x".repeat(MIN_TOKEN_BYTES);
-        let mut logs = vec![(1_700_000_000_000u64, "error".to_string(), "boom".to_string())];
+        let mut logs = vec![(
+            1_700_000_000_000u64,
+            "error".to_string(),
+            "boom".to_string(),
+        )];
         let mut spans = vec![(1_700_000_000_000u64, "db.query".to_string(), 5000u64, true)];
         let mut spool: VecDeque<OtlpBatch> = VecDeque::new();
 
-        flush(&client, &base, &token, "svc", &mut logs, &mut spans, &mut spool).await;
+        flush(
+            &client, &base, &token, "svc", &mut logs, &mut spans, &mut spool,
+        )
+        .await;
 
         // Both signals delivered; spool empty (success); bearer present; OTLP valid.
         let got = rec.lock().map(|g| g.clone()).unwrap_or_default();
         assert_eq!(got.len(), 2, "expected /v1/logs + /v1/traces, got {got:?}");
         assert!(spool.is_empty(), "spool should be cleared on 2xx");
         let paths: Vec<&str> = got.iter().map(|(p, _, _)| p.as_str()).collect();
-        assert!(paths.contains(&"/v1/logs") && paths.contains(&"/v1/traces"), "{paths:?}");
+        assert!(
+            paths.contains(&"/v1/logs") && paths.contains(&"/v1/traces"),
+            "{paths:?}"
+        );
         for (_, auth, body) in &got {
             assert_eq!(auth, &format!("Bearer {token}"));
             let _: serde_json::Value = serde_json::from_str(body).expect("valid OTLP json");

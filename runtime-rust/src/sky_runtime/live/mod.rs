@@ -10,9 +10,9 @@ pub mod form;
 pub use form::*;
 pub mod route;
 pub use route::*;
+pub mod console;
 pub mod csrf;
 pub mod style_inject;
-pub mod console;
 // Pre-built console child + reverse-proxy — spawns the bundled console
 // binary and proxies /_sky/console/*; falls back to in-process `console` when the
 // binary is absent.
@@ -20,8 +20,8 @@ pub mod console_proxy;
 pub mod observability;
 // Observability export pipelines: federation push to a parent ingest
 // and remote-hub OTLP push. Both env-gated + inert by default.
-pub mod push_exporter;
 pub mod hub_exporter;
+pub mod push_exporter;
 // Hub read-side kernels (the bundled console's data plane). Gated on `db` —
 // they read the SQLite telemetry spill via sqlx, so a `live`-only program with
 // no db never compiles them and stays sqlx-free.
@@ -42,8 +42,7 @@ pub mod pubsub;
 // `subscribe`, `publish`) are `pub(crate)` in pubsub.rs — they never leave the
 // crate, so they don't need re-exporting here.
 pub use pubsub::{
-    cmd_publish, cmd_publish_no_echo, pubsub_publish, pubsub_publish_no_echo,
-    sub_subscribe_topic,
+    cmd_publish, cmd_publish_no_echo, pubsub_publish, pubsub_publish_no_echo, sub_subscribe_topic,
 };
 
 // Html ADTs + renderer now live in the standalone top-level `html` module;
@@ -87,8 +86,8 @@ static CLIENT_JS_HASH: std::sync::OnceLock<(String, String)> = std::sync::OnceLo
 /// Return `(hex16, base64full)` for `CLIENT_JS`, computing once on first call.
 fn client_js_hashes() -> &'static (String, String) {
     CLIENT_JS_HASH.get_or_init(|| {
-        use sha2::{Sha256, Digest};
-        use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        use sha2::{Digest, Sha256};
         let digest: [u8; 32] = Sha256::digest(CLIENT_JS.as_bytes()).into();
         let hex16: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
         let base64full = B64.encode(digest);
@@ -123,10 +122,7 @@ const BASE_CSS: &str = concat!(
 
 /// Render `view(model)` to a full HTML page and print it — the static
 /// render path (the interactive server is `live_app`).
-pub fn live_render_static<E, Model, Msg, FView>(
-    view: FView,
-    model: Model,
-) -> SkyTask<E, ()>
+pub fn live_render_static<E, Model, Msg, FView>(view: FView, model: Model) -> SkyTask<E, ()>
 where
     E: Send + 'static,
     Model: Send + 'static,
@@ -257,7 +253,9 @@ fn dev_console_banner(base: &str) -> String {
     if matches!(
         std::env::var("SKY_CONSOLE_EMBED").as_deref(),
         Ok("off") | Ok("0") | Ok("false")
-    ) || std::env::var("SKY_CONSOLE_AUTH").map(|v| v == "off").unwrap_or(false)
+    ) || std::env::var("SKY_CONSOLE_AUTH")
+        .map(|v| v == "off")
+        .unwrap_or(false)
     {
         return String::new();
     }
@@ -294,7 +292,7 @@ fn dev_console_banner(base: &str) -> String {
 use crate::sky_runtime::tea::{SkyCmd, SkySub};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use tokio::sync::mpsc::{self, Sender, Receiver};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
 /// Per-session live state behind an `Arc<Mutex<…>>`. `index` / `last_view` are
 /// re-derived on every commit; `sse_tx` is filled when the browser attaches the
@@ -358,7 +356,6 @@ fn value_to_string(v: &serde_json::Value) -> String {
         other => other.to_string(),
     }
 }
-
 
 /// Boxed route resolver: a freshly-`init`'d model + GET path → the model whose
 /// `page` field reflects the matched route.
@@ -449,7 +446,9 @@ fn run_cmd<Msg: Send + 'static>(cmd: SkyCmd<Msg>, tx: &Sender<Msg>, sid: &str) {
                 // Bounded send: drop the Msg and warn if the session queue is
                 // full (a stalled driver or a burst of fast Perform tasks).
                 if tx.send(m).await.is_err() {
-                    eprintln!("[sky.live] run_cmd: session msg channel closed; dropping Perform result");
+                    eprintln!(
+                        "[sky.live] run_cmd: session msg channel closed; dropping Perform result"
+                    );
                 }
             });
         }
@@ -504,8 +503,9 @@ fn spawn_subs<Msg: Clone + Send + 'static>(
             }
             SkySub::Source(spawn) => {
                 let tx = tx.clone();
-                let emit: Arc<dyn Fn(Msg) + Send + Sync> =
-                    Arc::new(move |m| { let _ = tx.try_send(m); });
+                let emit: Arc<dyn Fn(Msg) + Send + Sync> = Arc::new(move |m| {
+                    let _ = tx.try_send(m);
+                });
                 handles.push(spawn(emit));
             }
         }
@@ -560,7 +560,13 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
         let Some(strong) = entry.upgrade() else {
             return;
         };
-        let model0 = { strong.lock().unwrap_or_else(|e| e.into_inner()).model.clone() };
+        let model0 = {
+            strong
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .model
+                .clone()
+        };
         pubsub::with_session_sid(sid.clone(), || {
             spawn_subs(subs(model0), &msg_tx, &mut sub_handles)
         });
@@ -593,7 +599,13 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
             break;
         };
         // Clone the model under a short lock, release before update.
-        let model = { strong.lock().unwrap_or_else(|e| e.into_inner()).model.clone() };
+        let model = {
+            strong
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .model
+                .clone()
+        };
         // Msg-handling latency histogram (Go parity: sky_live_msg_seconds{name},
         // msg_logging.go). The `name` label is the BOUNDED Msg variant name
         // (finite cardinality), never a payload — see telemetry::variant_name.
@@ -647,7 +659,10 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
 
         if !patches.is_empty() {
             if let Some(sse) = sse {
-                let env = PatchEnvelope { global_seq: seq, patches: &patches };
+                let env = PatchEnvelope {
+                    global_seq: seq,
+                    patches: &patches,
+                };
                 if let Ok(json) = serde_json::to_string(&env) {
                     let _ = sse.send(SsePatch(sse::frame("patches", &json))).await;
                 }
@@ -789,13 +804,21 @@ fn page_response(sid: &str, body: &str, csrf_token: &str) -> axum::response::Res
     // cookie. Request-scoped TLS detection needs trusted-proxy gating + header
     // plumbing across the cookie-name (`__Host-`) decision and is deferred.
     // SameSite=Lax stays so top-level navigations keep the session.
-    let secure = if csrf::cookies_secure() { "; Secure" } else { "" };
+    let secure = if csrf::cookies_secure() {
+        "; Secure"
+    } else {
+        ""
+    };
     // SameSite (Go parity, live.go ~5653): a deploy opted into cross-origin
     // embedding via SKY_LIVE_FRAME_ANCESTORS needs `SameSite=None; Secure` so the
     // session cookie survives inside a third-party iframe; otherwise `Lax`
     // (top-level navigations keep the session). `cookies_secure()` is already true
     // in frame-ancestors mode, so `None` always pairs with `Secure`.
-    let same_site = if csrf::frame_ancestors().is_some() { "None" } else { "Lax" };
+    let same_site = if csrf::frame_ancestors().is_some() {
+        "None"
+    } else {
+        "Lax"
+    };
     // Max-Age (Go parity, live.go ~5641): persist the cookie for the store TTL so a
     // tab-close doesn't drop a still-live server session. Without it the cookie is
     // session-scoped and the user loses state on tab close.
@@ -808,7 +831,10 @@ fn page_response(sid: &str, body: &str, csrf_token: &str) -> axum::response::Res
     let csrf_cookie = csrf::csrf_set_cookie(csrf_token);
     let mut resp = (
         axum::http::StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8".to_string())],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/html; charset=utf-8".to_string(),
+        )],
         html,
     )
         .into_response();
@@ -1048,7 +1074,8 @@ pub fn live_app<E, Model, Msg, FInit, FUpdate, FView, FSubs>(
 ) -> SkyTask<E, ()>
 where
     E: From<String> + Send + 'static,
-    Model: serde::Serialize + serde::de::DeserializeOwned + Clone + PartialEq + Send + Sync + 'static,
+    Model:
+        serde::Serialize + serde::de::DeserializeOwned + Clone + PartialEq + Send + Sync + 'static,
     // Debug: forwarded through serve_live → drive_session for the
     // sky_live_msg_seconds{name} label. Generated Msg enums always derive Debug.
     Msg: Clone + Send + Sync + std::fmt::Debug + 'static,
@@ -1096,7 +1123,8 @@ pub fn live_app_routed<E, Model, Msg, Page, FInit, FUpdate, FView, FSubs, FSetPa
 ) -> SkyTask<E, ()>
 where
     E: From<String> + Send + 'static,
-    Model: serde::Serialize + serde::de::DeserializeOwned + Clone + PartialEq + Send + Sync + 'static,
+    Model:
+        serde::Serialize + serde::de::DeserializeOwned + Clone + PartialEq + Send + Sync + 'static,
     // Debug: forwarded through serve_live → drive_session for the
     // sky_live_msg_seconds{name} label. Generated Msg enums always derive Debug.
     Msg: Clone + Send + Sync + std::fmt::Debug + 'static,
@@ -1271,7 +1299,9 @@ where
 
             // The admission slot for this driver (reserved by the Cold/None arm
             // above); its Drop decrements session_count when the driver exits.
-            let slot = SessionSlot { count: st.session_count.clone() };
+            let slot = SessionSlot {
+                count: st.session_count.clone(),
+            };
             // Spawn the per-session driver with a WEAK entry ref (the store +
             // any SSE connection are the strong holders) so the driver is mortal:
             // it exits once the session is evicted and unconnected, releasing the
@@ -1331,7 +1361,9 @@ where
             };
 
             let (tx, rx) = sse::channel();
-            { entry.lock().unwrap_or_else(|e| e.into_inner()).sse_tx = Some(tx.clone()); }
+            {
+                entry.lock().unwrap_or_else(|e| e.into_inner()).sse_tx = Some(tx.clone());
+            }
 
             // Metrics (Go parity: sky_live_sse_connections_total /
             // sky_live_sessions_active). Count the connection and mark the session
@@ -1342,7 +1374,9 @@ where
 
             // Immediate hello + ~2KB proxy-buffer padding comment, then a 15s
             // heartbeat keepalive (Go parity: live.go SSE handshake).
-            let _ = tx.send(SsePatch(format!(": {}\n\n", " ".repeat(2048)))).await;
+            let _ = tx
+                .send(SsePatch(format!(": {}\n\n", " ".repeat(2048))))
+                .await;
             // Go-parity hello payload (live.go ~5486): `{"v":1,"sid":...,"ts":<ms>}`.
             // Reaching here means `entry` exists ⇒ the cookie sid was a live session,
             // so `sid` is Some; the impossible None degrades to an empty sid (the
@@ -1380,7 +1414,11 @@ where
                 tokio::spawn(async move {
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                        if tx.send(SsePatch(sse::frame("heartbeat", "{}"))).await.is_err() {
+                        if tx
+                            .send(SsePatch(sse::frame("heartbeat", "{}")))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -1394,7 +1432,11 @@ where
             struct SessionGauge;
             impl Drop for SessionGauge {
                 fn drop(&mut self) {
-                    crate::sky_runtime::telemetry::metric_add_gauge("sky_live_sessions_active", &[], -1);
+                    crate::sky_runtime::telemetry::metric_add_gauge(
+                        "sky_live_sessions_active",
+                        &[],
+                        -1,
+                    );
                 }
             }
             // Pin the STRONG entry Arc into the stream state for the connection's
@@ -1406,12 +1448,17 @@ where
             // would exit mid-stream. Holding the strong Arc here keeps it (and its
             // driver) alive exactly as long as the client stays connected; on
             // disconnect axum drops the body → this Arc releases.
-            let body_stream =
-                futures_util::stream::unfold((rx, SessionGauge, entry), |(mut rx, guard, entry)| async move {
+            let body_stream = futures_util::stream::unfold(
+                (rx, SessionGauge, entry),
+                |(mut rx, guard, entry)| async move {
                     rx.recv().await.map(|SsePatch(s)| {
-                        (Ok::<_, std::io::Error>(axum::body::Bytes::from(s)), (rx, guard, entry))
+                        (
+                            Ok::<_, std::io::Error>(axum::body::Bytes::from(s)),
+                            (rx, guard, entry),
+                        )
                     })
-                });
+                },
+            );
             match Response::builder()
                 .status(StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
@@ -1481,7 +1528,11 @@ where
                 }
             };
 
-            let hid = if !parsed.handler_id.is_empty() { parsed.handler_id } else { parsed.id };
+            let hid = if !parsed.handler_id.is_empty() {
+                parsed.handler_id
+            } else {
+                parsed.id
+            };
             // Event name: explicit `event` override, else the `msg` marker
             // (render_html sets it to the event name), else default to click.
             let event = if !parsed.event.is_empty() {
@@ -1500,7 +1551,11 @@ where
                         .args
                         .first()
                         .and_then(|v| v.as_object())
-                        .map(|o| o.iter().map(|(k, v)| (k.clone(), value_to_string(v))).collect())
+                        .map(|o| {
+                            o.iter()
+                                .map(|(k, v)| (k.clone(), value_to_string(v)))
+                                .collect()
+                        })
                         .unwrap_or_default();
                     (e.index.resolve_form(&hid, &event, fd), e.seq)
                 } else {
@@ -1509,7 +1564,13 @@ where
                 }
             };
             if let Some(m) = msg {
-                let tx = { entry.lock().unwrap_or_else(|e| e.into_inner()).msg_tx.clone() };
+                let tx = {
+                    entry
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .msg_tx
+                        .clone()
+                };
                 // try_send is non-blocking; on a full queue drop the event and
                 // return 429 so the client can back off (Go parity: Go
                 // serialises under sess.mu and drops the handler if the
@@ -1587,14 +1648,22 @@ where
         async fn serve_client_js() -> impl axum::response::IntoResponse {
             use axum::http::header;
             (
-                [(header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
-                 (header::CACHE_CONTROL, "public, max-age=31536000, immutable")],
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        "application/javascript; charset=utf-8",
+                    ),
+                    (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+                ],
                 CLIENT_JS,
             )
         }
 
         let mut router = Router::new()
-            .route("/_sky/sse", get(sse_handler::<Model, Msg, FInit, FUpdate, FView, FSubs>))
+            .route(
+                "/_sky/sse",
+                get(sse_handler::<Model, Msg, FInit, FUpdate, FView, FSubs>),
+            )
             .route("/_sky/event", event_route)
             .route(&client_js_route_path, get(serve_client_js))
             // Observability surface (Go parity — observability.go).
@@ -1640,7 +1709,10 @@ where
                 .route("/_sky/console/api/logs", get(console::api_logs))
                 .route("/_sky/console/api/errors", get(console::api_errors))
                 .route("/_sky/console/api/traces", get(console::api_traces))
-                .route("/_sky/console/api/metrics-summary", get(console::api_metrics_summary))
+                .route(
+                    "/_sky/console/api/metrics-summary",
+                    get(console::api_metrics_summary),
+                )
         };
 
         // sky.toml `[live] static` (baked as SKY_LIVE_STATIC_DIR) → serve files at
@@ -1652,13 +1724,19 @@ where
         // dir — the dir is author-controlled (sky.toml [live] static), so that is the
         // intended contract + Go-parity, NOT a confinement guarantee. Absent/empty →
         // no static mount.
-        if let Some(dir) = std::env::var("SKY_LIVE_STATIC_DIR").ok().filter(|d| !d.is_empty()) {
+        if let Some(dir) = std::env::var("SKY_LIVE_STATIC_DIR")
+            .ok()
+            .filter(|d| !d.is_empty())
+        {
             router = router.nest_service("/static", tower_http::services::ServeDir::new(dir));
         }
 
         let app: Router = router
             .route("/", get(page::<Model, Msg, FInit, FUpdate, FView, FSubs>))
-            .route("/*path", get(page::<Model, Msg, FInit, FUpdate, FView, FSubs>))
+            .route(
+                "/*path",
+                get(page::<Model, Msg, FInit, FUpdate, FView, FSubs>),
+            )
             // Layer order (axum: last `.layer` = outermost): CSRF is INNER of
             // observability::track so a rejected CSRF POST still gets counted +
             // access-logged (Go parity — CSRF sits inside the observability mw).
@@ -1767,7 +1845,10 @@ mod dev_banner_tests {
             box-shadow:0 2px 8px rgba(0,0,0,0.4);\">\
             &#128269; Console</a>";
         assert_eq!(b, expected, "dev console banner must byte-match Go");
-        assert!(!b.contains("🔍"), "must use the &#128269; entity, not a literal emoji");
+        assert!(
+            !b.contains("🔍"),
+            "must use the &#128269; entity, not a literal emoji"
+        );
     }
 
     #[test]
@@ -1806,7 +1887,9 @@ mod duration_parse_tests {
 
 #[cfg(test)]
 mod base_path_tests {
-    use super::{client_js_path, cookie_name_for, cookie_path_for, normalise_base_path, render_page_full};
+    use super::{
+        client_js_path, cookie_name_for, cookie_path_for, normalise_base_path, render_page_full,
+    };
 
     #[test]
     fn normalise_root_and_empty_collapse() {
@@ -1891,8 +1974,10 @@ mod base_path_tests {
             .trim_start_matches("/_sky/client.")
             .trim_end_matches(".js");
         assert_eq!(hash_part.len(), 16, "URL hash should be 16 hex chars");
-        assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()),
-            "URL hash should be hex: {hash_part}");
+        assert!(
+            hash_part.chars().all(|c| c.is_ascii_hexdigit()),
+            "URL hash should be hex: {hash_part}"
+        );
     }
 }
 
@@ -1990,10 +2075,20 @@ mod admission_control_tests {
         count.fetch_add(1, Ordering::SeqCst);
         assert_eq!(count.load(Ordering::SeqCst), 1);
         {
-            let _slot = SessionSlot { count: count.clone() };
-            assert_eq!(count.load(Ordering::SeqCst), 1, "slot construction must not change the count");
+            let _slot = SessionSlot {
+                count: count.clone(),
+            };
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "slot construction must not change the count"
+            );
         } // _slot drops here → one decrement
-        assert_eq!(count.load(Ordering::SeqCst), 0, "slot drop must decrement exactly once");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "slot drop must decrement exactly once"
+        );
     }
 
     // Reserve/drop M >> N times returns to 0 (counter exactness, no leak/underflow).
@@ -2002,7 +2097,9 @@ mod admission_control_tests {
         let count = Arc::new(AtomicUsize::new(0));
         for _ in 0..1000 {
             count.fetch_add(1, Ordering::SeqCst);
-            let _slot = SessionSlot { count: count.clone() };
+            let _slot = SessionSlot {
+                count: count.clone(),
+            };
         }
         assert_eq!(count.load(Ordering::SeqCst), 0);
     }

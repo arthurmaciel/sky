@@ -43,7 +43,9 @@ use std::collections::HashMap;
 // SSRF deny-private helpers live in the reqwest-free `ssrf` module (so the
 // WebSocket client can validate URLs without linking reqwest). The reqwest-
 // coupled `ssrf_apply` + the request executor below import the three they use.
-use crate::sky_runtime::ssrf::{ssrf_check_url, ssrf_deny_private_enabled, resolve_first_non_private_addr};
+use crate::sky_runtime::ssrf::{
+    resolve_first_non_private_addr, ssrf_check_url, ssrf_deny_private_enabled,
+};
 
 /// Sky.Core.Http.HttpResponse — field names/types match the Sky record alias.
 #[derive(Clone, Debug)]
@@ -136,7 +138,10 @@ pub(crate) fn ssrf_apply(
     let deny = ssrf_deny_private_enabled();
     if deny {
         let parsed = reqwest::Url::parse(url).map_err(|e| {
-            format!("http: blocked: invalid URL {:?}: {} (SKY_HTTP_DENY_PRIVATE)", url, e)
+            format!(
+                "http: blocked: invalid URL {:?}: {} (SKY_HTTP_DENY_PRIVATE)",
+                url, e
+            )
         })?;
         let scheme = parsed.scheme();
         if scheme != "http" && scheme != "https" && scheme != "ws" && scheme != "wss" {
@@ -169,7 +174,9 @@ pub(crate) fn ssrf_apply(
                 attempt.follow()
             }))
         } else {
-            builder.redirect(reqwest::redirect::Policy::limited(max_redirects.max(0) as usize))
+            builder.redirect(reqwest::redirect::Policy::limited(
+                max_redirects.max(0) as usize
+            ))
         }
     } else {
         builder.redirect(reqwest::redirect::Policy::none())
@@ -181,7 +188,9 @@ pub(crate) fn ssrf_apply(
 // Core request executor
 // ---------------------------------------------------------------------------
 
-async fn do_request<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyResult<E, HttpResponse> {
+async fn do_request<E: From<String> + Send + 'static>(
+    req: HttpRequest,
+) -> SkyResult<E, HttpResponse> {
     // This surface (Http.get/post/request) accepts only http/https — ws/wss is
     // the WebSocket client's surface. When the SSRF guard is on, enforce that
     // narrower scheme set here, then delegate the host-resolve + DNS-rebinding
@@ -223,7 +232,11 @@ async fn do_request<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyRe
     // Always install a request deadline. A Sky-controllable `timeout <= 0`
     // would otherwise leave the request with no deadline (slowloris / hung-
     // connection vector), so floor it to 30 s instead of disabling it.
-    let timeout_ms = if req.timeout > 0 { req.timeout as u64 } else { 30_000 };
+    let timeout_ms = if req.timeout > 0 {
+        req.timeout as u64
+    } else {
+        30_000
+    };
     builder = builder.timeout(std::time::Duration::from_millis(timeout_ms));
 
     let client = match builder.build() {
@@ -233,9 +246,7 @@ async fn do_request<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyRe
     let method = match reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes()) {
         Ok(m) => m,
         Err(_) => {
-            return SkyResult::Err(
-                format!("http: invalid method {:?}", req.method).into(),
-            );
+            return SkyResult::Err(format!("http: invalid method {:?}", req.method).into());
         }
     };
     let mut rb = client.request(method, &req.url);
@@ -247,7 +258,9 @@ async fn do_request<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyRe
     }
     let resp = match rb.send().await {
         Ok(r) => r,
-        Err(e) => return SkyResult::Err(format!("http: request to {} failed: {}", req.url, e).into()),
+        Err(e) => {
+            return SkyResult::Err(format!("http: request to {} failed: {}", req.url, e).into())
+        }
     };
     let status = resp.status().as_u16() as i64;
     let mut headers = HashMap::new();
@@ -260,7 +273,11 @@ async fn do_request<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyRe
         SkyResult::Ok(b) => b,
         SkyResult::Err(e) => return SkyResult::Err(e),
     };
-    ok_res(HttpResponse { status, body, headers })
+    ok_res(HttpResponse {
+        status,
+        body,
+        headers,
+    })
 }
 
 /// Default cap on a buffered HTTP response body (`Http.get`/`post`/`request`):
@@ -327,21 +344,36 @@ async fn read_body_capped<E: From<String> + Send + 'static>(
 /// Http.get : String -> Task Error HttpResponse
 pub fn http_get<E: From<String> + Send + 'static>(url: String) -> SkyTask<E, HttpResponse> {
     Box::pin(do_request(HttpRequest {
-        method: "GET".to_string(), url, body: String::new(), headers: Vec::new(),
-        timeout: 30000, followRedirects: true, maxRedirects: 10,
+        method: "GET".to_string(),
+        url,
+        body: String::new(),
+        headers: Vec::new(),
+        timeout: 30000,
+        followRedirects: true,
+        maxRedirects: 10,
     }))
 }
 
 /// Http.post : String -> String -> Task Error HttpResponse
-pub fn http_post<E: From<String> + Send + 'static>(url: String, body: String) -> SkyTask<E, HttpResponse> {
+pub fn http_post<E: From<String> + Send + 'static>(
+    url: String,
+    body: String,
+) -> SkyTask<E, HttpResponse> {
     Box::pin(do_request(HttpRequest {
-        method: "POST".to_string(), url, body, headers: Vec::new(),
-        timeout: 30000, followRedirects: true, maxRedirects: 10,
+        method: "POST".to_string(),
+        url,
+        body,
+        headers: Vec::new(),
+        timeout: 30000,
+        followRedirects: true,
+        maxRedirects: 10,
     }))
 }
 
 /// Http.request : HttpRequest -> Task Error HttpResponse
-pub fn http_request<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyTask<E, HttpResponse> {
+pub fn http_request<E: From<String> + Send + 'static>(
+    req: HttpRequest,
+) -> SkyTask<E, HttpResponse> {
     Box::pin(do_request(req))
 }
 
@@ -349,7 +381,9 @@ pub fn http_request<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyTa
 pub fn http_parse_query(raw: String) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for pair in raw.trim_start_matches('?').split('&') {
-        if pair.is_empty() { continue; }
+        if pair.is_empty() {
+            continue;
+        }
         let mut it = pair.splitn(2, '=');
         let k = form_url_decode(it.next().unwrap_or(""));
         let v = form_url_decode(it.next().unwrap_or(""));

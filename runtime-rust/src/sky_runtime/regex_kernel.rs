@@ -33,7 +33,8 @@ fn compiled(pattern: &str) -> Option<Arc<Regex>> {
     let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
     if map.len() < REGEX_CACHE_CAP {
         // Another thread may have inserted concurrently; entry() keeps it total.
-        map.entry(pattern.to_string()).or_insert_with(|| Arc::clone(&re));
+        map.entry(pattern.to_string())
+            .or_insert_with(|| Arc::clone(&re));
     }
     Some(re)
 }
@@ -90,7 +91,10 @@ mod tests {
         assert!(regex_match(r"^\d+$".to_string(), "12345".to_string()));
         assert!(!regex_match(r"^\d+$".to_string(), "abc".to_string()));
         // Invalid pattern -> false (never panic)
-        assert!(!regex_match(r"[unclosed".to_string(), "anything".to_string()));
+        assert!(!regex_match(
+            r"[unclosed".to_string(),
+            "anything".to_string()
+        ));
     }
 
     #[test]
@@ -107,7 +111,10 @@ mod tests {
     #[test]
     fn test_find_all() {
         let all = regex_find_all(r"\d+".to_string(), "1 and 22 and 333".to_string());
-        assert_eq!(all, vec!["1".to_string(), "22".to_string(), "333".to_string()]);
+        assert_eq!(
+            all,
+            vec!["1".to_string(), "22".to_string(), "333".to_string()]
+        );
         // Invalid pattern -> empty
         let bad = regex_find_all(r"[unclosed".to_string(), "1 2 3".to_string());
         assert!(bad.is_empty());

@@ -16,7 +16,9 @@
 use std::collections::BTreeSet;
 
 /// `Set.empty : Set a`.
-pub fn set_empty<A>() -> BTreeSet<A> { BTreeSet::new() }
+pub fn set_empty<A>() -> BTreeSet<A> {
+    BTreeSet::new()
+}
 
 /// `Set.fromList : List a -> Set a`. Duplicates collapse.
 pub fn set_from_list<A: Ord>(xs: Vec<A>) -> BTreeSet<A> {
@@ -93,7 +95,10 @@ mod tests {
     fn union_intersect_diff() {
         let a = set_from_list(vec![1, 2, 3]);
         let b = set_from_list(vec![2, 3, 4]);
-        assert_eq!(set_to_list(set_union(a.clone(), b.clone())), vec![1, 2, 3, 4]);
+        assert_eq!(
+            set_to_list(set_union(a.clone(), b.clone())),
+            vec![1, 2, 3, 4]
+        );
         assert_eq!(set_to_list(set_intersect(a.clone(), b.clone())), vec![2, 3]);
         assert_eq!(set_to_list(set_diff(a, b)), vec![1]);
     }

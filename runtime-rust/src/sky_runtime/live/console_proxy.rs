@@ -81,7 +81,10 @@ pub fn console_bin_path() -> Option<std::path::PathBuf> {
 pub fn gate_allows() -> bool {
     // Sub-app context: the parent owns its own console; a nested app must not
     // recursively mount one.
-    if std::env::var("SKY_LIVE_BASE_PATH").map(|v| !v.is_empty()).unwrap_or(false) {
+    if std::env::var("SKY_LIVE_BASE_PATH")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
         return false;
     }
     // Explicit opt-outs.
@@ -99,8 +102,12 @@ pub fn gate_allows() -> bool {
     }
     // Production without an admin token → no silent open-to-the-world mount.
     if super::super::telemetry::production_from_env()
-        && std::env::var("SKY_ADMIN_TOKEN").map(|v| v.is_empty()).unwrap_or(true)
-        && std::env::var("SKY_CONSOLE_TOKEN").map(|v| v.is_empty()).unwrap_or(true)
+        && std::env::var("SKY_ADMIN_TOKEN")
+            .map(|v| v.is_empty())
+            .unwrap_or(true)
+        && std::env::var("SKY_CONSOLE_TOKEN")
+            .map(|v| v.is_empty())
+            .unwrap_or(true)
     {
         return false;
     }
@@ -167,7 +174,10 @@ pub fn spawn_console(child_port: u16, store: &str, child_collects: bool) -> Opti
             if let Ok(mut g) = CHILD.lock() {
                 *g = Some(child);
             }
-            eprintln!("[sky.console] spawned console child on :{child_port} (bin {})", bin.display());
+            eprintln!(
+                "[sky.console] spawned console child on :{child_port} (bin {})",
+                bin.display()
+            );
             Some(())
         }
         Err(e) => {
@@ -348,7 +358,10 @@ async fn proxy_entry(req: axum::extract::Request) -> axum::response::Response {
 async fn wait_ready(port: u16, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
             return true;
         }
         if Instant::now() >= deadline {
@@ -397,7 +410,11 @@ fn console_store_path() -> String {
                 .build_hasher()
                 .finish();
             std::env::temp_dir()
-                .join(format!("sky-console-{}-{:016x}.db", std::process::id(), nonce))
+                .join(format!(
+                    "sky-console-{}-{:016x}.db",
+                    std::process::id(),
+                    nonce
+                ))
                 .to_string_lossy()
                 .into_owned()
         }

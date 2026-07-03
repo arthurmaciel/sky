@@ -51,7 +51,10 @@ fn clean(path: &str) -> String {
         } else if at(r) == Some(b'.') && (r + 1 == n || at(r + 1) == Some(SEP)) {
             // `.` element → skip
             r += 1;
-        } else if at(r) == Some(b'.') && at(r + 1) == Some(b'.') && (r + 2 == n || at(r + 2) == Some(SEP)) {
+        } else if at(r) == Some(b'.')
+            && at(r + 1) == Some(b'.')
+            && (r + 2 == n || at(r + 2) == Some(SEP))
+        {
             // `..` element → back up
             r += 2;
             if out.len() > dotdot {

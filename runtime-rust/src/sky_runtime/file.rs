@@ -44,7 +44,10 @@ pub fn file_read_file<E: Send + From<String> + 'static>(path: String) -> SkyTask
     })
 }
 
-pub fn file_write_file<E: Send + From<String> + 'static>(path: String, content: String) -> SkyTask<E, ()> {
+pub fn file_write_file<E: Send + From<String> + 'static>(
+    path: String,
+    content: String,
+) -> SkyTask<E, ()> {
     Box::pin(async move {
         match std::fs::write(&path, &content) {
             Ok(_) => ok_res(()),
@@ -87,11 +90,14 @@ pub fn file_read_file_limit<E: Send + From<String> + 'static>(
     limit: i64,
 ) -> SkyTask<E, String> {
     use std::io::Read as _;
-    let cap: u64 = if limit > 0 { limit as u64 } else { 10 * 1024 * 1024 };
+    let cap: u64 = if limit > 0 {
+        limit as u64
+    } else {
+        10 * 1024 * 1024
+    };
     Box::pin(async move {
         let result: Result<String, String> = (|| {
-            let f = std::fs::File::open(&path)
-                .map_err(|e| format!("{}", e))?;
+            let f = std::fs::File::open(&path).map_err(|e| format!("{}", e))?;
             let meta = f.metadata().map_err(|e| format!("{}", e))?;
             if meta.len() > cap {
                 return Err(format!(
@@ -101,7 +107,9 @@ pub fn file_read_file_limit<E: Send + From<String> + 'static>(
                 ));
             }
             let mut buf = String::new();
-            f.take(cap).read_to_string(&mut buf).map_err(|e| format!("{}", e))?;
+            f.take(cap)
+                .read_to_string(&mut buf)
+                .map_err(|e| format!("{}", e))?;
             Ok(buf)
         })();
         match result {
@@ -115,15 +123,18 @@ pub fn file_read_file_limit<E: Send + From<String> + 'static>(
 /// Read the file as raw bytes, returned as `Vec<i64>` (Sky `List Int`,
 /// values 0..=255). Uses the same 10 MiB default cap as Go. For text
 /// content with guaranteed UTF-8, prefer `readFile` / `readFileLimit`.
-pub fn file_read_file_bytes<E: Send + From<String> + 'static>(path: String) -> SkyTask<E, Vec<i64>> {
+pub fn file_read_file_bytes<E: Send + From<String> + 'static>(
+    path: String,
+) -> SkyTask<E, Vec<i64>> {
     const DEFAULT_CAP: u64 = 10 * 1024 * 1024;
     Box::pin(async move {
         use std::io::Read as _;
         let result: Result<Vec<i64>, String> = (|| {
-            let f = std::fs::File::open(&path)
-                .map_err(|e| format!("{}", e))?;
+            let f = std::fs::File::open(&path).map_err(|e| format!("{}", e))?;
             let mut buf = Vec::new();
-            f.take(DEFAULT_CAP).read_to_end(&mut buf).map_err(|e| format!("{}", e))?;
+            f.take(DEFAULT_CAP)
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("{}", e))?;
             Ok(from_u8_slice(&buf))
         })();
         match result {
@@ -138,7 +149,10 @@ pub fn file_read_file_bytes<E: Send + From<String> + 'static>(path: String) -> S
 /// `Sky.Core.File.append : String -> String -> Task Error ()`
 /// Append `content` to the end of the file at `path`, creating it if absent.
 /// Mirrors Go's `os.OpenFile(…, O_APPEND|O_CREATE|O_WRONLY, 0644)`.
-pub fn file_append<E: Send + From<String> + 'static>(path: String, content: String) -> SkyTask<E, ()> {
+pub fn file_append<E: Send + From<String> + 'static>(
+    path: String,
+    content: String,
+) -> SkyTask<E, ()> {
     Box::pin(async move {
         use std::io::Write as _;
         let result = (|| {
@@ -147,7 +161,8 @@ pub fn file_append<E: Send + From<String> + 'static>(path: String, content: Stri
                 .create(true)
                 .open(&path)
                 .map_err(|e| format!("{}", e))?;
-            f.write_all(content.as_bytes()).map_err(|e| format!("{}", e))
+            f.write_all(content.as_bytes())
+                .map_err(|e| format!("{}", e))
         })();
         match result {
             Ok(_) => ok_res(()),
@@ -310,7 +325,10 @@ fn make_temp_path(prefix: &str, is_dir: bool) -> Result<String, String> {
 /// Mirrors Go's `io.Copy(out, in)` pattern.
 pub fn file_copy<E: Send + From<String> + 'static>(src: String, dst: String) -> SkyTask<E, ()> {
     Box::pin(async move {
-        match std::fs::copy(&src, &dst).map(|_| ()).map_err(|e| format!("{}", e)) {
+        match std::fs::copy(&src, &dst)
+            .map(|_| ())
+            .map_err(|e| format!("{}", e))
+        {
             Ok(_) => ok_res(()),
             Err(e) => SkyResult::Err(str_err(&e)),
         }
@@ -348,17 +366,22 @@ mod read_ceiling_tests {
         let p = std::env::temp_dir().join(format!("sky_rc_over_{}.txt", std::process::id()));
         std::fs::write(&p, vec![b'x'; 8192]).unwrap();
         std::env::set_var("SKY_FILE_READ_MAX", "1024");
-        let res: SkyResult<String, String> = block(file_read_file(p.to_string_lossy().into_owned()));
+        let res: SkyResult<String, String> =
+            block(file_read_file(p.to_string_lossy().into_owned()));
         std::env::remove_var("SKY_FILE_READ_MAX");
         let _ = std::fs::remove_file(&p);
-        assert!(matches!(res, SkyResult::Err(_)), "8 KiB read under a 1 KiB ceiling must Err");
+        assert!(
+            matches!(res, SkyResult::Err(_)),
+            "8 KiB read under a 1 KiB ceiling must Err"
+        );
     }
 
     #[test]
     fn read_file_under_ceiling_ok() {
         let p = std::env::temp_dir().join(format!("sky_rc_ok_{}.txt", std::process::id()));
         std::fs::write(&p, b"hello").unwrap();
-        let res: SkyResult<String, String> = block(file_read_file(p.to_string_lossy().into_owned()));
+        let res: SkyResult<String, String> =
+            block(file_read_file(p.to_string_lossy().into_owned()));
         let _ = std::fs::remove_file(&p);
         match res {
             SkyResult::Ok(s) => assert_eq!(s, "hello"),

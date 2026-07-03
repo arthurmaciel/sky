@@ -52,10 +52,34 @@ const ALL_MARKERS: &[&str] = &[
 const MAX_STYLE_DEPTH: usize = 1024;
 
 pub fn apply_style_injections<M>(node: &mut Html<M>) {
-    inject_pass(node, &["data-sky-mq-q", "data-sky-mq-rules"], "data-sky-mq", &|id, a| build_mq(id, a), 0);
-    inject_pass(node, &["data-sky-pc-rules"], "data-sky-pc", &|id, a| build_pc(id, a), 0);
-    inject_pass(node, &["data-sky-tr-rules", "data-sky-tr-respect"], "data-sky-tr", &|id, a| build_tr(id, a), 0);
-    inject_pass(node, &["data-sky-anim-rules"], "data-sky-anim", &|id, a| build_anim(id, a), 0);
+    inject_pass(
+        node,
+        &["data-sky-mq-q", "data-sky-mq-rules"],
+        "data-sky-mq",
+        &|id, a| build_mq(id, a),
+        0,
+    );
+    inject_pass(
+        node,
+        &["data-sky-pc-rules"],
+        "data-sky-pc",
+        &|id, a| build_pc(id, a),
+        0,
+    );
+    inject_pass(
+        node,
+        &["data-sky-tr-rules", "data-sky-tr-respect"],
+        "data-sky-tr",
+        &|id, a| build_tr(id, a),
+        0,
+    );
+    inject_pass(
+        node,
+        &["data-sky-anim-rules"],
+        "data-sky-anim",
+        &|id, a| build_anim(id, a),
+        0,
+    );
     // A void element at the TREE ROOT is never self-handled (inject_pass skips
     // void self-build, since a void tag can take no child <style>) and has no
     // parent to hoist a sibling <style> after it (#409). Its markers would
@@ -102,7 +126,9 @@ fn inject_pass<M>(
     for mut child in std::mem::take(kids) {
         inject_pass(&mut child, markers, style_attr, build, depth + 1);
         let hoist = match &mut child {
-            Html::HElement(ct, ca, _) if is_void(ct) => build_style_node(ca, markers, style_attr, build),
+            Html::HElement(ct, ca, _) if is_void(ct) => {
+                build_style_node(ca, markers, style_attr, build)
+            }
             _ => None,
         };
         out.push(child);
@@ -223,7 +249,9 @@ fn build_pc<M>(sky_id: &str, attrs: &[Attribute<M>]) -> String {
         };
         let safe_css = strip_style_close(css);
         if hover_gated {
-            out.push_str(&format!("@media (hover: hover) {{ {selector}{pseudo} {{ {safe_css} }} }} "));
+            out.push_str(&format!(
+                "@media (hover: hover) {{ {selector}{pseudo} {{ {safe_css} }} }} "
+            ));
         } else {
             out.push_str(&format!("{selector}{pseudo} {{ {safe_css} }} "));
         }
@@ -249,7 +277,10 @@ fn build_tr<M>(sky_id: &str, attrs: &[Attribute<M>]) -> String {
     if rules.is_empty() {
         return String::new();
     }
-    let respect = attr_get(attrs, "data-sky-tr-respect").unwrap_or_default().as_str() != "0";
+    let respect = attr_get(attrs, "data-sky-tr-respect")
+        .unwrap_or_default()
+        .as_str()
+        != "0";
     let safe_rules = strip_style_close(&rules);
     let selector = format!("[sky-id=\"{sky_id}\"]");
     if respect {
@@ -306,7 +337,10 @@ fn build_anim<M>(sky_id: &str, attrs: &[Attribute<M>]) -> String {
         ));
     }
     if !ungated.is_empty() {
-        sb.push_str(&format!("{selector} {{ animation: {}; }} ", ungated.join(", ")));
+        sb.push_str(&format!(
+            "{selector} {{ animation: {}; }} ",
+            ungated.join(", ")
+        ));
     }
     sb.trim().to_string()
 }
@@ -365,13 +399,23 @@ mod tests {
     #[test]
     fn strip_style_close_is_total() {
         // plain
-        assert!(!strip_style_close("a</style>b").to_ascii_lowercase().contains("</style"));
+        assert!(!strip_style_close("a</style>b")
+            .to_ascii_lowercase()
+            .contains("</style"));
         // mixed case (HTML end-tags are ASCII-case-insensitive)
-        assert!(!strip_style_close("a</StYle>b").to_ascii_lowercase().contains("</style"));
-        assert!(!strip_style_close("a</STYLE>b").to_ascii_lowercase().contains("</style"));
+        assert!(!strip_style_close("a</StYle>b")
+            .to_ascii_lowercase()
+            .contains("</style"));
+        assert!(!strip_style_close("a</STYLE>b")
+            .to_ascii_lowercase()
+            .contains("</style"));
         // reconstruction across the join seam after a single removal
-        assert!(!strip_style_close("</sty</stylele>").to_ascii_lowercase().contains("</style"));
-        assert!(!strip_style_close("</st</STYLEyle>").to_ascii_lowercase().contains("</style"));
+        assert!(!strip_style_close("</sty</stylele>")
+            .to_ascii_lowercase()
+            .contains("</style"));
+        assert!(!strip_style_close("</st</STYLEyle>")
+            .to_ascii_lowercase()
+            .contains("</style"));
         // benign content is untouched
         assert_eq!(strip_style_close("color: red;"), "color: red;");
     }
@@ -383,18 +427,27 @@ mod tests {
     fn pc_strips_style_close_breakout() {
         let attrs = vec![
             attr("sky-id", "r_0_button"),
-            attr("data-sky-pc-rules", "h|color: red } </style><script>alert(1)</script>"),
+            attr(
+                "data-sky-pc-rules",
+                "h|color: red } </style><script>alert(1)</script>",
+            ),
         ];
         let css = build_pc("r_0_button", &attrs);
         assert!(!css.contains("</style"), "breakout not stripped: {css}");
-        assert!(css.contains("@media (hover: hover)") && css.contains(":hover"), "{css}");
+        assert!(
+            css.contains("@media (hover: hover)") && css.contains(":hover"),
+            "{css}"
+        );
     }
 
     #[test]
     fn mq_strips_style_close_in_query_and_rules() {
         let attrs = vec![
             attr("data-sky-mq-q", "(max-width: 600px) </style>"),
-            attr("data-sky-mq-rules", "color: blue </style><script>x</script>"),
+            attr(
+                "data-sky-mq-rules",
+                "color: blue </style><script>x</script>",
+            ),
         ];
         let css = build_mq("r0", &attrs);
         assert!(!css.contains("</style"), "{css}");
@@ -417,7 +470,10 @@ mod tests {
     fn apply_prepends_style_child_and_strips_marker() {
         let mut tree: Html<()> = Html::HElement(
             "button".to_string(),
-            vec![attr("sky-id", "r"), attr("data-sky-pc-rules", "h|color: red")],
+            vec![
+                attr("sky-id", "r"),
+                attr("data-sky-pc-rules", "h|color: red"),
+            ],
             vec![Html::HText("x".to_string())],
         );
         apply_style_injections(&mut tree);
@@ -447,7 +503,10 @@ mod tests {
             vec![attr("sky-id", "r")],
             vec![Html::HElement(
                 "input".to_string(),
-                vec![attr("sky-id", "r_0_input"), attr("data-sky-pc-rules", "f|outline: none")],
+                vec![
+                    attr("sky-id", "r_0_input"),
+                    attr("data-sky-pc-rules", "f|outline: none"),
+                ],
                 vec![],
             )],
         );
@@ -468,7 +527,10 @@ mod tests {
         // don't leak as inert data-* attrs (post-condition).
         let mut tree: Html<()> = Html::HElement(
             "input".to_string(),
-            vec![attr("sky-id", "r"), attr("data-sky-pc-rules", "f|outline: none")],
+            vec![
+                attr("sky-id", "r"),
+                attr("data-sky-pc-rules", "f|outline: none"),
+            ],
             vec![],
         );
         apply_style_injections(&mut tree);
@@ -488,7 +550,10 @@ mod tests {
     fn idempotent_second_run_adds_no_duplicate_style() {
         let mut tree: Html<()> = Html::HElement(
             "div".to_string(),
-            vec![attr("sky-id", "r"), attr("data-sky-tr-rules", "color 200ms")],
+            vec![
+                attr("sky-id", "r"),
+                attr("data-sky-tr-rules", "color 200ms"),
+            ],
             vec![],
         );
         apply_style_injections(&mut tree);

@@ -14,17 +14,27 @@
 /// we map it to r = 0, which is the correct mathematical remainder and leaves
 /// the adjust condition (`0 < 0`) false, so the final result is 0.
 pub fn basics_mod_by(divisor: i64, n: i64) -> i64 {
-    if divisor == 0 { return 0; }
+    if divisor == 0 {
+        return 0;
+    }
     // checked_rem returns None only for i64::MIN % -1 (overflow); treat as 0.
     let r = n.checked_rem(divisor).unwrap_or(0);
-    if r < 0 { r.wrapping_add(divisor) } else { r }
+    if r < 0 {
+        r.wrapping_add(divisor)
+    } else {
+        r
+    }
 }
 
 /// Sky `fst : (a, b) -> a` / `snd : (a, b) -> b`. Pure in stdlib, but the
 /// Prelude re-export lowers as a `VarKernel "Basics" "fst"`, so the Rust
 /// backend routes it to a runtime kernel. Tuples lower to Rust tuples.
-pub fn basics_fst<A, B>(t: (A, B)) -> A { t.0 }
-pub fn basics_snd<A, B>(t: (A, B)) -> B { t.1 }
+pub fn basics_fst<A, B>(t: (A, B)) -> A {
+    t.0
+}
+pub fn basics_snd<A, B>(t: (A, B)) -> B {
+    t.1
+}
 
 /// Sky `identity : a -> a` and `always : a -> b -> a`. Pure in the stdlib
 /// (`identity x = x`, `always x _ = x`) but the Prelude re-export lowers each as
@@ -32,8 +42,12 @@ pub fn basics_snd<A, B>(t: (A, B)) -> B { t.1 }
 /// (same convention as `fst`/`snd`). `always` is the tupled 2-arg form the
 /// codegen emits; partial application (`always 0`) is wrapped into a closure by
 /// the codegen, so the plain `(A, B) -> A` shape here is correct.
-pub fn basics_identity<A>(x: A) -> A { x }
-pub fn basics_always<A, B>(x: A, _y: B) -> A { x }
+pub fn basics_identity<A>(x: A) -> A {
+    x
+}
+pub fn basics_always<A, B>(x: A, _y: B) -> A {
+    x
+}
 
 /// Sky `errorToString : a -> String` — universal Sky stringifier.
 /// Used by Sky.Test.debugShow and friends to render any Sky value into
@@ -72,42 +86,91 @@ pub fn basics_to_string<T: std::fmt::Display>(v: T) -> String {
 mod tests {
     use super::*;
 
-    #[test] fn test_mod_by_positive_divisor() { assert_eq!(basics_mod_by(3, 10), 1); }
-    #[test] fn test_mod_by_zero_divisor() { assert_eq!(basics_mod_by(0, 5), 0); }
-    #[test] fn test_mod_by_negative_dividend_positive_divisor() {
+    #[test]
+    fn test_mod_by_positive_divisor() {
+        assert_eq!(basics_mod_by(3, 10), 1);
+    }
+    #[test]
+    fn test_mod_by_zero_divisor() {
+        assert_eq!(basics_mod_by(0, 5), 0);
+    }
+    #[test]
+    fn test_mod_by_negative_dividend_positive_divisor() {
         // -1 % 3 = -1 in Rust; Sky/Elm wants 2 (same sign as divisor)
         assert_eq!(basics_mod_by(3, -1), 2);
         assert_eq!(basics_mod_by(3, -4), 2);
     }
-    #[test] fn test_mod_by_exact() { assert_eq!(basics_mod_by(5, 10), 0); }
+    #[test]
+    fn test_mod_by_exact() {
+        assert_eq!(basics_mod_by(5, 10), 0);
+    }
 
     // Go parity: adjust fires only when r < 0.
     // positive divisor, positive dividend — no adjust needed.
-    #[test] fn test_mod_by_pos_div_pos_n() { assert_eq!(basics_mod_by(3, 7), 1); }
+    #[test]
+    fn test_mod_by_pos_div_pos_n() {
+        assert_eq!(basics_mod_by(3, 7), 1);
+    }
     // negative divisor, positive dividend — r > 0, no adjust (was wrong pre-fix).
     // Go: 7 % -3 = 1; 1 >= 0 → no adjust → 1.
-    #[test] fn test_mod_by_neg_divisor_pos_n() { assert_eq!(basics_mod_by(-3, 7), 1); }
+    #[test]
+    fn test_mod_by_neg_divisor_pos_n() {
+        assert_eq!(basics_mod_by(-3, 7), 1);
+    }
     // negative divisor, negative dividend — r < 0 → adjust.
     // Go: -7 % -3 = -1; -1 < 0 → -1 + (-3) = -4.  Wait — divisor=-3 so r+divisor=-4.
     // Verify: Go does r += divisor → -1 + (-3) = -4.
-    #[test] fn test_mod_by_neg_divisor_neg_n() { assert_eq!(basics_mod_by(-3, -7), -4); }
+    #[test]
+    fn test_mod_by_neg_divisor_neg_n() {
+        assert_eq!(basics_mod_by(-3, -7), -4);
+    }
     // Overflow guard: i64::MIN % -1 must not panic, result = 0.
-    #[test] fn test_mod_by_min_i64_neg1() { assert_eq!(basics_mod_by(-1, i64::MIN), 0); }
+    #[test]
+    fn test_mod_by_min_i64_neg1() {
+        assert_eq!(basics_mod_by(-1, i64::MIN), 0);
+    }
 
-    #[test] fn test_error_to_string_i64() { assert_eq!(basics_error_to_string(42i64), "42"); }
+    #[test]
+    fn test_error_to_string_i64() {
+        assert_eq!(basics_error_to_string(42i64), "42");
+    }
     // String renders UNQUOTED now (Go parity) — the primary fix.
-    #[test] fn test_error_to_string_string() { assert_eq!(basics_error_to_string("hi".to_string()), "hi"); }
+    #[test]
+    fn test_error_to_string_string() {
+        assert_eq!(basics_error_to_string("hi".to_string()), "hi");
+    }
     // Vec renders space-separated (Go's `%v`: `[1 2 3]`, NOT `[1, 2, 3]`).
-    #[test] fn test_error_to_string_vec() { assert_eq!(basics_error_to_string(vec![1i64, 2, 3]), "[1 2 3]"); }
+    #[test]
+    fn test_error_to_string_vec() {
+        assert_eq!(basics_error_to_string(vec![1i64, 2, 3]), "[1 2 3]");
+    }
 
     // Regression: identity/always were missing from the runtime (emitted as
     // `basics_identity`/`basics_always` calls but undefined → E0425).
-    #[test] fn test_identity() { assert_eq!(basics_identity(7i64), 7); }
-    #[test] fn test_always_returns_first() { assert_eq!(basics_always(7i64, "discarded"), 7); }
+    #[test]
+    fn test_identity() {
+        assert_eq!(basics_identity(7i64), 7);
+    }
+    #[test]
+    fn test_always_returns_first() {
+        assert_eq!(basics_always(7i64, "discarded"), 7);
+    }
 
     // Basics.toString = Go's %v: Display-based, unquoted strings, clean scalars.
-    #[test] fn test_to_string_int() { assert_eq!(basics_to_string(42i64), "42"); }
-    #[test] fn test_to_string_bool() { assert_eq!(basics_to_string(true), "true"); }
-    #[test] fn test_to_string_string_unquoted() { assert_eq!(basics_to_string("hi".to_string()), "hi"); }
-    #[test] fn test_to_string_float() { assert_eq!(basics_to_string(42.5f64), "42.5"); }
+    #[test]
+    fn test_to_string_int() {
+        assert_eq!(basics_to_string(42i64), "42");
+    }
+    #[test]
+    fn test_to_string_bool() {
+        assert_eq!(basics_to_string(true), "true");
+    }
+    #[test]
+    fn test_to_string_string_unquoted() {
+        assert_eq!(basics_to_string("hi".to_string()), "hi");
+    }
+    #[test]
+    fn test_to_string_float() {
+        assert_eq!(basics_to_string(42.5f64), "42.5");
+    }
 }

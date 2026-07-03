@@ -47,7 +47,11 @@ pub fn auth_hash_password_cost<E: From<String>>(pw: String, cost: i64) -> SkyRes
         return SkyResult::Err("password must be at least 8 characters".to_string().into());
     }
     if pw.len() > 72 {
-        return SkyResult::Err("password longer than 72 bytes (bcrypt limit)".to_string().into());
+        return SkyResult::Err(
+            "password longer than 72 bytes (bcrypt limit)"
+                .to_string()
+                .into(),
+        );
     }
     let clamped = cost.clamp(4, 15) as u32;
     match bcrypt::hash(&pw, clamped) {
@@ -78,18 +82,30 @@ pub fn auth_password_strength<E: From<String>>(pw: String) -> SkyResult<E, Strin
         return SkyResult::Err("password must be at least 8 characters".to_string().into());
     }
     if pw.len() > 72 {
-        return SkyResult::Err("password longer than 72 bytes (bcrypt limit)".to_string().into());
+        return SkyResult::Err(
+            "password longer than 72 bytes (bcrypt limit)"
+                .to_string()
+                .into(),
+        );
     }
     let has_letter = pw.chars().any(|c| c.is_alphabetic());
-    let has_digit  = pw.chars().any(|c| c.is_ascii_digit());
+    let has_digit = pw.chars().any(|c| c.is_ascii_digit());
     let has_symbol = pw.chars().any(|c| !c.is_alphanumeric());
     if !has_letter || !has_digit {
-        return SkyResult::Err("password must contain both letters and digits".to_string().into());
+        return SkyResult::Err(
+            "password must contain both letters and digits"
+                .to_string()
+                .into(),
+        );
     }
     let char_count = pw.chars().count();
-    let rating = if char_count >= 12 && has_symbol { "strong" }
-                 else if char_count >= 10          { "medium" }
-                 else                              { "weak" };
+    let rating = if char_count >= 12 && has_symbol {
+        "strong"
+    } else if char_count >= 10 {
+        "medium"
+    } else {
+        "weak"
+    };
     SkyResult::Ok(rating.to_string())
 }
 
@@ -107,7 +123,11 @@ pub fn auth_sign_token<E: From<String>>(
     expiry_seconds: i64,
 ) -> SkyResult<E, String> {
     if secret.len() < 32 {
-        return SkyResult::Err("auth.signToken: secret must be ≥32 bytes".to_string().into());
+        return SkyResult::Err(
+            "auth.signToken: secret must be ≥32 bytes"
+                .to_string()
+                .into(),
+        );
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -118,7 +138,7 @@ pub fn auth_sign_token<E: From<String>>(
     // i64::MAX is a far-future timestamp (~292 billion years) — a safe floor.
     let exp = now.checked_add(expiry_seconds).unwrap_or(i64::MAX);
     let iat = now; // issued-at = current unix seconds (mirrors Go's Auth_signToken)
-    // Build a JSON object with string claims + exp + iat.
+                   // Build a JSON object with string claims + exp + iat.
     let mut payload = serde_json::Map::new();
     for (k, v) in claims {
         payload.insert(k, serde_json::Value::String(v));
@@ -142,7 +162,11 @@ pub fn auth_verify_token<E: From<String>>(
     token: String,
 ) -> SkyResult<E, HashMap<String, String>> {
     if secret.len() < 32 {
-        return SkyResult::Err("auth.verifyToken: secret must be ≥32 bytes".to_string().into());
+        return SkyResult::Err(
+            "auth.verifyToken: secret must be ≥32 bytes"
+                .to_string()
+                .into(),
+        );
     }
     let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
@@ -201,7 +225,9 @@ async fn ensure_users_schema<E: From<String> + Send>(conn: &Db) -> SkyResult<E, 
 /// Sky `register : Db -> String -> String -> Task Error Int`.
 /// Creates a new user. Returns the new user id.
 pub fn auth_register<E: Send + From<String> + 'static>(
-    conn: Db, email: String, password: String,
+    conn: Db,
+    email: String,
+    password: String,
 ) -> SkyTask<E, i64> {
     Box::pin(async move {
         // Normalize the email (trim + lowercase) so a case/whitespace variant can't
@@ -218,17 +244,25 @@ pub fn auth_register<E: Send + From<String> + 'static>(
         // bcrypt is CPU-bound and BLOCKING (~250 ms at cost 12). Running it on a
         // tokio worker thread starves the async runtime (every concurrent register
         // ties up a core worker). Offload to the blocking pool.
-        let hash = match tokio::task::spawn_blocking(move || auth_hash_password::<E>(password)).await {
-            Ok(SkyResult::Ok(h)) => h,
-            Ok(SkyResult::Err(e)) => return SkyResult::Err(e),
-            Err(_) => return SkyResult::Err("auth.register: password-hash task failed".to_string().into()),
-        };
+        let hash =
+            match tokio::task::spawn_blocking(move || auth_hash_password::<E>(password)).await {
+                Ok(SkyResult::Ok(h)) => h,
+                Ok(SkyResult::Err(e)) => return SkyResult::Err(e),
+                Err(_) => {
+                    return SkyResult::Err(
+                        "auth.register: password-hash task failed"
+                            .to_string()
+                            .into(),
+                    )
+                }
+            };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
         let sql = db_format_sql(
-            "INSERT INTO users (email, password_hash, role, created_at) VALUES (?, ?, ?, ?)".to_string()
+            "INSERT INTO users (email, password_hash, role, created_at) VALUES (?, ?, ?, ?)"
+                .to_string(),
         );
         let result = sqlx::query(&sql)
             .bind(&email)
@@ -252,7 +286,9 @@ pub fn auth_register<E: Send + From<String> + 'static>(
 /// the email exists vs. password was wrong — both paths return the same
 /// generic "invalid credentials" error.
 pub fn auth_login<E: Send + From<String> + 'static>(
-    conn: Db, email: String, password: String,
+    conn: Db,
+    email: String,
+    password: String,
 ) -> SkyTask<E, i64> {
     Box::pin(async move {
         // Same canonicalisation as auth_register so a case/whitespace variant of a
@@ -261,18 +297,18 @@ pub fn auth_login<E: Send + From<String> + 'static>(
         if let SkyResult::Err(e) = ensure_users_schema::<E>(&conn).await {
             return SkyResult::Err(e);
         }
-        let sql = db_format_sql(
-            "SELECT id, password_hash FROM users WHERE email = ?".to_string()
-        );
+        let sql = db_format_sql("SELECT id, password_hash FROM users WHERE email = ?".to_string());
         match sqlx::query(&sql).bind(&email).fetch_optional(&conn).await {
             Ok(Some(row)) => {
                 use sqlx::Row;
                 let id: i64 = row.try_get(0).unwrap_or(0);
                 let hash: String = row.try_get(1).unwrap_or_default();
                 // bcrypt::verify is CPU-bound + blocking → blocking pool (see register).
-                let ok = tokio::task::spawn_blocking(move || bcrypt::verify(&password, &hash).unwrap_or(false))
-                    .await
-                    .unwrap_or(false);
+                let ok = tokio::task::spawn_blocking(move || {
+                    bcrypt::verify(&password, &hash).unwrap_or(false)
+                })
+                .await
+                .unwrap_or(false);
                 if ok {
                     SkyResult::Ok(id)
                 } else {
@@ -284,8 +320,10 @@ pub fn auth_login<E: Send + From<String> + 'static>(
                 // cost-12 hash so the unknown-email path does the same hashing
                 // work as the known-email path — removing the email-enumeration
                 // timing oracle. The result is discarded.
-                let _ = tokio::task::spawn_blocking(move || bcrypt::verify(&password, dummy_bcrypt_hash()))
-                    .await;
+                let _ = tokio::task::spawn_blocking(move || {
+                    bcrypt::verify(&password, dummy_bcrypt_hash())
+                })
+                .await;
                 SkyResult::Err("auth.login: invalid credentials".to_string().into())
             }
             Err(e) => SkyResult::Err(format!("auth.login: {}", e).into()),
@@ -296,16 +334,21 @@ pub fn auth_login<E: Send + From<String> + 'static>(
 /// Sky `setRole : Db -> Int -> String -> Task Error ()`.
 /// Sets the user's role. No-op if the user doesn't exist (returns Ok).
 pub fn auth_set_role<E: Send + From<String> + 'static>(
-    conn: Db, user_id: i64, role: String,
+    conn: Db,
+    user_id: i64,
+    role: String,
 ) -> SkyTask<E, ()> {
     Box::pin(async move {
         if let SkyResult::Err(e) = ensure_users_schema::<E>(&conn).await {
             return SkyResult::Err(e);
         }
-        let sql = db_format_sql(
-            "UPDATE users SET role = ? WHERE id = ?".to_string()
-        );
-        match sqlx::query(&sql).bind(&role).bind(user_id).execute(&conn).await {
+        let sql = db_format_sql("UPDATE users SET role = ? WHERE id = ?".to_string());
+        match sqlx::query(&sql)
+            .bind(&role)
+            .bind(user_id)
+            .execute(&conn)
+            .await
+        {
             Ok(_) => SkyResult::Ok(()),
             Err(e) => SkyResult::Err(format!("auth.setRole: {}", e).into()),
         }
@@ -321,8 +364,12 @@ mod tests {
 
     #[test]
     fn test_hash_verify_roundtrip() {
-        let hash: SkyResult<String, String> = auth_hash_password_cost("password123".into(), TEST_COST);
-        let h = match hash { SkyResult::Ok(h) => h, _ => panic!("hash") };
+        let hash: SkyResult<String, String> =
+            auth_hash_password_cost("password123".into(), TEST_COST);
+        let h = match hash {
+            SkyResult::Ok(h) => h,
+            _ => panic!("hash"),
+        };
         let ok: SkyResult<String, bool> = auth_verify_password("password123".into(), h.clone());
         assert!(matches!(ok, SkyResult::Ok(true)));
         let bad: SkyResult<String, bool> = auth_verify_password("wrongpass".into(), h);
@@ -365,9 +412,11 @@ mod tests {
         claims.insert("sub".to_string(), "user-123".to_string());
         claims.insert("role".to_string(), "admin".to_string());
         let token: SkyResult<String, String> = auth_sign_token(secret.clone(), claims, 3600);
-        let t = match token { SkyResult::Ok(t) => t, _ => panic!("sign") };
-        let verified: SkyResult<String, HashMap<String, String>> =
-            auth_verify_token(secret, t);
+        let t = match token {
+            SkyResult::Ok(t) => t,
+            _ => panic!("sign"),
+        };
+        let verified: SkyResult<String, HashMap<String, String>> = auth_verify_token(secret, t);
         match verified {
             SkyResult::Ok(m) => {
                 assert_eq!(m.get("sub").unwrap(), "user-123");
@@ -393,18 +442,31 @@ mod tests {
             Err(_) => return, // in-memory connect can't realistically fail; skip if it does
         };
         // Register with mixed case + surrounding whitespace.
-        let id: SkyResult<String, i64> =
-            auth_register(pool.clone(), "  Alice@Example.COM ".into(), "hunter2!".into()).await;
-        let uid = match id { SkyResult::Ok(i) => i, SkyResult::Err(_) => 0 };
+        let id: SkyResult<String, i64> = auth_register(
+            pool.clone(),
+            "  Alice@Example.COM ".into(),
+            "hunter2!".into(),
+        )
+        .await;
+        let uid = match id {
+            SkyResult::Ok(i) => i,
+            SkyResult::Err(_) => 0,
+        };
         assert!(uid > 0, "register with mixed-case email should succeed");
         // Login with a DIFFERENT case must resolve to the SAME account.
         let login: SkyResult<String, i64> =
             auth_login(pool.clone(), "alice@example.com".into(), "hunter2!".into()).await;
-        assert!(matches!(login, SkyResult::Ok(u) if u == uid), "login must be case-insensitive");
+        assert!(
+            matches!(login, SkyResult::Ok(u) if u == uid),
+            "login must be case-insensitive"
+        );
         // A case-variant re-register must hit the UNIQUE constraint (no dup account).
         let dup: SkyResult<String, i64> =
             auth_register(pool.clone(), "ALICE@example.com".into(), "hunter2!".into()).await;
-        assert!(matches!(dup, SkyResult::Err(_)), "case-variant must not create a duplicate account");
+        assert!(
+            matches!(dup, SkyResult::Err(_)),
+            "case-variant must not create a duplicate account"
+        );
     }
 
     #[tokio::test]
@@ -413,7 +475,10 @@ mod tests {
         // register
         let id: SkyResult<String, i64> =
             auth_register(pool.clone(), "alice@example.com".into(), "hunter2!".into()).await;
-        let user_id = match id { SkyResult::Ok(i) => i, SkyResult::Err(e) => panic!("{}", e) };
+        let user_id = match id {
+            SkyResult::Ok(i) => i,
+            SkyResult::Err(e) => panic!("{}", e),
+        };
         assert!(user_id > 0);
         // login correct
         let login_ok: SkyResult<String, i64> =
@@ -432,8 +497,7 @@ mod tests {
             auth_register(pool.clone(), "alice@example.com".into(), "hunter2!".into()).await;
         assert!(matches!(dup, SkyResult::Err(_)));
         // set role
-        let role: SkyResult<String, ()> =
-            auth_set_role(pool, user_id, "admin".into()).await;
+        let role: SkyResult<String, ()> = auth_set_role(pool, user_id, "admin".into()).await;
         assert!(matches!(role, SkyResult::Ok(())));
     }
 }

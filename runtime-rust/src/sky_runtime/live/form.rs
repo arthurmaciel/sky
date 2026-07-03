@@ -68,13 +68,25 @@ mod tests {
         fd.insert("email".to_string(), "a@b.c".to_string());
         fd.insert("password".to_string(), "pw".to_string());
         let r: Option<Creds> = decode_form_or_warn(fd);
-        assert_eq!(r, Some(Creds { email: "a@b.c".into(), password: "pw".into() }));
+        assert_eq!(
+            r,
+            Some(Creds {
+                email: "a@b.c".into(),
+                password: "pw".into()
+            })
+        );
 
         // Go json.Unmarshal parity: a form with NEITHER field still decodes —
         // each field falls to its zero value — so the Msg dispatches (Some).
         let empty = FormData::new();
         let r2: Option<Creds> = decode_form_or_warn(empty);
-        assert_eq!(r2, Some(Creds { email: String::new(), password: String::new() }));
+        assert_eq!(
+            r2,
+            Some(Creds {
+                email: String::new(),
+                password: String::new()
+            })
+        );
     }
 
     // The #37 contract record: a String + an i64. Exercises the three cases the
@@ -93,13 +105,25 @@ mod tests {
         let mut unknown_only = FormData::new();
         unknown_only.insert("ace-mirror".to_string(), "1+1".to_string());
         let r: Option<RunPayload> = decode_form_or_warn(unknown_only);
-        assert_eq!(r, Some(RunPayload { code: String::new(), count: 0 }));
+        assert_eq!(
+            r,
+            Some(RunPayload {
+                code: String::new(),
+                count: 0
+            })
+        );
 
         // `code` present, `count` absent → count defaults to 0.
         let mut partial = FormData::new();
         partial.insert("code".to_string(), "hello".to_string());
         let r2: Option<RunPayload> = decode_form_or_warn(partial);
-        assert_eq!(r2, Some(RunPayload { code: "hello".into(), count: 0 }));
+        assert_eq!(
+            r2,
+            Some(RunPayload {
+                code: "hello".into(),
+                count: 0
+            })
+        );
     }
 
     #[test]
@@ -132,7 +156,15 @@ mod tests {
         fd.insert("express".to_string(), "true".to_string());
         fd.insert("price".to_string(), "9.99".to_string());
         let r: Result<Order, String> = decode_form(fd);
-        assert_eq!(r, Ok(Order { item: "widget".into(), qty: 42, express: true, price: 9.99 }));
+        assert_eq!(
+            r,
+            Ok(Order {
+                item: "widget".into(),
+                qty: 42,
+                express: true,
+                price: 9.99
+            })
+        );
     }
 
     #[test]
@@ -141,14 +173,26 @@ mod tests {
         fd.insert("email".to_string(), "a@b.c".to_string());
         fd.insert("password".to_string(), "pw".to_string());
         let r: Result<Creds, String> = decode_form(fd);
-        assert_eq!(r, Ok(Creds { email: "a@b.c".into(), password: "pw".into() }));
+        assert_eq!(
+            r,
+            Ok(Creds {
+                email: "a@b.c".into(),
+                password: "pw".into()
+            })
+        );
 
         // Go json.Unmarshal parity: missing `password` → "" (zero value), Ok —
         // the form-target struct's `#[serde(default)]` supplies it.
         let mut partial = FormData::new();
         partial.insert("email".to_string(), "a@b.c".to_string()); // missing password
         let r2: Result<Creds, String> = decode_form(partial);
-        assert_eq!(r2, Ok(Creds { email: "a@b.c".into(), password: String::new() }));
+        assert_eq!(
+            r2,
+            Ok(Creds {
+                email: "a@b.c".into(),
+                password: String::new()
+            })
+        );
     }
 
     // #37 regression: a form-target record with a `Maybe`-typed optional field
@@ -233,7 +277,10 @@ mod tests {
         let r: Result<Subscription, String> = decode_form(fd);
         assert_eq!(
             r,
-            Ok(Subscription { email: "a@b.c".into(), tier: Tier::Pro })
+            Ok(Subscription {
+                email: "a@b.c".into(),
+                tier: Tier::Pro
+            })
         );
 
         // Missing the non-defaultable `tier` → strict decode ERRORS (no leniency),

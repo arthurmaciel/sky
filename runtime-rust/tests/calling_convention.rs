@@ -28,10 +28,9 @@ fn no_unintended_curried_helpers() {
     // Capture the helper name AND the first parameter type of the returned
     // `Fn`, so Handler producers (returned `Fn(ServerRequest) -> …`) can be
     // distinguished from genuine curried builders.
-    let re = regex::Regex::new(
-        r"fn ([a-z_]+).*-> impl Fn(?:Once|Mut)?\(\s*([A-Za-z_][A-Za-z0-9_]*)",
-    )
-    .unwrap();
+    let re =
+        regex::Regex::new(r"fn ([a-z_]+).*-> impl Fn(?:Once|Mut)?\(\s*([A-Za-z_][A-Za-z0-9_]*)")
+            .unwrap();
 
     for entry in std::fs::read_dir(&runtime_dir).unwrap() {
         let path = entry.unwrap().path();

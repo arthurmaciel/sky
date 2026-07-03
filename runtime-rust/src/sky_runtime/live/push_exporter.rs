@@ -42,8 +42,17 @@ const MAX_BATCH: usize = 8192;
 
 /// One telemetry record queued for the exporter.
 enum Entry {
-    Log { ts_ms: u64, level: String, message: String },
-    Span { ts_ms: u64, name: String, dur_us: u64, ok: bool },
+    Log {
+        ts_ms: u64,
+        level: String,
+        message: String,
+    },
+    Span {
+        ts_ms: u64,
+        name: String,
+        dur_us: u64,
+        ok: bool,
+    },
     /// Synchronous flush request: batcher drains its buffer then acks via the
     /// oneshot. Used by `flush_now` for a bounded pre-exit drain.
     Flush(tokio::sync::oneshot::Sender<()>),
@@ -178,10 +187,19 @@ fn build_payload(buf: &[Entry]) -> String {
     let mut spans = Vec::new();
     for e in buf {
         match e {
-            Entry::Log { ts_ms, level, message } => logs.push(serde_json::json!({
+            Entry::Log {
+                ts_ms,
+                level,
+                message,
+            } => logs.push(serde_json::json!({
                 "ts": ts_ms, "level": level, "message": message,
             })),
-            Entry::Span { ts_ms, name, dur_us, ok } => spans.push(serde_json::json!({
+            Entry::Span {
+                ts_ms,
+                name,
+                dur_us,
+                ok,
+            } => spans.push(serde_json::json!({
                 "ts": ts_ms, "name": name, "durUs": dur_us, "ok": ok,
             })),
             // The batcher clears the buf before any Flush sentinel reaches here;
@@ -243,8 +261,17 @@ mod tests {
     #[test]
     fn payload_shape_logs_and_spans() {
         let buf = vec![
-            Entry::Log { ts_ms: 1700, level: "error".into(), message: "boom \"x\"".into() },
-            Entry::Span { ts_ms: 1700, name: "db.query".into(), dur_us: 5000, ok: true },
+            Entry::Log {
+                ts_ms: 1700,
+                level: "error".into(),
+                message: "boom \"x\"".into(),
+            },
+            Entry::Span {
+                ts_ms: 1700,
+                name: "db.query".into(),
+                dur_us: 5000,
+                ok: true,
+            },
         ];
         let body = build_payload(&buf);
         let v: serde_json::Value = serde_json::from_str(&body).expect("valid json");
@@ -297,8 +324,10 @@ mod tests {
     #[tokio::test]
     async fn flush_now_noop_when_disabled() {
         // flush_now on a fresh (not-enabled) state must return quickly.
-        let deadline =
-            tokio::time::timeout(Duration::from_millis(200), flush_now(250)).await;
-        assert!(deadline.is_ok(), "flush_now must not block when exporter is off");
+        let deadline = tokio::time::timeout(Duration::from_millis(200), flush_now(250)).await;
+        assert!(
+            deadline.is_ok(),
+            "flush_now must not block when exporter is off"
+        );
     }
 }

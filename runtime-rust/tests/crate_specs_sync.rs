@@ -83,9 +83,13 @@ fn crate_specs_match_runtime_cargo_toml() {
     let mut problems = Vec::new();
     for (name, spec_ver) in &specs {
         match cargo.get(name) {
-            None => problems.push(format!("{name}: in crate-specs.toml ({spec_ver}) but not in runtime-rust/Cargo.toml")),
+            None => problems.push(format!(
+                "{name}: in crate-specs.toml ({spec_ver}) but not in runtime-rust/Cargo.toml"
+            )),
             Some(cargo_ver) if cargo_ver != spec_ver => {
-                problems.push(format!("{name}: crate-specs.toml = {spec_ver}, Cargo.toml = {cargo_ver}"));
+                problems.push(format!(
+                    "{name}: crate-specs.toml = {spec_ver}, Cargo.toml = {cargo_ver}"
+                ));
             }
             Some(_) => {}
         }

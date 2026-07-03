@@ -9,8 +9,8 @@
 // `nullable`, and `loadFromFile` live here, because Config's signatures put the
 // source `String` FIRST (`decodeToml : String -> Decoder a -> Result Error a`),
 // the opposite of `decode_from_json_string`'s decoder-first argument order.
-use super::*;
 use super::json::{Decoder, JsonVal};
+use super::*;
 
 // Config.nullable : Decoder a -> Decoder (Maybe a)
 // Returns Sky's SkyMaybe (not Rust Option) so the decoded value matches the
@@ -42,18 +42,36 @@ fn run_decoder<E: From<String> + 'static, T>(
 }
 
 // Config.decodeJson : String -> Decoder a -> Result Error a
-pub fn config_decode_json<E: From<String> + 'static, T>(s: String, decoder: Decoder<E, T>) -> SkyResult<E, T> {
-    run_decoder(serde_json::from_str(&s).map_err(|e| format!("json parse: {}", e)), decoder)
+pub fn config_decode_json<E: From<String> + 'static, T>(
+    s: String,
+    decoder: Decoder<E, T>,
+) -> SkyResult<E, T> {
+    run_decoder(
+        serde_json::from_str(&s).map_err(|e| format!("json parse: {}", e)),
+        decoder,
+    )
 }
 
 // Config.decodeToml : String -> Decoder a -> Result Error a
-pub fn config_decode_toml<E: From<String> + 'static, T>(s: String, decoder: Decoder<E, T>) -> SkyResult<E, T> {
-    run_decoder(toml::from_str(&s).map_err(|e| format!("toml parse: {}", e)), decoder)
+pub fn config_decode_toml<E: From<String> + 'static, T>(
+    s: String,
+    decoder: Decoder<E, T>,
+) -> SkyResult<E, T> {
+    run_decoder(
+        toml::from_str(&s).map_err(|e| format!("toml parse: {}", e)),
+        decoder,
+    )
 }
 
 // Config.decodeYaml : String -> Decoder a -> Result Error a
-pub fn config_decode_yaml<E: From<String> + 'static, T>(s: String, decoder: Decoder<E, T>) -> SkyResult<E, T> {
-    run_decoder(serde_yaml::from_str(&s).map_err(|e| format!("yaml parse: {}", e)), decoder)
+pub fn config_decode_yaml<E: From<String> + 'static, T>(
+    s: String,
+    decoder: Decoder<E, T>,
+) -> SkyResult<E, T> {
+    run_decoder(
+        serde_yaml::from_str(&s).map_err(|e| format!("yaml parse: {}", e)),
+        decoder,
+    )
 }
 
 // Config.loadFromFile : String -> Decoder a -> Task Error a
@@ -85,7 +103,8 @@ pub fn config_load_from_file<E: From<String> + Send + 'static, T: Send + 'static
             Ok(meta) => {
                 if !meta.file_type().is_file() {
                     return SkyResult::Err(str_err(&format!(
-                        "config file {:?} is not a regular file", path
+                        "config file {:?} is not a regular file",
+                        path
                     )));
                 }
                 if meta.len() > cap {
@@ -102,7 +121,10 @@ pub fn config_load_from_file<E: From<String> + Send + 'static, T: Send + 'static
         let mut contents = String::new();
         // take(cap+1): if the file grew between the metadata check and the read,
         // or reports a misleading size, the read still can't exceed cap+1 bytes.
-        if let Err(e) = file.take(cap.saturating_add(1)).read_to_string(&mut contents) {
+        if let Err(e) = file
+            .take(cap.saturating_add(1))
+            .read_to_string(&mut contents)
+        {
             return SkyResult::Err(str_err(&format!("{}", e)));
         }
         if contents.len() as u64 > cap {

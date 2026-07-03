@@ -78,7 +78,10 @@ mod tests {
     #[test]
     fn live_req_parses_headers_and_cookies() {
         let mut h = axum::http::HeaderMap::new();
-        h.insert(axum::http::header::COOKIE, "sky_sid=abc; theme=dark".parse().unwrap());
+        h.insert(
+            axum::http::header::COOKIE,
+            "sky_sid=abc; theme=dark".parse().unwrap(),
+        );
         h.insert("x-custom", "v".parse().unwrap());
         let uri: axum::http::Uri = "/apps/sky?q=1".parse().unwrap();
         let req = live_req(

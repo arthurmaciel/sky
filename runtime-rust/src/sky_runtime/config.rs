@@ -24,7 +24,9 @@ pub fn db_last_insert_id(res: &sqlx::sqlite::SqliteQueryResult) -> i64 {
     res.last_insert_rowid()
 }
 #[cfg(feature = "db")]
-pub fn db_format_sql(sql: String) -> String { sql }  // sqlite uses `?` placeholders
+pub fn db_format_sql(sql: String) -> String {
+    sql
+} // sqlite uses `?` placeholders
 
 // Whether INSERT must use `… RETURNING id` to recover the auto-id (Postgres has
 // no LastInsertId). Generated projects override per driver; standalone = sqlite.

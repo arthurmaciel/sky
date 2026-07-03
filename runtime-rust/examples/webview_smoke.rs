@@ -12,7 +12,11 @@ fn view(n: i64) -> Html<i64> {
         "div".into(),
         vec![],
         vec![
-            Html::HElement("h1".into(), vec![], vec![Html::HText(format!("count: {n}"))]),
+            Html::HElement(
+                "h1".into(),
+                vec![],
+                vec![Html::HText(format!("count: {n}"))],
+            ),
             // A button that dispatches Msg = n+1 on click.
             Html::HElement(
                 "button".into(),
@@ -29,7 +33,10 @@ fn main() {
         |msg, _model| (msg, SkyCmd::None),
         view,
         |_m| SkySub::None,
-        WebviewWindowCfg { title: "Sky Webview smoke".into(), size: (420, 280) },
+        WebviewWindowCfg {
+            title: "Sky Webview smoke".into(),
+            size: (420, 280),
+        },
     );
     let _ = sky_runtime_rust::sky_runtime::task::block_on(task);
 }

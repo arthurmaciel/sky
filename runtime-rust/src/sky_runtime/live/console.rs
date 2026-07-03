@@ -47,7 +47,11 @@ pub async fn console_html() -> impl IntoResponse {
    tab=t.dataset.t;refresh();});
  refresh();setInterval(refresh,2000);
 </script></body></html>"#;
-    (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], body)
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
 }
 
 /// `GET /_sky/console/api/overview` — request + error counters.
@@ -62,12 +66,20 @@ pub async fn api_overview() -> impl IntoResponse {
 
 /// `GET /_sky/console/api/logs` — recent log ring (most recent 200).
 pub async fn api_logs() -> impl IntoResponse {
-    (StatusCode::OK, [json_ct()], telemetry::entries_json(&telemetry::recent_logs(200)))
+    (
+        StatusCode::OK,
+        [json_ct()],
+        telemetry::entries_json(&telemetry::recent_logs(200)),
+    )
 }
 
 /// `GET /_sky/console/api/errors` — recent error ring.
 pub async fn api_errors() -> impl IntoResponse {
-    (StatusCode::OK, [json_ct()], telemetry::entries_json(&telemetry::recent_errors(200)))
+    (
+        StatusCode::OK,
+        [json_ct()],
+        telemetry::entries_json(&telemetry::recent_errors(200)),
+    )
 }
 
 /// `GET /_sky/console/api/traces` — recent completed `Std.Trace.span`s.
@@ -203,10 +215,21 @@ pub fn gate_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::R
     let want = std::env::var("SKY_ADMIN_TOKEN")
         .ok()
         .filter(|t| !t.is_empty())
-        .or_else(|| std::env::var("SKY_CONSOLE_TOKEN").ok().filter(|t| !t.is_empty()))
-        .or_else(|| std::env::var("SKY_METRICS_TOKEN").ok().filter(|t| !t.is_empty()));
+        .or_else(|| {
+            std::env::var("SKY_CONSOLE_TOKEN")
+                .ok()
+                .filter(|t| !t.is_empty())
+        })
+        .or_else(|| {
+            std::env::var("SKY_METRICS_TOKEN")
+                .ok()
+                .filter(|t| !t.is_empty())
+        });
     let authed = match (want, headers.get(header::AUTHORIZATION)) {
-        (Some(tok), Some(h)) => h.to_str().map(|h| header_authorizes(h, &tok)).unwrap_or(false),
+        (Some(tok), Some(h)) => h
+            .to_str()
+            .map(|h| header_authorizes(h, &tok))
+            .unwrap_or(false),
         _ => false,
     };
     if authed {
@@ -214,7 +237,10 @@ pub fn gate_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::R
     } else {
         // Audit the denial (Go parity: `console.auth.denied` warn into the
         // telemetry ring) so an operator sees brute-force / probing attempts.
-        telemetry::record_log("warn", "console.auth.denied reason=bad-or-missing-credentials");
+        telemetry::record_log(
+            "warn",
+            "console.auth.denied reason=bad-or-missing-credentials",
+        );
         // WWW-Authenticate so a Prometheus `basic_auth` scraper (Go parity:
         // HandleMetrics realm "sky-metrics") gets a proper challenge instead of a
         // bare 401 it can't act on.
@@ -320,7 +346,10 @@ fn fold_log(it: &serde_json::Value) {
 /// is absent or wrong (constant-time compare). Unset → `None` (open endpoint).
 fn ingest_token_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::Response> {
     use subtle::ConstantTimeEq;
-    let want = match std::env::var("SKY_INGEST_TOKEN").ok().filter(|t| !t.is_empty()) {
+    let want = match std::env::var("SKY_INGEST_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+    {
         Some(t) => t,
         None => {
             // Unset token: open in dev (single-process / no federation), but in
@@ -346,7 +375,13 @@ fn ingest_token_blocked(headers: &axum::http::HeaderMap) -> Option<axum::respons
     if bool::from(got.as_bytes().ct_eq(want.as_bytes())) {
         None
     } else {
-        Some((StatusCode::UNAUTHORIZED, "invalid or missing X-Sky-Ingest-Token").into_response())
+        Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                "invalid or missing X-Sky-Ingest-Token",
+            )
+                .into_response(),
+        )
     }
 }
 

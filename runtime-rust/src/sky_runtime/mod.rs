@@ -6,28 +6,28 @@ pub mod config;
 pub mod config_decode;
 pub mod core;
 
-#[cfg(feature = "tokio")]
-pub mod task;
-#[cfg(feature = "tokio")]
-pub mod log;
-#[cfg(feature = "tokio")]
-pub mod trace;
-#[cfg(feature = "tokio")]
-pub mod system;
-pub mod time;
-pub mod random;
 #[cfg(feature = "crypto")]
 pub mod crypto;
 pub mod file;
+#[cfg(feature = "tokio")]
+pub mod log;
+pub mod random;
+#[cfg(feature = "tokio")]
+pub mod system;
+#[cfg(feature = "tokio")]
+pub mod task;
+pub mod time;
+#[cfg(feature = "tokio")]
+pub mod trace;
 pub use file::*;
 
 pub mod path;
 pub use path::*;
 
-#[cfg(feature = "json")]
-pub mod json;
 #[cfg(feature = "db")]
 pub mod db;
+#[cfg(feature = "json")]
+pub mod json;
 #[cfg(feature = "db")]
 pub use db::*;
 // Telemetry spill — write-through SQLite persistence behind the
@@ -39,21 +39,26 @@ pub use config::*;
 #[cfg(feature = "config")]
 pub use config_decode::*;
 pub use core::*;
-#[cfg(feature = "tokio")]
-pub use task::*;
-#[cfg(feature = "tokio")]
-pub use log::*;
-#[cfg(feature = "tokio")]
-pub use trace::*;
-#[cfg(feature = "tokio")]
-pub use system::*;
-pub use time::*;
-pub use random::*;
 #[cfg(feature = "json")]
 pub use json::*;
+#[cfg(feature = "tokio")]
+pub use log::*;
+pub use random::*;
+#[cfg(feature = "tokio")]
+pub use system::*;
+#[cfg(feature = "tokio")]
+pub use task::*;
+pub use time::*;
+#[cfg(feature = "tokio")]
+pub use trace::*;
 
 pub mod encoding;
 pub use encoding::*;
+
+// `Sky.Core.Bytes` — distinct `Vec<u8>` byte buffer (M4e).
+// Divergence from Sky: Sky aliases Bytes = String; Rust maps Bytes to Vec<u8>.
+pub mod bytes;
+pub use bytes::*;
 
 pub mod regex_kernel;
 pub use regex_kernel::*;

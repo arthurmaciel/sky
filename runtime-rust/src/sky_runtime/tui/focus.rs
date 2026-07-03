@@ -111,9 +111,7 @@ impl<M> Focusable<M> {
 
 /// Collect the `Event<M>`s carried by an attribute list (the `AttrEvent` →
 /// `html::Attribute::EventAttr` payloads).
-pub fn collect_events<M: Clone>(
-    attrs: &[super::super::ui::Attribute<M>],
-) -> Vec<Event<M>> {
+pub fn collect_events<M: Clone>(attrs: &[super::super::ui::Attribute<M>]) -> Vec<Event<M>> {
     let mut out = Vec::new();
     for a in attrs {
         if let super::super::ui::Attribute::AttrEvent(HtmlAttribute::EventAttr(ev)) = a {
@@ -334,7 +332,8 @@ fn line_starts(runes: &[char]) -> Vec<usize> {
 }
 
 fn is_space(c: Option<&char>) -> bool {
-    c.map(|c| c.is_whitespace() || matches!(c, '.' | ',' | ';' | ':' | '/' | '-' | '_')).unwrap_or(true)
+    c.map(|c| c.is_whitespace() || matches!(c, '.' | ',' | ';' | ':' | '/' | '-' | '_'))
+        .unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -342,7 +341,11 @@ mod tests {
     use super::*;
 
     fn st(s: &str, cur: usize) -> InputState {
-        InputState { buffer: s.into(), cursor: cur, last_value: s.into() }
+        InputState {
+            buffer: s.into(),
+            cursor: cur,
+            last_value: s.into(),
+        }
     }
 
     #[test]
@@ -422,7 +425,10 @@ mod tests {
             Got(String),
         }
         let events = vec![Event::OnString("input".into(), std::sync::Arc::new(M::Got))];
-        assert_eq!(extract_input_msg(&events, "input", "hi"), Some(M::Got("hi".into())));
+        assert_eq!(
+            extract_input_msg(&events, "input", "hi"),
+            Some(M::Got("hi".into()))
+        );
     }
 
     #[test]

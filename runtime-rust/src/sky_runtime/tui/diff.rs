@@ -14,7 +14,9 @@ pub fn diff(prev: &Grid, next: &Grid) -> Vec<(usize, usize, Cell)> {
     let full = prev.cols != next.cols || prev.rows != next.rows;
     for row in 0..next.rows {
         for col in 0..next.cols {
-            let Some(n) = next.get(col, row) else { continue };
+            let Some(n) = next.get(col, row) else {
+                continue;
+            };
             let changed = full || prev.get(col, row) != Some(n);
             if changed {
                 out.push((col, row, n.clone()));
@@ -29,7 +31,14 @@ mod tests {
     use super::*;
 
     fn put(g: &mut Grid, col: usize, row: usize, ch: char) {
-        g.set(col, row, Cell { ch, ..Cell::blank() });
+        g.set(
+            col,
+            row,
+            Cell {
+                ch,
+                ..Cell::blank()
+            },
+        );
     }
 
     #[test]

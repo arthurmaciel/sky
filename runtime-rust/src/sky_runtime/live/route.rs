@@ -19,7 +19,10 @@ pub struct Route<Page> {
 
 impl<Page> Route<Page> {
     pub fn new(pattern: &str, build: impl Fn(Vec<String>) -> Page + Send + Sync + 'static) -> Self {
-        Route { pattern: pattern.to_string(), build: Arc::new(build) }
+        Route {
+            pattern: pattern.to_string(),
+            build: Arc::new(build),
+        }
     }
 }
 
@@ -27,7 +30,11 @@ impl<Page> Route<Page> {
 /// `/` (so `/a/b/` and `/a/b` match the same), empty → no segments.
 fn split_path(p: &str) -> Vec<&str> {
     let t = p.trim_matches('/');
-    if t.is_empty() { Vec::new() } else { t.split('/').collect() }
+    if t.is_empty() {
+        Vec::new()
+    } else {
+        t.split('/').collect()
+    }
 }
 
 /// Match `path` against `pattern` (Go `matchRoute` parity): equal segment
@@ -63,7 +70,10 @@ pub fn match_routes<Page: Clone>(routes: &[Route<Page>], not_found: &Page, path:
 
 /// Name→value params for the first route matching `path` — for `req.params`.
 /// Zips the matched pattern's `:name` segments with the captured values.
-pub fn match_params<Page>(routes: &[Route<Page>], path: &str) -> crate::sky_runtime::dict::SkyDict<String> {
+pub fn match_params<Page>(
+    routes: &[Route<Page>],
+    path: &str,
+) -> crate::sky_runtime::dict::SkyDict<String> {
     use crate::sky_runtime::dict::SkyDict;
     for rt in routes {
         if let Some(values) = match_route(&rt.pattern, path) {
@@ -104,9 +114,18 @@ mod tests {
     fn matches_static_and_param_in_order() {
         let rs = routes();
         assert_eq!(match_routes(&rs, &Page::NF, "/"), Page::Home);
-        assert_eq!(match_routes(&rs, &Page::NF, "/apps/foo"), Page::App("foo".into()));
-        assert_eq!(match_routes(&rs, &Page::NF, "/apps/foo/"), Page::App("foo".into())); // trailing slash
-        assert_eq!(match_routes(&rs, &Page::NF, "/x/1/2"), Page::Two("1".into(), "2".into()));
+        assert_eq!(
+            match_routes(&rs, &Page::NF, "/apps/foo"),
+            Page::App("foo".into())
+        );
+        assert_eq!(
+            match_routes(&rs, &Page::NF, "/apps/foo/"),
+            Page::App("foo".into())
+        ); // trailing slash
+        assert_eq!(
+            match_routes(&rs, &Page::NF, "/x/1/2"),
+            Page::Two("1".into(), "2".into())
+        );
         assert_eq!(match_routes(&rs, &Page::NF, "/nope"), Page::NF); // notFound
         assert_eq!(match_routes(&rs, &Page::NF, "/apps"), Page::NF); // arity mismatch
         assert_eq!(match_routes(&rs, &Page::NF, "/apps/"), Page::NF); // trailing slash trims -> 1 seg

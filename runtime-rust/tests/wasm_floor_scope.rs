@@ -78,10 +78,8 @@ fn string_kernel_is_pure_and_total() {
 #[test]
 fn dict_kernel_is_pure_and_total() {
     // Dict.fromList / get — pure HashMap ops, deterministic sorted iteration.
-    let d = sky_runtime::dict::dict_from_list(vec![
-        ("a".to_string(), 1i64),
-        ("b".to_string(), 2i64),
-    ]);
+    let d =
+        sky_runtime::dict::dict_from_list(vec![("a".to_string(), 1i64), ("b".to_string(), 2i64)]);
     match sky_runtime::dict::dict_get("a".to_string(), d.clone()) {
         SkyMaybe::Just(v) => assert_eq!(v, 1),
         SkyMaybe::Nothing => panic!("test bug: present key missed"),
@@ -106,7 +104,10 @@ fn dict_kernel_is_pure_and_total() {
 fn json_kernel_encode_is_pure_and_total() {
     // JSON encode is a pure `Int -> Value -> String` — the floor's JSON leg.
     let obj = sky_runtime::json::json_enc_object(vec![
-        ("name".to_string(), sky_runtime::json::json_enc_string("sky".to_string())),
+        (
+            "name".to_string(),
+            sky_runtime::json::json_enc_string("sky".to_string()),
+        ),
         ("n".to_string(), sky_runtime::json::json_enc_int(42)),
         ("ok".to_string(), sky_runtime::json::json_enc_bool(true)),
     ]);

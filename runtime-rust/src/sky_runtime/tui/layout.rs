@@ -244,7 +244,9 @@ fn resolve_fixed_h(l: &Length, canvas: Canvas) -> Option<usize> {
         // Vh percentage is program-controlled (Ui.vh : Int -> Length): clamp the
         // resolved rows to MAX_CELLS so a huge percent can't drive an unbounded
         // pad-loop / Vec alloc (cells_x/y are already clamped; Vw/Vh bypass them).
-        Length::Vh(p) => Some((canvas.rows.saturating_mul((*p).max(0) as usize) / 100).min(MAX_CELLS)),
+        Length::Vh(p) => {
+            Some((canvas.rows.saturating_mul((*p).max(0) as usize) / 100).min(MAX_CELLS))
+        }
         Length::Content | Length::Fill(_) | Length::Vw(_) => None,
         Length::Min(n, inner) => {
             let mn = canvas.cells_y(*n);
@@ -300,8 +302,12 @@ fn resolve_fixed_w(l: &Length, available: usize, canvas: Canvas) -> Option<usize
         Length::Fill(_) => Some(available), // a direct ask claims all; the ROW pass overrides
         // Vw/Vh percentages are program-controlled: clamp to MAX_CELLS (see Vh in
         // resolve_fixed_h — these bypass the already-clamped cells_x/y path).
-        Length::Vw(p) => Some((canvas.cols.saturating_mul((*p).max(0) as usize) / 100).min(MAX_CELLS)),
-        Length::Vh(p) => Some((canvas.rows.saturating_mul((*p).max(0) as usize) / 100).min(MAX_CELLS)),
+        Length::Vw(p) => {
+            Some((canvas.cols.saturating_mul((*p).max(0) as usize) / 100).min(MAX_CELLS))
+        }
+        Length::Vh(p) => {
+            Some((canvas.rows.saturating_mul((*p).max(0) as usize) / 100).min(MAX_CELLS))
+        }
         Length::Min(n, inner) => {
             let mn = canvas.cells_x(*n);
             Some(resolve_fixed_w(inner, available, canvas).map_or(mn, |c| c.max(mn)))
@@ -340,7 +346,9 @@ impl Block {
         self.lines.len()
     }
     fn single(text: String, style: Style) -> Block {
-        Block { lines: vec![vec![Run { text, style }]] }
+        Block {
+            lines: vec![vec![Run { text, style }]],
+        }
     }
     /// Constrain every line to EXACTLY `w` display cells — pad shorter lines with
     /// `bg`-styled spaces, clip longer ones. For explicit `Ui.width (Ui.px n)`.
@@ -371,7 +379,10 @@ impl Block {
                             tw += cw;
                         }
                         used += tw;
-                        kept.push(Run { text, style: run.style });
+                        kept.push(Run {
+                            text,
+                            style: run.style,
+                        });
                         break;
                     }
                 }
@@ -381,14 +392,20 @@ impl Block {
                 if used < w {
                     kept.push(Run {
                         text: " ".repeat(w - used),
-                        style: Style { bg, ..Style::default() },
+                        style: Style {
+                            bg,
+                            ..Style::default()
+                        },
                     });
                 }
                 *line = kept;
             } else if lw < w {
                 line.push(Run {
                     text: " ".repeat(w - lw),
-                    style: Style { bg, ..Style::default() },
+                    style: Style {
+                        bg,
+                        ..Style::default()
+                    },
                 });
             }
         }
@@ -401,7 +418,11 @@ impl Block {
     fn fill_input_track(&mut self, w: usize, bg: Option<(u8, u8, u8)>, track_fg: (u8, u8, u8)) {
         let track_run = |n: usize| Run {
             text: "░".repeat(n),
-            style: Style { fg: Some(track_fg), bg, ..Style::default() },
+            style: Style {
+                fg: Some(track_fg),
+                bg,
+                ..Style::default()
+            },
         };
         for line in &mut self.lines {
             let lw: usize = line.iter().map(Run::width).sum();
@@ -429,7 +450,10 @@ impl Block {
                             tw += cw;
                         }
                         used += tw;
-                        kept.push(Run { text, style: run.style });
+                        kept.push(Run {
+                            text,
+                            style: run.style,
+                        });
                         break;
                     }
                 }
@@ -462,7 +486,10 @@ impl Block {
     /// and the trailing columns stay terminal-default (Go's `fillRect` covers just
     /// `box.width`). Total — no index/panic.
     fn backfill_root_bg(&mut self, cols: usize, root_bg: (u8, u8, u8), fill_to_edge: bool) {
-        let fill_style = Style { bg: Some(root_bg), ..Style::default() };
+        let fill_style = Style {
+            bg: Some(root_bg),
+            ..Style::default()
+        };
         for line in &mut self.lines {
             // Set the root bg on every run that has no bg of its own (a real glyph
             // on the root surface, or a blank gap/pad cell), preserving fg/flags.
@@ -477,7 +504,10 @@ impl Block {
             // background reaching the right edge). A line wider than `cols` is left
             // as-is — `emit_block` clips it to `cols` at paint time.
             if fill_to_edge && width < cols {
-                line.push(Run { text: " ".repeat(cols - width), style: fill_style });
+                line.push(Run {
+                    text: " ".repeat(cols - width),
+                    style: fill_style,
+                });
             }
         }
     }
@@ -489,7 +519,9 @@ impl Block {
     /// content). Adjacent same-style chars re-coalesce into runs. Total — uses
     /// iterators + `.get`, never indexes or unwraps.
     fn reverse_cell_at(&mut self, line: usize, col: usize) {
-        let Some(target_line) = self.lines.get_mut(line) else { return };
+        let Some(target_line) = self.lines.get_mut(line) else {
+            return;
+        };
         // Flatten to (char, style) cells, marking the cursor char's style reverse.
         let mut cells: Vec<(char, Style)> = Vec::new();
         let mut acc = 0usize;
@@ -497,7 +529,10 @@ impl Block {
             for ch in run.text.chars() {
                 let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
                 let style = if acc == col {
-                    Style { reverse: true, ..run.style }
+                    Style {
+                        reverse: true,
+                        ..run.style
+                    }
                 } else {
                     run.style
                 };
@@ -511,14 +546,23 @@ impl Block {
             for _ in acc..col {
                 cells.push((' ', Style::default()));
             }
-            cells.push((' ', Style { reverse: true, ..Style::default() }));
+            cells.push((
+                ' ',
+                Style {
+                    reverse: true,
+                    ..Style::default()
+                },
+            ));
         }
         // Re-coalesce adjacent cells sharing a style into runs.
         let mut out: Vec<Run> = Vec::new();
         for (ch, style) in cells {
             match out.last_mut() {
                 Some(last) if last.style == style => last.text.push(ch),
-                _ => out.push(Run { text: ch.to_string(), style }),
+                _ => out.push(Run {
+                    text: ch.to_string(),
+                    style,
+                }),
             }
         }
         *target_line = out;
@@ -708,7 +752,13 @@ fn vstack(children: Vec<Rendered>, gap: usize, bg: Option<(u8, u8, u8)>) -> Rend
     let gap_row = |w: &mut Block| {
         for _ in 0..gap {
             match bg {
-                Some(c) => w.lines.push(vec![Run { text: " ".repeat(stack_w), style: Style { bg: Some(c), ..Style::default() } }]),
+                Some(c) => w.lines.push(vec![Run {
+                    text: " ".repeat(stack_w),
+                    style: Style {
+                        bg: Some(c),
+                        ..Style::default()
+                    },
+                }]),
                 None => w.lines.push(Vec::new()),
             }
         }
@@ -734,9 +784,14 @@ fn vstack(children: Vec<Rendered>, gap: usize, bg: Option<(u8, u8, u8)>) -> Rend
 fn hstack(children: Vec<Rendered>, gap: usize, bg: Option<(u8, u8, u8)>) -> Rendered {
     // Gap columns + short-child filler take the row's bg when set (audit #5), else
     // terminal-default.
-    let fill_style = Style { bg, ..Style::default() };
+    let fill_style = Style {
+        bg,
+        ..Style::default()
+    };
     let height = children.iter().map(|r| r.block.height()).max().unwrap_or(0);
-    let mut block = Block { lines: vec![Vec::new(); height] };
+    let mut block = Block {
+        lines: vec![Vec::new(); height],
+    };
     let mut hits = Vec::new();
     let mut col0 = 0usize;
     for (bi, r) in children.iter().enumerate() {
@@ -751,7 +806,10 @@ fn hstack(children: Vec<Rendered>, gap: usize, bg: Option<(u8, u8, u8)>) -> Rend
         for row in 0..height {
             if let Some(target) = block.lines.get_mut(row) {
                 if bi > 0 && gap > 0 {
-                    target.push(Run { text: " ".repeat(gap), style: fill_style });
+                    target.push(Run {
+                        text: " ".repeat(gap),
+                        style: fill_style,
+                    });
                 }
                 match r.block.lines.get(row) {
                     Some(line) => {
@@ -767,7 +825,10 @@ fn hstack(children: Vec<Rendered>, gap: usize, bg: Option<(u8, u8, u8)>) -> Rend
                             });
                         }
                     }
-                    None => target.push(Run { text: " ".repeat(bw), style: fill_style }),
+                    None => target.push(Run {
+                        text: " ".repeat(bw),
+                        style: fill_style,
+                    }),
                 }
             }
         }
@@ -810,7 +871,11 @@ fn overlay_blocks(base: Rendered, top: Rendered, top_wins: bool) -> Rendered {
             let (ch, st) = match (t, b) {
                 (Some(tcell), Some(bcell)) => {
                     if top_wins {
-                        if tcell.0 == ' ' { bcell } else { tcell }
+                        if tcell.0 == ' ' {
+                            bcell
+                        } else {
+                            tcell
+                        }
                     } else if bcell.0 == ' ' {
                         tcell
                     } else {
@@ -823,14 +888,20 @@ fn overlay_blocks(base: Rendered, top: Rendered, top_wins: bool) -> Rendered {
             };
             match runs.last_mut() {
                 Some(last) if last.style == st => last.text.push(ch),
-                _ => runs.push(Run { text: ch.to_string(), style: st }),
+                _ => runs.push(Run {
+                    text: ch.to_string(),
+                    style: st,
+                }),
             }
         }
         out_lines.push(runs);
     }
     let mut hits = base.hits;
     hits.extend(top.hits);
-    Rendered { block: Block { lines: out_lines }, hits }
+    Rendered {
+        block: Block { lines: out_lines },
+        hits,
+    }
 }
 
 fn apply_padding(inner: Rendered, w: &Walked, canvas: Canvas, self_style: Style) -> Rendered {
@@ -840,7 +911,10 @@ fn apply_padding(inner: Rendered, w: &Walked, canvas: Canvas, self_style: Style)
     let right = canvas.cells_x(w.pad_right);
     let inner_w = inner.block.width();
     let total_w = inner_w + left + right;
-    let pad_run = |n: usize| Run { text: " ".repeat(n), style: self_style };
+    let pad_run = |n: usize| Run {
+        text: " ".repeat(n),
+        style: self_style,
+    };
 
     let mut block = Block::default();
     for _ in 0..top {
@@ -862,7 +936,11 @@ fn apply_padding(inner: Rendered, w: &Walked, canvas: Canvas, self_style: Style)
     for _ in 0..bottom {
         block.lines.push(vec![pad_run(total_w)]);
     }
-    let hits = inner.hits.into_iter().map(|(idx, l, c, w, h)| (idx, l + top, c + left, w, h)).collect();
+    let hits = inner
+        .hits
+        .into_iter()
+        .map(|(idx, l, c, w, h)| (idx, l + top, c + left, w, h))
+        .collect();
     Rendered { block, hits }
 }
 
@@ -898,9 +976,16 @@ fn render_input<M: Clone>(
     // Sanitize value/placeholder: both are seeded from Sky `Attr.value` /
     // `Attr.placeholder` (attacker-controllable model data) and rendered into the
     // terminal stream — an unescaped `\x1b` would inject ANSI/OSC sequences.
-    let value: String = attr_str(attrs, "value").unwrap_or("").chars().map(sanitize_rune).collect();
-    let placeholder: String =
-        attr_str(attrs, "placeholder").unwrap_or("").chars().map(sanitize_rune).collect();
+    let value: String = attr_str(attrs, "value")
+        .unwrap_or("")
+        .chars()
+        .map(sanitize_rune)
+        .collect();
+    let placeholder: String = attr_str(attrs, "placeholder")
+        .unwrap_or("")
+        .chars()
+        .map(sanitize_rune)
+        .collect();
     // Checked detection. A checkbox uses `checked`/`value="true"`. A radio in the
     // common hand-rolled idiom (`value = if selected then val else ""`) signals
     // selection by a NON-EMPTY value — so a radio is checked when an explicit
@@ -922,24 +1007,44 @@ fn render_input<M: Clone>(
     let mut block: Block = match input_type.as_str() {
         "checkbox" => {
             let g = if checked { "☑" } else { "☐" };
-            Block::single(g.to_string(), Style { reverse: focused, ..style })
+            Block::single(
+                g.to_string(),
+                Style {
+                    reverse: focused,
+                    ..style
+                },
+            )
         }
         "radio" => {
             let g = if checked { "●" } else { "○" };
-            Block::single(g.to_string(), Style { reverse: focused, ..style })
+            Block::single(
+                g.to_string(),
+                Style {
+                    reverse: focused,
+                    ..style
+                },
+            )
         }
         "range" => {
             // Track with the thumb positioned at value within [min, max]. Track
             // width follows `Ui.width` (was a fixed 12 — the slider rendered
             // narrower than its declared width); fall back to 12 when unsized.
-            let min: f64 = attr_str(attrs, "min").and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
-            let max: f64 = attr_str(attrs, "max").and_then(|s| s.trim().parse().ok()).unwrap_or(100.0);
+            let min: f64 = attr_str(attrs, "min")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0.0);
+            let max: f64 = attr_str(attrs, "max")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(100.0);
             let val: f64 = value.trim().parse().unwrap_or(min);
             let width = width_length(attrs)
                 .and_then(|l| resolve_fixed_w(&l, avail_w, ctx.canvas))
                 .unwrap_or(12)
                 .max(3);
-            let frac = if max > min { ((val - min) / (max - min)).clamp(0.0, 1.0) } else { 0.0 };
+            let frac = if max > min {
+                ((val - min) / (max - min)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             // Inset the thumb to the INNER span [1, width-2] so it is never
             // overwritten by the `├`/`┤` end-glyphs (the "ball disappears at the
             // extremes" report — at val≈0/100 the thumb landed on position
@@ -960,7 +1065,13 @@ fn render_input<M: Clone>(
                     }
                 })
                 .collect();
-            Block::single(track, Style { reverse: focused, ..style })
+            Block::single(
+                track,
+                Style {
+                    reverse: focused,
+                    ..style
+                },
+            )
         }
         _ => {
             // Text-like input (incl. textarea): sync the edit buffer to the model's
@@ -977,14 +1088,22 @@ fn render_input<M: Clone>(
                 // EDIT position (st.cursor), not always the end — Left/Home/Ctrl-Left
                 // move the caret and it must render where the caret actually is.
                 let n = st.buffer.chars().count();
-                if focused { Some((0, st.cursor.min(n))) } else { None }
+                if focused {
+                    Some((0, st.cursor.min(n)))
+                } else {
+                    None
+                }
             } else if st.buffer.is_empty() && !focused {
                 None
             } else {
                 let runes: Vec<char> = st.buffer.chars().collect();
                 let cursor = st.cursor.min(runes.len());
                 let (cl, cc) = cursor_line_col(&runes, cursor);
-                if focused { Some((cl, cc)) } else { None }
+                if focused {
+                    Some((cl, cc))
+                } else {
+                    None
+                }
             };
             let block = if masked {
                 Block::single("•".repeat(st.buffer.chars().count()), run_style)
@@ -994,16 +1113,28 @@ fn render_input<M: Clone>(
                 if placeholder.is_empty() {
                     Block::single(String::new(), run_style)
                 } else {
-                    Block::single(placeholder.clone(), Style { italic: true, ..run_style })
+                    Block::single(
+                        placeholder.clone(),
+                        Style {
+                            italic: true,
+                            ..run_style
+                        },
+                    )
                 }
             } else {
                 let runes: Vec<char> = st.buffer.chars().collect();
                 let mut out: Vec<Vec<Run>> = Vec::new();
                 for seg in split_buffer_lines(&runes) {
-                    out.push(vec![Run { text: seg.into_iter().collect(), style: run_style }]);
+                    out.push(vec![Run {
+                        text: seg.into_iter().collect(),
+                        style: run_style,
+                    }]);
                 }
                 if out.is_empty() {
-                    out.push(vec![Run { text: String::new(), style: run_style }]);
+                    out.push(vec![Run {
+                        text: String::new(),
+                        style: run_style,
+                    }]);
                 }
                 Block { lines: out }
             };
@@ -1030,14 +1161,20 @@ fn render_input<M: Clone>(
     for a in attrs {
         match a {
             Attribute::AttrBorderWidth(n) if *n > 0 => bw = *n,
-            Attribute::AttrBorderWidthEach(t, r, b, l) if t + r + b + l > 0 => bw = (t + r + b + l).max(1),
+            Attribute::AttrBorderWidthEach(t, r, b, l) if t + r + b + l > 0 => {
+                bw = (t + r + b + l).max(1)
+            }
             Attribute::AttrBorderColor(c) => bcolor = Some(c.clone()),
             Attribute::AttrBorderStyle(s) => bsty = s.clone(),
             _ => {}
         }
     }
     let border_spec: Option<BorderSpec> = if bw > 0 {
-        Some((bcolor.as_ref().map(color_of), bsty, (true, true, true, true)))
+        Some((
+            bcolor.as_ref().map(color_of),
+            bsty,
+            (true, true, true, true),
+        ))
     } else {
         None
     };
@@ -1078,9 +1215,15 @@ fn render_input<M: Clone>(
             let total = block.lines.len();
             if total > inner_rows {
                 let cur_line = cursor_marker.map(|(l, _)| l).unwrap_or(0);
-                let start = cur_line.saturating_sub(inner_rows - 1).min(total - inner_rows);
+                let start = cur_line
+                    .saturating_sub(inner_rows - 1)
+                    .min(total - inner_rows);
                 let end = (start + inner_rows).min(block.lines.len());
-                block.lines = block.lines.get(start..end).map(<[Vec<Run>]>::to_vec).unwrap_or_default();
+                block.lines = block
+                    .lines
+                    .get(start..end)
+                    .map(<[Vec<Run>]>::to_vec)
+                    .unwrap_or_default();
             } else {
                 // Pad with blank track rows so the box keeps its fixed height.
                 let track_w = block.width();
@@ -1088,7 +1231,11 @@ fn render_input<M: Clone>(
                 while block.lines.len() < inner_rows {
                     block.lines.push(vec![Run {
                         text: "░".repeat(track_w),
-                        style: Style { fg: Some(tfg), bg: style.bg, ..Style::default() },
+                        style: Style {
+                            fg: Some(tfg),
+                            bg: style.bg,
+                            ..Style::default()
+                        },
                     }]);
                 }
             }
@@ -1107,7 +1254,10 @@ fn render_input<M: Clone>(
         width,
         height,
     });
-    let rendered = Rendered { block, hits: vec![(idx, 0, 0, width, height)] };
+    let rendered = Rendered {
+        block,
+        hits: vec![(idx, 0, 0, width, height)],
+    };
     match &border_spec {
         Some(spec) => frame_rendered(rendered, spec, style),
         None => rendered,
@@ -1153,13 +1303,24 @@ fn render_node<M: Clone>(
     // Bound recursion depth (stack-overflow guard on a deeply-nested tree).
     let _depth = match DepthGuard::enter() {
         Some(g) => g,
-        None => return Rendered { block: Block::default(), hits: vec![] },
+        None => {
+            return Rendered {
+                block: Block::default(),
+                hits: vec![],
+            }
+        }
     };
     match node {
-        Element::Empty => Rendered { block: Block::default(), hits: vec![] },
+        Element::Empty => Rendered {
+            block: Block::default(),
+            hits: vec![],
+        },
         Element::Text(t) => {
             let clean: String = t.chars().map(sanitize_rune).collect();
-            Rendered { block: Block::single(clean, inherited), hits: vec![] }
+            Rendered {
+                block: Block::single(clean, inherited),
+                hits: vec![],
+            }
         }
         Element::Raw(h) => {
             // `Ui.html` (Std.Html escape hatch): the terminal can't render markup,
@@ -1167,13 +1328,24 @@ fn render_node<M: Clone>(
             // blank region (audit #22). Empty → nothing.
             let text = html_text(h);
             if text.trim().is_empty() {
-                Rendered { block: Block::default(), hits: vec![] }
+                Rendered {
+                    block: Block::default(),
+                    hits: vec![],
+                }
             } else {
                 let lines: Vec<Vec<Run>> = wrap_text(&text, avail_w.max(1))
                     .into_iter()
-                    .map(|l| vec![Run { text: l, style: inherited }])
+                    .map(|l| {
+                        vec![Run {
+                            text: l,
+                            style: inherited,
+                        }]
+                    })
                     .collect();
-                Rendered { block: Block { lines }, hits: vec![] }
+                Rendered {
+                    block: Block { lines },
+                    hits: vec![],
+                }
             }
         }
         Element::TaggedNode(tag, _desc, attrs, _kids) if tag == "input" || tag == "textarea" => {
@@ -1198,12 +1370,21 @@ fn render_node<M: Clone>(
             });
             let w = walk_attrs(attrs, inherited);
             let content_avail = node_content_avail(avail_w, &w, ctx.canvas);
-            let label_style = Style { reverse: focused, ..w.style };
-            let child_blocks: Vec<Rendered> =
-                kids.iter().map(|k| render_node(k, label_style, ctx, content_avail)).collect();
+            let label_style = Style {
+                reverse: focused,
+                ..w.style
+            };
+            let child_blocks: Vec<Rendered> = kids
+                .iter()
+                .map(|k| render_node(k, label_style, ctx, content_avail))
+                .collect();
             let mut inner = match w.dir {
                 Dir::Column => vstack(child_blocks, 0, label_style.bg),
-                Dir::Row => hstack(child_blocks, ctx.canvas.cells_x(w.spacing_px), label_style.bg),
+                Dir::Row => hstack(
+                    child_blocks,
+                    ctx.canvas.cells_x(w.spacing_px),
+                    label_style.bg,
+                ),
             };
             apply_self_width(&mut inner.block, &w, content_avail, ctx.canvas);
             let mut padded = apply_padding(inner, &w, ctx.canvas, label_style);
@@ -1243,17 +1424,19 @@ fn render_node<M: Clone>(
                             lines.push(Vec::new());
                         }
                         for l in wrap_text(&extract_text(k), wrap_w) {
-                            lines.push(vec![Run { text: l, style: w.style }]);
+                            lines.push(vec![Run {
+                                text: l,
+                                style: w.style,
+                            }]);
                         }
                     }
                 } else {
-                    let joined = kids
-                        .iter()
-                        .map(extract_text)
-                        .collect::<Vec<_>>()
-                        .join(" ");
+                    let joined = kids.iter().map(extract_text).collect::<Vec<_>>().join(" ");
                     for l in wrap_text(&joined, wrap_w) {
-                        lines.push(vec![Run { text: l, style: w.style }]);
+                        lines.push(vec![Run {
+                            text: l,
+                            style: w.style,
+                        }]);
                     }
                 }
                 if lines.is_empty() {
@@ -1268,7 +1451,10 @@ fn render_node<M: Clone>(
                 if w.style.bg.is_some() {
                     block.set_width(wrap_w, w.style.bg);
                 }
-                Rendered { block, hits: vec![] }
+                Rendered {
+                    block,
+                    hits: vec![],
+                }
             } else if w.is_grid {
                 render_grid(kids, &w, ctx, content_avail)
             } else {
@@ -1282,7 +1468,8 @@ fn render_node<M: Clone>(
                     let r = render_node(k, w.style, ctx, content_avail);
                     if r.block.height() > 0 {
                         specs.push(child_width_length(k).and_then(|l| fill_spec(&l, ctx.canvas)));
-                        h_specs.push(child_height_length(k).and_then(|l| fill_spec(&l, ctx.canvas)));
+                        h_specs
+                            .push(child_height_length(k).and_then(|l| fill_spec(&l, ctx.canvas)));
                         aligns.push(child_align(k));
                         children.push(r);
                     }
@@ -1300,8 +1487,18 @@ fn render_node<M: Clone>(
                 // In a fixed-height COLUMN, height-fill children split the leftover
                 // vertical space (audit #2/#4). Needs the column's resolved height.
                 if w.dir == Dir::Column {
-                    if let Some(th) = w.height.as_ref().and_then(|l| resolve_fixed_h(l, ctx.canvas)) {
-                        distribute_col_fill(&mut children, &h_specs, th, ctx.canvas.cells_y(w.spacing_px), w.style.bg);
+                    if let Some(th) = w
+                        .height
+                        .as_ref()
+                        .and_then(|l| resolve_fixed_h(l, ctx.canvas))
+                    {
+                        distribute_col_fill(
+                            &mut children,
+                            &h_specs,
+                            th,
+                            ctx.canvas.cells_y(w.spacing_px),
+                            w.style.bg,
+                        );
                     }
                 }
                 // Cross-axis alignment: offset each child within the stack's cross
@@ -1332,10 +1529,17 @@ fn render_node<M: Clone>(
                     }
                 }
                 let mut inner = if children.is_empty() {
-                    Rendered { block: Block { lines: vec![Vec::new()] }, hits: vec![] }
+                    Rendered {
+                        block: Block {
+                            lines: vec![Vec::new()],
+                        },
+                        hits: vec![],
+                    }
                 } else {
                     match w.dir {
-                        Dir::Column => vstack(children, ctx.canvas.cells_y(w.spacing_px), w.style.bg),
+                        Dir::Column => {
+                            vstack(children, ctx.canvas.cells_y(w.spacing_px), w.style.bg)
+                        }
                         Dir::Row => hstack(children, ctx.canvas.cells_x(w.spacing_px), w.style.bg),
                     }
                 };
@@ -1348,12 +1552,25 @@ fn render_node<M: Clone>(
             // content-sized box has no slack, so it's a no-op there. (audit #7)
             if let Some(fa) = w.font_align {
                 let sized = !matches!(w.width, None | Some(Length::Content));
-                let target = if sized { content_avail } else { inner.block.width() };
+                let target = if sized {
+                    content_avail
+                } else {
+                    inner.block.width()
+                };
                 for line in &mut inner.block.lines {
                     let lw: usize = line.iter().map(Run::width).sum();
                     let off = halign_offset(Some(fa), target.saturating_sub(lw));
                     if off > 0 {
-                        line.insert(0, Run { text: " ".repeat(off), style: Style { bg: w.style.bg, ..Style::default() } });
+                        line.insert(
+                            0,
+                            Run {
+                                text: " ".repeat(off),
+                                style: Style {
+                                    bg: w.style.bg,
+                                    ..Style::default()
+                                },
+                            },
+                        );
                     }
                 }
             }
@@ -1528,7 +1745,11 @@ fn render_grid<M: Clone>(
     }
     let min_col = {
         let c = ctx.canvas.cells_x(w.grid_min_px);
-        if c == 0 { 10 } else { c }
+        if c == 0 {
+            10
+        } else {
+            c
+        }
     };
     let avail = content_avail.max(1);
     let ncols = (avail / min_col).max(1);
@@ -1538,8 +1759,10 @@ fn render_grid<M: Clone>(
     // Render every child at col_width (its own content fits within); collect into
     // a flat list (skipping empty blocks would break row-major alignment, so keep
     // ALL cells in order).
-    let cells: Vec<Rendered> =
-        kids.iter().map(|k| render_node(k, w.style, ctx, col_width)).collect();
+    let cells: Vec<Rendered> = kids
+        .iter()
+        .map(|k| render_node(k, w.style, ctx, col_width))
+        .collect();
 
     // Chunk row-major into rows of `ncols`, hstack each row (no inter-cell gap —
     // each cell is padded to col_width, matching Go's `x = innerCol + col*colWidth`),
@@ -1548,7 +1771,10 @@ fn render_grid<M: Clone>(
     for chunk in cells.chunks(ncols.max(1)) {
         let mut sized: Vec<Rendered> = Vec::new();
         for r in chunk {
-            let mut r2 = Rendered { block: r.block.clone(), hits: r.hits.clone() };
+            let mut r2 = Rendered {
+                block: r.block.clone(),
+                hits: r.hits.clone(),
+            };
             // Pad the cell to col_width with the CELL's OWN bg, not the grid's — Go
             // gives each grid cell box `width = colWidth` and fills it with that
             // cell's `box.bg` (`60 50 80` here), so the padding to col_width carries
@@ -1652,9 +1878,18 @@ fn frame_rendered(inner: Rendered, spec: &BorderSpec, self_style: Style) -> Rend
     let (hor, vert, tl, tr, bl, br) = border_glyphs(style);
     // Border runs inherit the frame fg (when set) but keep the node's bg so the
     // box reads as one filled rect.
-    let bstyle = Style { fg: border_fg.or(self_style.fg), ..self_style };
-    let edge = |ch: &str, n: usize| Run { text: ch.repeat(n), style: bstyle };
-    let corner = |ch: &str| Run { text: ch.to_string(), style: bstyle };
+    let bstyle = Style {
+        fg: border_fg.or(self_style.fg),
+        ..self_style
+    };
+    let edge = |ch: &str, n: usize| Run {
+        text: ch.repeat(n),
+        style: bstyle,
+    };
+    let corner = |ch: &str| Run {
+        text: ch.to_string(),
+        style: bstyle,
+    };
 
     // A horizontal edge row carries a corner only where a vertical side also
     // meets it; otherwise the edge glyph runs the full width (a partial border —
@@ -1685,7 +1920,10 @@ fn frame_rendered(inner: Rendered, spec: &BorderSpec, self_style: Style) -> Rend
         let lw: usize = line.iter().map(Run::width).sum();
         row.extend(line.iter().cloned());
         if lw < inner_w {
-            row.push(Run { text: " ".repeat(inner_w - lw), style: self_style });
+            row.push(Run {
+                text: " ".repeat(inner_w - lw),
+                style: self_style,
+            });
         }
         if s_right {
             row.push(corner(vert));
@@ -1698,13 +1936,26 @@ fn frame_rendered(inner: Rendered, spec: &BorderSpec, self_style: Style) -> Rend
     // Content + focusables shift by the present top/left edges.
     let dl = usize::from(s_top);
     let dc = usize::from(s_left);
-    let hits = inner.hits.into_iter().map(|(idx, l, c, ww, hh)| (idx, l + dl, c + dc, ww, hh)).collect();
+    let hits = inner
+        .hits
+        .into_iter()
+        .map(|(idx, l, c, ww, hh)| (idx, l + dl, c + dc, ww, hh))
+        .collect();
     Rendered { block, hits }
 }
 
 /// Box-drawing glyphs `(hor, vert, tl, tr, bl, br)` for a border style. Mirrors
 /// Go's `borderGlyphs`: dashed ┄┆, dotted ┈┊, everything else solid ─│.
-fn border_glyphs(style: &str) -> (&'static str, &'static str, &'static str, &'static str, &'static str, &'static str) {
+fn border_glyphs(
+    style: &str,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
     match style {
         "dashed" => ("┄", "┆", "┌", "┐", "└", "┘"),
         "dotted" => ("┈", "┊", "┌", "┐", "└", "┘"),
@@ -1772,7 +2023,13 @@ fn apply_self_height(block: &mut Block, w: &Walked, canvas: Canvas) {
     if block.lines.len() > rows {
         block.lines.truncate(rows.max(1));
     } else {
-        let blank = vec![Run { text: " ".repeat(width), style: Style { bg: w.style.bg, ..Style::default() } }];
+        let blank = vec![Run {
+            text: " ".repeat(width),
+            style: Style {
+                bg: w.style.bg,
+                ..Style::default()
+            },
+        }];
         while block.lines.len() < rows {
             block.lines.push(blank.clone());
         }
@@ -1812,7 +2069,13 @@ fn distribute_col_fill(
         return;
     }
     let is_fill = |i: usize| specs.get(i).copied().flatten().is_some();
-    let portion = |i: usize| specs.get(i).copied().flatten().map_or(1usize, |(p, _, _)| p.max(1) as usize);
+    let portion = |i: usize| {
+        specs
+            .get(i)
+            .copied()
+            .flatten()
+            .map_or(1usize, |(p, _, _)| p.max(1) as usize)
+    };
     let fill_idx: Vec<usize> = (0..n).filter(|i| is_fill(*i)).collect();
     if fill_idx.is_empty() {
         return;
@@ -1845,7 +2108,13 @@ fn distribute_col_fill(
             if cur > share {
                 child.block.lines.truncate(share.max(1));
             } else {
-                let blank = vec![Run { text: " ".repeat(cw), style: Style { bg, ..Style::default() } }];
+                let blank = vec![Run {
+                    text: " ".repeat(cw),
+                    style: Style {
+                        bg,
+                        ..Style::default()
+                    },
+                }];
                 while child.block.lines.len() < share {
                     child.block.lines.push(blank.clone());
                 }
@@ -1898,7 +2167,13 @@ fn pad_left_block(r: &mut Rendered, off: usize, bg: Option<(u8, u8, u8)>) {
     if off == 0 {
         return;
     }
-    let pad = Run { text: " ".repeat(off), style: Style { bg, ..Style::default() } };
+    let pad = Run {
+        text: " ".repeat(off),
+        style: Style {
+            bg,
+            ..Style::default()
+        },
+    };
     for line in &mut r.block.lines {
         line.insert(0, pad.clone());
     }
@@ -1913,7 +2188,13 @@ fn pad_top_block(r: &mut Rendered, off: usize, width: usize, bg: Option<(u8, u8,
     if off == 0 {
         return;
     }
-    let blank = vec![Run { text: " ".repeat(width), style: Style { bg, ..Style::default() } }];
+    let blank = vec![Run {
+        text: " ".repeat(width),
+        style: Style {
+            bg,
+            ..Style::default()
+        },
+    }];
     let mut lines = Vec::with_capacity(off + r.block.lines.len());
     for _ in 0..off {
         lines.push(blank.clone());
@@ -1991,7 +2272,11 @@ const SGR_RESET: &str = "\x1b[0m";
 /// (bold/italic/underline/…) are kept, only colour is dropped. Cached once.
 fn no_color() -> bool {
     static NC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *NC.get_or_init(|| std::env::var_os("NO_COLOR").map(|v| !v.is_empty()).unwrap_or(false))
+    *NC.get_or_init(|| {
+        std::env::var_os("NO_COLOR")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    })
 }
 
 fn sgr(style: Style) -> String {
@@ -2084,7 +2369,12 @@ pub fn render_with_focus<M: Clone>(
     scroll_y: usize,
 ) -> (String, Vec<Focusable<M>>, usize) {
     let canvas = Canvas::new(cols, rows);
-    let mut ctx = Ctx { canvas, focus_idx, focusables: Vec::new(), inputs };
+    let mut ctx = Ctx {
+        canvas,
+        focus_idx,
+        focusables: Vec::new(),
+        inputs,
+    };
     let mut rendered = render_node(view, Style::default(), &mut ctx, cols);
     // Backfill the root element's page background across the full frame rect — the
     // gap / padding / trailing cells no child covered take the root bg (Go paints
@@ -2150,8 +2440,10 @@ mod tests {
 
     #[test]
     fn text_with_fg() {
-        let t: Element<()> =
-            node(vec![Attribute::AttrFontColor(rgb(255, 0, 0))], vec![Element::Text("hi".into())]);
+        let t: Element<()> = node(
+            vec![Attribute::AttrFontColor(rgb(255, 0, 0))],
+            vec![Element::Text("hi".into())],
+        );
         let frame = element_to_cells(&t, 80, 24);
         assert!(frame.contains("38;2;255;0;0"));
         assert!(frame.contains("hi"));
@@ -2182,7 +2474,11 @@ mod tests {
     fn focusables_collected_in_order() {
         let t: Element<()> = node(
             vec![],
-            vec![input("text", "a"), input("checkbox", "false"), input("radio", "x")],
+            vec![
+                input("text", "a"),
+                input("checkbox", "false"),
+                input("radio", "x"),
+            ],
         );
         let mut reg = InputRegistry::new();
         let (_f, focusables, _h) = render_with_focus(&t, 80, 24, usize::MAX, &mut reg, 0);
@@ -2196,26 +2492,38 @@ mod tests {
         let t: Element<()> = node(vec![], vec![input("text", "hi")]);
         let mut reg = InputRegistry::new();
         let (frame, _f, _h) = render_with_focus(&t, 80, 24, 0, &mut reg, 0);
-        assert!(frame.contains("\x1b[7"), "focused input reverse-video: {frame:?}");
+        assert!(
+            frame.contains("\x1b[7"),
+            "focused input reverse-video: {frame:?}"
+        );
     }
 
     #[test]
     fn fill_width_expands_to_avail() {
         let t: Element<()> = node(
-            vec![Attribute::AttrWidth(Length::Fill(1)), Attribute::AttrBgColor(rgb(5, 6, 7))],
+            vec![
+                Attribute::AttrWidth(Length::Fill(1)),
+                Attribute::AttrBgColor(rgb(5, 6, 7)),
+            ],
             vec![Element::Text("x".into())],
         );
         let frame = element_to_cells(&t, 20, 24);
         let first = frame.split("\r\n").next().unwrap_or("");
         let spaces = first.matches(' ').count();
-        assert!(spaces >= 15, "fill expanded toward 20 cols: {first:?} ({spaces} spaces)");
+        assert!(
+            spaces >= 15,
+            "fill expanded toward 20 cols: {first:?} ({spaces} spaces)"
+        );
     }
 
     #[test]
     fn explicit_px_width_pads_box() {
         // canvas px_per_cell_x = 1280/80 = 16 → 160px ≈ 10 cells.
         let t: Element<()> = node(
-            vec![Attribute::AttrWidth(Length::Px(160)), Attribute::AttrBgColor(rgb(1, 2, 3))],
+            vec![
+                Attribute::AttrWidth(Length::Px(160)),
+                Attribute::AttrBgColor(rgb(1, 2, 3)),
+            ],
             vec![Element::Text("hi".into())],
         );
         let frame = element_to_cells(&t, 80, 24);
@@ -2229,13 +2537,19 @@ mod tests {
     fn vw_width_resolves_to_viewport_fraction() {
         // Vw(50) on 80 cols → ~40 cells of bg.
         let t: Element<()> = node(
-            vec![Attribute::AttrWidth(Length::Vw(50)), Attribute::AttrBgColor(rgb(9, 9, 9))],
+            vec![
+                Attribute::AttrWidth(Length::Vw(50)),
+                Attribute::AttrBgColor(rgb(9, 9, 9)),
+            ],
             vec![Element::Text("x".into())],
         );
         let frame = element_to_cells(&t, 80, 24);
         let first = frame.split("\r\n").next().unwrap_or("");
         let spaces = first.matches(' ').count();
-        assert!((30..=45).contains(&spaces), "Vw(50)≈40 cols: {first:?} ({spaces} spaces)");
+        assert!(
+            (30..=45).contains(&spaces),
+            "Vw(50)≈40 cols: {first:?} ({spaces} spaces)"
+        );
     }
 
     #[test]
@@ -2250,7 +2564,10 @@ mod tests {
         );
         let frame = element_to_cells(&t, 80, 24);
         let first = frame.split("\r\n").next().unwrap_or("");
-        assert!(first.matches(' ').count() >= 5, "min floored padding: {first:?}");
+        assert!(
+            first.matches(' ').count() >= 5,
+            "min floored padding: {first:?}"
+        );
     }
 
     #[test]
@@ -2266,15 +2583,23 @@ mod tests {
         let frame = element_to_cells(&t, 80, 24);
         let first = frame.split("\r\n").next().unwrap_or("");
         let spaces = first.matches(' ').count();
-        assert!((3..=15).contains(&spaces), "Max caps fill at ~10 cols: {first:?} ({spaces})");
+        assert!(
+            (3..=15).contains(&spaces),
+            "Max caps fill at ~10 cols: {first:?} ({spaces})"
+        );
     }
 
     #[test]
     fn row_fill_splits_width() {
         // A row of two equal-portion fill children each take ~half of 20 cols.
         let child = |c: Color| -> Element<()> {
-            node(vec![Attribute::AttrWidth(Length::Fill(1)), Attribute::AttrBgColor(c)],
-                 vec![Element::Text("x".into())])
+            node(
+                vec![
+                    Attribute::AttrWidth(Length::Fill(1)),
+                    Attribute::AttrBgColor(c),
+                ],
+                vec![Element::Text("x".into())],
+            )
         };
         let row: Element<()> = node(
             vec![Attribute::AttrStyle("__row".into(), String::new())],
@@ -2283,8 +2608,14 @@ mod tests {
         let frame = element_to_cells(&row, 20, 24);
         let first = frame.split("\r\n").next().unwrap_or("");
         // Both fills present; neither claimed the whole row (would overflow pre-fix).
-        assert!(first.contains("48;2;10;0;0"), "left fill bg present: {first:?}");
-        assert!(first.contains("48;2;0;10;0"), "right fill bg present: {first:?}");
+        assert!(
+            first.contains("48;2;10;0;0"),
+            "left fill bg present: {first:?}"
+        );
+        assert!(
+            first.contains("48;2;0;10;0"),
+            "right fill bg present: {first:?}"
+        );
     }
 
     #[test]
@@ -2299,10 +2630,16 @@ mod tests {
         let (frame, _f, _h) = render_with_focus(&t, 80, 24, 0, &mut reg, 0);
         let a = frame.find("ab");
         let c = frame.find("cd");
-        assert!(a.is_some() && c.is_some(), "both visual lines render: {frame:?}");
+        assert!(
+            a.is_some() && c.is_some(),
+            "both visual lines render: {frame:?}"
+        );
         assert!(a < c, "first line above second: {frame:?}");
         // Cursor is a reverse-video cell (Go parity), not an inserted glyph.
-        assert!(frame.contains("\x1b[7"), "reverse-video cursor present (focused): {frame:?}");
+        assert!(
+            frame.contains("\x1b[7"),
+            "reverse-video cursor present (focused): {frame:?}"
+        );
         assert!(!frame.contains('▏'), "no inserted cursor glyph: {frame:?}");
     }
 
@@ -2337,10 +2674,16 @@ mod tests {
         );
         // 20 cols → multiple wrapped lines.
         let frame = element_to_cells(&t, 20, 24);
-        let body_lines: Vec<&str> = frame.split("\r\n").filter(|l| l.contains("alpha") || l.contains("zeta")).collect();
+        let body_lines: Vec<&str> = frame
+            .split("\r\n")
+            .filter(|l| l.contains("alpha") || l.contains("zeta"))
+            .collect();
         assert!(frame.contains("alpha"), "first word present: {frame:?}");
         // The text spans more than one line (not a single truncated line).
-        assert!(frame.matches("\r\n").count() >= 2, "wrapped onto ≥2 lines: {frame:?}");
+        assert!(
+            frame.matches("\r\n").count() >= 2,
+            "wrapped onto ≥2 lines: {frame:?}"
+        );
         let _ = body_lines;
     }
 
@@ -2348,20 +2691,28 @@ mod tests {
     fn grid_flows_row_major() {
         // gridColumns 80 px ≈ 5 cells min → on 60 cols, ncols = 60/5 = 12 → all
         // six single-char cells land on one row.
-        let cell = |s: &str| -> Element<()> {
-            node(vec![], vec![Element::Text(s.into())])
-        };
+        let cell = |s: &str| -> Element<()> { node(vec![], vec![Element::Text(s.into())]) };
         let g: Element<()> = node(
             vec![
                 Attribute::AttrStyle("__grid".into(), "true".into()),
                 Attribute::AttrStyle("__gridMin".into(), "80".into()),
             ],
-            vec![cell("G1"), cell("G2"), cell("G3"), cell("G4"), cell("G5"), cell("G6")],
+            vec![
+                cell("G1"),
+                cell("G2"),
+                cell("G3"),
+                cell("G4"),
+                cell("G5"),
+                cell("G6"),
+            ],
         );
         let frame = element_to_cells(&g, 60, 24);
         let first = frame.split("\r\n").next().unwrap_or("");
         assert!(first.contains("G1"), "G1 on row 0: {first:?}");
-        assert!(first.contains("G6"), "G6 on the SAME row 0 (row-major flow): {first:?}");
+        assert!(
+            first.contains("G6"),
+            "G6 on the SAME row 0 (row-major flow): {first:?}"
+        );
     }
 
     #[test]
@@ -2384,7 +2735,10 @@ mod tests {
         let line = b.lines.first().expect("one line");
         let full: String = line.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(full, "hi    ", "padded to col 5 + reverse space");
-        assert!(line.iter().any(|r| r.style.reverse), "reverse cursor appended");
+        assert!(
+            line.iter().any(|r| r.style.reverse),
+            "reverse cursor appended"
+        );
     }
 
     #[test]
@@ -2403,7 +2757,10 @@ mod tests {
         let mut reg = InputRegistry::new();
         let (frame, _f, _h) = render_with_focus(&inp, 80, 24, 0, &mut reg, 0);
         assert!(!frame.contains('▏'), "no inserted cursor glyph: {frame:?}");
-        assert!(frame.contains("\x1b[7"), "reverse-video cursor cell: {frame:?}");
+        assert!(
+            frame.contains("\x1b[7"),
+            "reverse-video cursor cell: {frame:?}"
+        );
         assert!(frame.contains('░'), "track still present: {frame:?}");
     }
 
@@ -2424,9 +2781,15 @@ mod tests {
         let frame = element_to_cells(&inp, 80, 24);
         assert!(frame.contains('░'), "shaded track present: {frame:?}");
         // track fg = lighten(bg, 38) = (68, 74, 98).
-        assert!(frame.contains("38;2;68;74;98"), "track fg = lightened bg: {frame:?}");
+        assert!(
+            frame.contains("38;2;68;74;98"),
+            "track fg = lightened bg: {frame:?}"
+        );
         // bg of the field present too.
-        assert!(frame.contains("48;2;30;36;60"), "field bg present: {frame:?}");
+        assert!(
+            frame.contains("48;2;30;36;60"),
+            "field bg present: {frame:?}"
+        );
     }
 
     #[test]
@@ -2442,7 +2805,10 @@ mod tests {
         );
         let frame = element_to_cells(&inp, 80, 24);
         assert!(frame.contains('░'), "track present without bg: {frame:?}");
-        assert!(frame.contains("38;2;110;110;110"), "dim-grey track: {frame:?}");
+        assert!(
+            frame.contains("38;2;110;110;110"),
+            "dim-grey track: {frame:?}"
+        );
     }
 
     #[test]
@@ -2455,9 +2821,18 @@ mod tests {
             vec![Element::Text("hi".into())],
         );
         let frame = element_to_cells(&t, 80, 24);
-        assert!(frame.contains('┌') && frame.contains('┐'), "top corners: {frame:?}");
-        assert!(frame.contains('└') && frame.contains('┘'), "bottom corners: {frame:?}");
-        assert!(frame.contains('│') && frame.contains('─'), "edges: {frame:?}");
+        assert!(
+            frame.contains('┌') && frame.contains('┐'),
+            "top corners: {frame:?}"
+        );
+        assert!(
+            frame.contains('└') && frame.contains('┘'),
+            "bottom corners: {frame:?}"
+        );
+        assert!(
+            frame.contains('│') && frame.contains('─'),
+            "edges: {frame:?}"
+        );
         assert!(frame.contains("hi"), "content inside frame: {frame:?}");
     }
 
@@ -2481,13 +2856,18 @@ mod tests {
         // A full-height frame must NOT end with CRLF — a trailing newline on the
         // bottom row scrolls the screen up one (drops the top row, diverges from
         // Go on first paint). Build a frame with as many lines as terminal rows.
-        let kids: Vec<Element<()>> =
-            (0..10).map(|i| node(vec![], vec![Element::Text(format!("r{i}"))])).collect();
+        let kids: Vec<Element<()>> = (0..10)
+            .map(|i| node(vec![], vec![Element::Text(format!("r{i}"))]))
+            .collect();
         let t: Element<()> = node(vec![], kids);
         let frame = element_to_cells(&t, 80, 10);
         assert!(!frame.ends_with("\r\n"), "no trailing CRLF: {frame:?}");
         // Still CRLF-separated between rows.
-        assert_eq!(frame.matches("\r\n").count(), 9, "9 separators for 10 rows: {frame:?}");
+        assert_eq!(
+            frame.matches("\r\n").count(),
+            9,
+            "9 separators for 10 rows: {frame:?}"
+        );
     }
 
     #[test]
@@ -2504,10 +2884,16 @@ mod tests {
         let first = frame.split("\r\n").next().unwrap_or("");
         // The page bg SGR reaches the row; the glyph 'x' sits on it and the
         // remaining cells to col 20 carry the same bg (one fill run to the edge).
-        assert!(first.contains("48;2;18;22;38"), "page bg present: {first:?}");
+        assert!(
+            first.contains("48;2;18;22;38"),
+            "page bg present: {first:?}"
+        );
         // Count visible spaces after 'x' — the bg-filled tail to col 20.
         let spaces = first.matches(' ').count();
-        assert!(spaces >= 15, "bg fills toward the right edge: {first:?} ({spaces})");
+        assert!(
+            spaces >= 15,
+            "bg fills toward the right edge: {first:?} ({spaces})"
+        );
     }
 
     #[test]
@@ -2516,7 +2902,10 @@ mod tests {
         // frame carries no 48;2 background SGR at all.
         let t: Element<()> = node(vec![], vec![node(vec![], vec![Element::Text("x".into())])]);
         let frame = element_to_cells(&t, 20, 3);
-        assert!(!frame.contains("48;2;"), "no bg backfilled without a root bg: {frame:?}");
+        assert!(
+            !frame.contains("48;2;"),
+            "no bg backfilled without a root bg: {frame:?}"
+        );
     }
 
     #[test]
@@ -2542,7 +2931,10 @@ mod tests {
         let first = frame.split("\r\n").next().unwrap_or("");
         // The cell bg (60,50,80 = 3c3250) is present and fills past the 2-char
         // label toward its column width.
-        assert!(first.contains("48;2;60;50;80"), "grid cell bg present: {first:?}");
+        assert!(
+            first.contains("48;2;60;50;80"),
+            "grid cell bg present: {first:?}"
+        );
     }
 
     #[test]
@@ -2558,17 +2950,27 @@ mod tests {
         );
         let frame = element_to_cells(&t, 20, 6);
         // Every text row carries the paragraph bg filling to ~20 cells.
-        let body: Vec<&str> = frame.split("\r\n").filter(|l| l.contains("48;2;35;40;55")).collect();
-        assert!(!body.is_empty(), "paragraph bg present on wrapped lines: {frame:?}");
+        let body: Vec<&str> = frame
+            .split("\r\n")
+            .filter(|l| l.contains("48;2;35;40;55"))
+            .collect();
+        assert!(
+            !body.is_empty(),
+            "paragraph bg present on wrapped lines: {frame:?}"
+        );
         let first = body.first().copied().unwrap_or("");
         // The bg run pads the wrapped line out (≥ several trailing bg spaces).
-        assert!(first.matches(' ').count() >= 3, "paragraph bg pads to wrap width: {first:?}");
+        assert!(
+            first.matches(' ').count() >= 3,
+            "paragraph bg pads to wrap width: {first:?}"
+        );
     }
 
     #[test]
     fn scroll_offsets_content() {
-        let kids: Vec<Element<()>> =
-            (0..40).map(|i| node(vec![], vec![Element::Text(format!("row{i}"))])).collect();
+        let kids: Vec<Element<()>> = (0..40)
+            .map(|i| node(vec![], vec![Element::Text(format!("row{i}"))]))
+            .collect();
         let t: Element<()> = node(vec![], kids);
         let mut reg = InputRegistry::new();
         let (frame, _f, h) = render_with_focus(&t, 80, 10, usize::MAX, &mut reg, 20);

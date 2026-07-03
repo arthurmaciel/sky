@@ -240,10 +240,8 @@ mod tests {
 
     #[test]
     fn diff_text_change() {
-        let mut a: Html<()> =
-            Html::HElement("p".into(), vec![], vec![Html::HText("1".into())]);
-        let mut b: Html<()> =
-            Html::HElement("p".into(), vec![], vec![Html::HText("2".into())]);
+        let mut a: Html<()> = Html::HElement("p".into(), vec![], vec![Html::HText("1".into())]);
+        let mut b: Html<()> = Html::HElement("p".into(), vec![], vec![Html::HText("2".into())]);
         ids(&mut a);
         ids(&mut b);
         let p = diff(&a, &b);
@@ -278,8 +276,7 @@ mod tests {
 
     #[test]
     fn diff_identical_is_empty() {
-        let mut a: Html<()> =
-            Html::HElement("p".into(), vec![], vec![Html::HText("1".into())]);
+        let mut a: Html<()> = Html::HElement("p".into(), vec![], vec![Html::HText("1".into())]);
         let mut b = a.clone();
         ids(&mut a);
         ids(&mut b);
@@ -299,7 +296,10 @@ mod tests {
         let p = diff(&a, &b);
         assert_eq!(p.len(), 1);
         // Go parity: present BoolAttr encodes as {k: k}, NOT {k: ""}.
-        assert_eq!(p[0].attrs.get("disabled").map(String::as_str), Some("disabled"));
+        assert_eq!(
+            p[0].attrs.get("disabled").map(String::as_str),
+            Some("disabled")
+        );
     }
 
     #[test]
@@ -315,8 +315,14 @@ mod tests {
         ids(&mut b);
         let p = diff(&a, &b);
         assert_eq!(p.len(), 1);
-        assert_eq!(p[0].attrs.get("sky-click").map(String::as_str), Some("click"));
-        assert_eq!(p[0].attrs.get("data-sky-hid").map(String::as_str), Some("r"));
+        assert_eq!(
+            p[0].attrs.get("sky-click").map(String::as_str),
+            Some("click")
+        );
+        assert_eq!(
+            p[0].attrs.get("data-sky-hid").map(String::as_str),
+            Some("r")
+        );
     }
 
     #[test]

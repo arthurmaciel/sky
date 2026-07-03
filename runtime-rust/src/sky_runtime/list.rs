@@ -52,8 +52,8 @@ pub fn list_drop<T>(n: i64, xs: Vec<T>) -> Vec<T> {
 pub fn list_filter_map<A, B>(f: impl Fn(A) -> SkyMaybe<B>, xs: Vec<A>) -> Vec<B> {
     xs.into_iter()
         .filter_map(|x| match f(x) {
-            SkyMaybe::Just(v)  => Some(v),
-            SkyMaybe::Nothing  => None,
+            SkyMaybe::Just(v) => Some(v),
+            SkyMaybe::Nothing => None,
         })
         .collect()
 }
@@ -69,19 +69,25 @@ pub fn sky_list_cons<T>(x: T, xs: Vec<T>) -> Vec<T> {
 
 pub fn list_foldl<T0, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, list: Vec<T0>) -> T1 {
     let mut acc = init;
-    for item in list { acc = f(item, acc); }
+    for item in list {
+        acc = f(item, acc);
+    }
     acc
 }
 pub fn list_foldr<T0, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, list: Vec<T0>) -> T1 {
     let mut acc = init;
     // `into_iter().rev()` yields OWNED items, so no clone (and no `T0: Clone`
     // bound) is needed — matching `sky_list_cons`'s move-only-friendly shape.
-    for item in list.into_iter().rev() { acc = f(item, acc); }
+    for item in list.into_iter().rev() {
+        acc = f(item, acc);
+    }
     acc
 }
 // Sky `List.range` is INCLUSIVE: range 1 3 = [1, 2, 3].
 pub fn list_range(lo: i64, hi: i64) -> Vec<i64> {
-    if hi < lo { return Vec::new(); }
+    if hi < lo {
+        return Vec::new();
+    }
     // Bound the allocation: lo/hi are caller-controlled; an absurd span (e.g.
     // 0..i64::MAX) would OOM. Cap at 10M elements (any real list is far smaller).
     // Over the cap, emit the first 10M (a correct PREFIX) plus a structured warn,
@@ -100,7 +106,10 @@ pub fn list_range(lo: i64, hi: i64) -> Vec<i64> {
     (lo..=hi).collect()
 }
 pub fn list_indexed_map<T0, T1>(f: impl Fn(i64, T0) -> T1 + Clone, list: Vec<T0>) -> Vec<T1> {
-    list.into_iter().enumerate().map(|(i, x)| f(i as i64, x)).collect()
+    list.into_iter()
+        .enumerate()
+        .map(|(i, x)| f(i as i64, x))
+        .collect()
 }
 pub fn list_concat_map<T0, T1>(f: impl Fn(T0) -> Vec<T1> + Clone, list: Vec<T0>) -> Vec<T1> {
     list.into_iter().flat_map(f).collect()
@@ -146,7 +155,9 @@ fn cmp_total<T: PartialOrd>(a: &T, b: &T) -> std::cmp::Ordering {
 fn sort_by_total<T, F: Fn(&T, &T) -> std::cmp::Ordering>(result: &mut [T], cmp: F) {
     let order = std::panic::AssertUnwindSafe(|| result.sort_by(&cmp));
     if std::panic::catch_unwind(order).is_err() {
-        eprintln!("[sky.list] sort: comparator is not a consistent total order (NaN?); unspecified order");
+        eprintln!(
+            "[sky.list] sort: comparator is not a consistent total order (NaN?); unspecified order"
+        );
     }
 }
 
@@ -167,8 +178,7 @@ pub fn list_sort_by<A: Clone, B: PartialOrd>(key_fn: impl Fn(A) -> B, list: Vec<
     // Decorate: compute each key once, pairing it with its element. The key fn
     // consumes its argument (owned ABI), so clone the element for the key call
     // and keep the original to emit after the sort.
-    let mut decorated: Vec<(B, A)> =
-        list.into_iter().map(|x| (key_fn(x.clone()), x)).collect();
+    let mut decorated: Vec<(B, A)> = list.into_iter().map(|x| (key_fn(x.clone()), x)).collect();
     // Stable sort on the key only (so equal keys preserve input order). Via the
     // panic-safe wrapper: a multi-NaN key set makes cmp_total non-transitive.
     sort_by_total(&mut decorated, |a, b| cmp_total(&a.0, &b.0));
@@ -239,7 +249,13 @@ mod tests {
     fn test_filter_map_doubles_evens() {
         let xs: Vec<i64> = vec![1, 2, 3, 4];
         let result = list_filter_map(
-            |x| if x % 2 == 0 { SkyMaybe::Just(x * 2) } else { SkyMaybe::Nothing },
+            |x| {
+                if x % 2 == 0 {
+                    SkyMaybe::Just(x * 2)
+                } else {
+                    SkyMaybe::Nothing
+                }
+            },
             xs,
         );
         assert_eq!(result, vec![4i64, 8]);
@@ -290,10 +306,14 @@ mod tests {
     #[test]
     fn test_sort_by_key_applied_once_and_stable() {
         // sortBy String.length — stable: equal-length keep input order.
-        let r = list_sort_by(|s: String| s.len() as i64, vec![
-            "ccc".to_string(), "a".into(), "bb".into(), "dd".into(),
-        ]);
-        assert_eq!(r, vec!["a".to_string(), "bb".into(), "dd".into(), "ccc".into()]);
+        let r = list_sort_by(
+            |s: String| s.len() as i64,
+            vec!["ccc".to_string(), "a".into(), "bb".into(), "dd".into()],
+        );
+        assert_eq!(
+            r,
+            vec!["a".to_string(), "bb".into(), "dd".into(), "ccc".into()]
+        );
     }
 
     #[test]

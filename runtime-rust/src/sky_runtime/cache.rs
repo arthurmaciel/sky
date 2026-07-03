@@ -112,7 +112,15 @@ pub fn cache_new_raw<E: Send + From<String> + 'static>(cfg: CacheCfg) -> SkyTask
             let h = g.0;
             g.1.push((
                 h,
-                Slot { cfg, hits: 0, misses: 0, evictions: 0, entries: 0, seq: 0, store: None },
+                Slot {
+                    cfg,
+                    hits: 0,
+                    misses: 0,
+                    evictions: 0,
+                    entries: 0,
+                    seq: 0,
+                    store: None,
+                },
             ));
             h
         };
@@ -206,13 +214,19 @@ where
                 Expired,
                 Miss,
             }
-            let outcome = match slot.store.as_mut().and_then(|s| s.downcast_mut::<Vec<CacheEntry<K>>>()) {
+            let outcome = match slot
+                .store
+                .as_mut()
+                .and_then(|s| s.downcast_mut::<Vec<CacheEntry<K>>>())
+            {
                 None => Outcome::Miss,
                 Some(vec) => match vec.iter().position(|e| e.key == key) {
                     None => Outcome::Miss,
                     Some(idx) => {
                         // index is in-bounds (just found); guard with .get anyway
-                        let expired = vec.get(idx).is_some_and(|e| e.expires_at.is_some_and(|x| now >= x));
+                        let expired = vec
+                            .get(idx)
+                            .is_some_and(|e| e.expires_at.is_some_and(|x| now >= x));
                         if expired {
                             vec.remove(idx);
                             Outcome::Expired
@@ -264,7 +278,11 @@ where
                 .as_ref()
                 .and_then(|s| s.downcast_ref::<Vec<CacheEntry<K>>>())
                 .map_or(0, |v| v.len());
-            if let Some(vec) = slot.store.as_mut().and_then(|s| s.downcast_mut::<Vec<CacheEntry<K>>>()) {
+            if let Some(vec) = slot
+                .store
+                .as_mut()
+                .and_then(|s| s.downcast_mut::<Vec<CacheEntry<K>>>())
+            {
                 vec.retain(|e| e.key != key);
                 let removed = (before - vec.len()) as i64;
                 slot.entries -= removed;
@@ -295,8 +313,16 @@ pub fn cache_stats<E: Send + From<String> + 'static>(handle: i64) -> SkyTask<E, 
     Box::pin(async move {
         let s = with_slot(
             handle,
-            CacheStats { hits: 0, misses: 0, evictions: 0 },
-            |slot| CacheStats { hits: slot.hits, misses: slot.misses, evictions: slot.evictions },
+            CacheStats {
+                hits: 0,
+                misses: 0,
+                evictions: 0,
+            },
+            |slot| CacheStats {
+                hits: slot.hits,
+                misses: slot.misses,
+                evictions: slot.evictions,
+            },
         );
         ok_res(s)
     })
@@ -315,14 +341,35 @@ mod tests {
 
     #[test]
     fn put_get_size_remove_stats() {
-        let h = run(cache_new_raw::<SkyError>(CacheCfg { maxEntries: 8, ttlMs: 0, maxBytes: 0 }));
-        run(cache_put::<SkyError, String, String>(h, "a".into(), "1".into()));
-        run(cache_put::<SkyError, String, String>(h, "b".into(), "2".into()));
+        let h = run(cache_new_raw::<SkyError>(CacheCfg {
+            maxEntries: 8,
+            ttlMs: 0,
+            maxBytes: 0,
+        }));
+        run(cache_put::<SkyError, String, String>(
+            h,
+            "a".into(),
+            "1".into(),
+        ));
+        run(cache_put::<SkyError, String, String>(
+            h,
+            "b".into(),
+            "2".into(),
+        ));
         assert_eq!(run(cache_size::<SkyError>(h)), 2);
-        assert_eq!(run(cache_get::<SkyError, String, String>(h, "a".into())), SkyMaybe::Just("1".into()));
-        assert_eq!(run(cache_get::<SkyError, String, String>(h, "z".into())), SkyMaybe::Nothing);
+        assert_eq!(
+            run(cache_get::<SkyError, String, String>(h, "a".into())),
+            SkyMaybe::Just("1".into())
+        );
+        assert_eq!(
+            run(cache_get::<SkyError, String, String>(h, "z".into())),
+            SkyMaybe::Nothing
+        );
         run(cache_remove::<SkyError, String>(h, "a".into()));
-        assert_eq!(run(cache_get::<SkyError, String, String>(h, "a".into())), SkyMaybe::Nothing);
+        assert_eq!(
+            run(cache_get::<SkyError, String, String>(h, "a".into())),
+            SkyMaybe::Nothing
+        );
         assert_eq!(run(cache_size::<SkyError>(h)), 1);
         let st = run(cache_stats::<SkyError>(h));
         assert_eq!(st.hits, 1);
@@ -331,14 +378,24 @@ mod tests {
 
     #[test]
     fn lru_eviction_over_capacity() {
-        let h = run(cache_new_raw::<SkyError>(CacheCfg { maxEntries: 2, ttlMs: 0, maxBytes: 0 }));
+        let h = run(cache_new_raw::<SkyError>(CacheCfg {
+            maxEntries: 2,
+            ttlMs: 0,
+            maxBytes: 0,
+        }));
         run(cache_put::<SkyError, String, i64>(h, "a".into(), 1));
         run(cache_put::<SkyError, String, i64>(h, "b".into(), 2));
         let _ = run(cache_get::<SkyError, String, i64>(h, "a".into())); // touch a (b now LRU)
         run(cache_put::<SkyError, String, i64>(h, "c".into(), 3)); // evicts b
         assert_eq!(run(cache_size::<SkyError>(h)), 2);
-        assert_eq!(run(cache_get::<SkyError, String, i64>(h, "b".into())), SkyMaybe::Nothing);
-        assert_eq!(run(cache_get::<SkyError, String, i64>(h, "a".into())), SkyMaybe::Just(1));
+        assert_eq!(
+            run(cache_get::<SkyError, String, i64>(h, "b".into())),
+            SkyMaybe::Nothing
+        );
+        assert_eq!(
+            run(cache_get::<SkyError, String, i64>(h, "a".into())),
+            SkyMaybe::Just(1)
+        );
         assert_eq!(run(cache_stats::<SkyError>(h)).evictions, 1);
     }
 }

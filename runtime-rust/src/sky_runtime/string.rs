@@ -7,18 +7,38 @@ use super::SkyMaybe;
 
 // ── Core String kernels (relocated from core.rs so the String surface has one home) ──
 
-pub fn string_from_int(i: i64) -> String { format!("{}", i) }
-pub fn string_join(sep: String, strs: Vec<String>) -> String { strs.join(&sep) }
-pub fn string_append(a: String, b: String) -> String { a + &b }
-pub fn string_length(s: String) -> i64 { s.chars().count() as i64 }
-pub fn string_is_empty(s: String) -> bool { s.is_empty() }
-pub fn string_reverse(s: String) -> String { s.chars().rev().collect() }
-pub fn string_to_upper(s: String) -> String { s.to_uppercase() }
-pub fn string_to_lower(s: String) -> String { s.to_lowercase() }
-pub fn string_trim(s: String) -> String { s.trim().to_string() }
+pub fn string_from_int(i: i64) -> String {
+    format!("{}", i)
+}
+pub fn string_join(sep: String, strs: Vec<String>) -> String {
+    strs.join(&sep)
+}
+pub fn string_append(a: String, b: String) -> String {
+    a + &b
+}
+pub fn string_length(s: String) -> i64 {
+    s.chars().count() as i64
+}
+pub fn string_is_empty(s: String) -> bool {
+    s.is_empty()
+}
+pub fn string_reverse(s: String) -> String {
+    s.chars().rev().collect()
+}
+pub fn string_to_upper(s: String) -> String {
+    s.to_uppercase()
+}
+pub fn string_to_lower(s: String) -> String {
+    s.to_lowercase()
+}
+pub fn string_trim(s: String) -> String {
+    s.trim().to_string()
+}
 // Sky `contains : String -> String -> Bool  -- contains sub str` (str contains
 // sub). Args arrive as (sub, str), so test the SECOND against the first.
-pub fn string_contains(sub: String, s: String) -> bool { s.contains(&sub) }
+pub fn string_contains(sub: String, s: String) -> bool {
+    s.contains(&sub)
+}
 /// `String.toInt : String -> Maybe Int`. Parity with the Go reference's
 /// OBSERVABLE behaviour (`String_toInt` = `strconv.Atoi(s)`, NO trim): the Go
 /// compiler routes `String.toInt` through this any-typed path, so surrounding
@@ -28,7 +48,10 @@ pub fn string_contains(sub: String, s: String) -> bool { s.contains(&sub) }
 /// also matches Elm-family `String.toInt`, which does not trim. So no `.trim()`
 /// here — a leading/trailing space yields `Nothing`, exactly like the oracle.
 pub fn string_to_int(s: String) -> SkyMaybe<i64> {
-    match s.parse::<i64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
+    match s.parse::<i64>() {
+        Ok(v) => SkyMaybe::Just(v),
+        Err(_) => SkyMaybe::Nothing,
+    }
 }
 /// `String.toFloat : String -> Maybe Float`. Go parity (`String_toFloat`):
 /// `strconv.ParseFloat(strings.TrimSpace(s), 64)` — UNLIKE `toInt`, Go's float
@@ -43,10 +66,15 @@ pub fn string_to_int(s: String) -> SkyMaybe<i64> {
 /// underscore-digit-separator forms. This is a deliberate tightening — those
 /// forms never round-trip from `String.fromFloat` — so no golden is needed.
 pub fn string_to_float(s: String) -> SkyMaybe<f64> {
-    match s.trim().parse::<f64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
+    match s.trim().parse::<f64>() {
+        Ok(v) => SkyMaybe::Just(v),
+        Err(_) => SkyMaybe::Nothing,
+    }
 }
 /// `String.fromChar : Char -> String`.
-pub fn string_from_char(c: char) -> String { c.to_string() }
+pub fn string_from_char(c: char) -> String {
+    c.to_string()
+}
 /// `String.slice : Int -> Int -> String -> String`. Char(rune)-indexed with
 /// negative-index-from-end + clamping — parity with Go's `String_sliceT`.
 pub fn string_slice(start: i64, end: i64, s: String) -> String {
@@ -54,9 +82,15 @@ pub fn string_slice(start: i64, end: i64, s: String) -> String {
     let total = runes.len() as i64;
     let mut start = if start < 0 { start + total } else { start };
     let mut end = if end < 0 { end + total } else { end };
-    if start < 0 { start = 0; }
-    if end > total { end = total; }
-    if start > end { return String::new(); }
+    if start < 0 {
+        start = 0;
+    }
+    if end > total {
+        end = total;
+    }
+    if start > end {
+        return String::new();
+    }
     // start/end are clamped to [0, total] with start <= end, so the slice is
     // valid; `.get` keeps it total regardless.
     runes
@@ -78,7 +112,10 @@ pub fn string_right(n: i64, s: String) -> String {
     }
     let runes: Vec<char> = s.chars().collect();
     let start = runes.len().saturating_sub(n as usize);
-    runes.get(start..).map(|r| r.iter().collect()).unwrap_or_default()
+    runes
+        .get(start..)
+        .map(|r| r.iter().collect())
+        .unwrap_or_default()
 }
 /// `String.fromFloat : Float -> String`.
 ///
@@ -225,8 +262,12 @@ pub fn string_split(sep: String, s: String) -> Vec<String> {
     s.split(&sep).map(|x| x.to_string()).collect()
 }
 // Sky.Core.String.lines / .words — split on line breaks / runs of whitespace.
-pub fn string_lines(s: String) -> Vec<String> { s.lines().map(|x| x.to_string()).collect() }
-pub fn string_words(s: String) -> Vec<String> { s.split_whitespace().map(|x| x.to_string()).collect() }
+pub fn string_lines(s: String) -> Vec<String> {
+    s.lines().map(|x| x.to_string()).collect()
+}
+pub fn string_words(s: String) -> Vec<String> {
+    s.split_whitespace().map(|x| x.to_string()).collect()
+}
 
 // ── String kernels with Go-typed argument order ──
 
@@ -248,7 +289,9 @@ pub fn string_ends_with(suffix: String, s: String) -> bool {
 
 /// Sky `repeat : Int -> String -> String`. Non-positive `n` returns "".
 pub fn string_repeat(n: i64, s: String) -> String {
-    if n <= 0 { return String::new(); }
+    if n <= 0 {
+        return String::new();
+    }
     // Bound the result: n is caller-controlled; n * s.len() can overflow / OOM.
     // Cap at 64 MiB (any real repeated string is far smaller).
     if (n as u64).saturating_mul(s.len() as u64) > 64 * 1024 * 1024 {
@@ -432,7 +475,9 @@ pub fn string_pad_left(n: i64, ch: char, s: String) -> String {
     }
     // Bound the pad width: n is caller-controlled; a huge n would OOM on
     // with_capacity + the push loop. Cap the padded width at 16M chars.
-    if n > 16_000_000 { return s; }
+    if n > 16_000_000 {
+        return s;
+    }
     let pad_count = (n - rune_count) as usize;
     let mut out = String::with_capacity(s.len() + pad_count);
     for _ in 0..pad_count {
@@ -456,7 +501,9 @@ pub fn string_pad_right(n: i64, ch: char, s: String) -> String {
     }
     // Bound the pad width: n is caller-controlled; a huge n would OOM on
     // with_capacity + the push loop. Cap the padded width at 16M chars.
-    if n > 16_000_000 { return s; }
+    if n > 16_000_000 {
+        return s;
+    }
     let pad_count = (n - rune_count) as usize;
     let mut out = String::with_capacity(s.len() + pad_count);
     out.push_str(&s);
@@ -492,14 +539,16 @@ pub fn string_trim_end(s: String) -> String {
 /// NBSP (U+00A0), general-category Zs (U+2000–U+200A), line/paragraph
 /// separators (U+2028/U+2029), ideographic space (U+3000), and BOM (U+FEFF).
 fn unicode_is_space(c: char) -> bool {
-    matches!(c,
+    matches!(
+        c,
         ' ' | '\t' | '\n' | '\r' | '\x0B' | '\x0C'  // ASCII whitespace + VT/FF
         | '\u{00A0}'                                   // NBSP
-        | '\u{2000}'..='\u{200A}'                      // En quad … Hair space
+        | '\u{2000}'
+            ..='\u{200A}'                      // En quad … Hair space
         | '\u{2028}'                                   // Line separator
         | '\u{2029}'                                   // Paragraph separator
         | '\u{3000}'                                   // Ideographic space
-        | '\u{FEFF}'                                   // BOM / Zero-width NBSP
+        | '\u{FEFF}' // BOM / Zero-width NBSP
     )
 }
 
@@ -507,162 +556,494 @@ fn unicode_is_space(c: char) -> bool {
 mod tests {
     use super::*;
 
-    #[test] fn test_replace_simple() { assert_eq!(string_replace("foo".into(), "bar".into(), "foofoo".into()), "barbar"); }
-    #[test] fn test_replace_no_match() { assert_eq!(string_replace("x".into(), "y".into(), "abc".into()), "abc"); }
-    #[test] fn test_replace_empty_old() { assert_eq!(string_replace("".into(), "_".into(), "abc".into()), "_a_b_c_"); }
+    #[test]
+    fn test_replace_simple() {
+        assert_eq!(
+            string_replace("foo".into(), "bar".into(), "foofoo".into()),
+            "barbar"
+        );
+    }
+    #[test]
+    fn test_replace_no_match() {
+        assert_eq!(string_replace("x".into(), "y".into(), "abc".into()), "abc");
+    }
+    #[test]
+    fn test_replace_empty_old() {
+        assert_eq!(
+            string_replace("".into(), "_".into(), "abc".into()),
+            "_a_b_c_"
+        );
+    }
 
-    #[test] fn test_starts_with_hit() { assert!(string_starts_with("he".into(), "hello".into())); }
-    #[test] fn test_starts_with_miss() { assert!(!string_starts_with("xy".into(), "hello".into())); }
-    #[test] fn test_starts_with_empty_prefix() { assert!(string_starts_with("".into(), "hello".into())); }
+    #[test]
+    fn test_starts_with_hit() {
+        assert!(string_starts_with("he".into(), "hello".into()));
+    }
+    #[test]
+    fn test_starts_with_miss() {
+        assert!(!string_starts_with("xy".into(), "hello".into()));
+    }
+    #[test]
+    fn test_starts_with_empty_prefix() {
+        assert!(string_starts_with("".into(), "hello".into()));
+    }
 
-    #[test] fn test_ends_with_hit() { assert!(string_ends_with("lo".into(), "hello".into())); }
-    #[test] fn test_ends_with_miss() { assert!(!string_ends_with("xy".into(), "hello".into())); }
+    #[test]
+    fn test_ends_with_hit() {
+        assert!(string_ends_with("lo".into(), "hello".into()));
+    }
+    #[test]
+    fn test_ends_with_miss() {
+        assert!(!string_ends_with("xy".into(), "hello".into()));
+    }
 
-    #[test] fn test_repeat_three() { assert_eq!(string_repeat(3, "ab".into()), "ababab"); }
-    #[test] fn test_repeat_zero() { assert_eq!(string_repeat(0, "ab".into()), ""); }
-    #[test] fn test_repeat_negative() { assert_eq!(string_repeat(-1, "ab".into()), ""); }
+    #[test]
+    fn test_repeat_three() {
+        assert_eq!(string_repeat(3, "ab".into()), "ababab");
+    }
+    #[test]
+    fn test_repeat_zero() {
+        assert_eq!(string_repeat(0, "ab".into()), "");
+    }
+    #[test]
+    fn test_repeat_negative() {
+        assert_eq!(string_repeat(-1, "ab".into()), "");
+    }
 
     // string_from_float — byte-for-byte parity with Go's
     // strconv.FormatFloat(f, 'g', -1, 64). Ground-truth values captured from
     // the Go oracle (`String.fromFloat` typed path) and `go run` on strconv.
-    #[test] fn ff_small_exponent() { assert_eq!(string_from_float(0.00001), "1e-05"); }
-    #[test] fn ff_tiny_exponent() { assert_eq!(string_from_float(1e-10), "1e-10"); }
-    #[test] fn ff_huge_exponent() { assert_eq!(string_from_float(1e21), "1e+21"); }
-    #[test] fn ff_e5_neg_exponent() { assert_eq!(string_from_float(1e-5), "1e-05"); }
-    #[test] fn ff_whole_positional() { assert_eq!(string_from_float(1500.0), "1500"); }
-    #[test] fn ff_simple_fraction() { assert_eq!(string_from_float(1.5), "1.5"); }
-    #[test] fn ff_two_fraction() { assert_eq!(string_from_float(12.56), "12.56"); }
-    #[test] fn ff_sub_one_positional() { assert_eq!(string_from_float(0.0001), "0.0001"); }
-    #[test] fn ff_e6_flips_to_exponent() { assert_eq!(string_from_float(1e6), "1e+06"); }
-    #[test] fn ff_e5_stays_positional() { assert_eq!(string_from_float(1e5), "100000"); }
-    #[test] fn ff_many_fraction() { assert_eq!(string_from_float(123456.789), "123456.789"); }
-    #[test] fn ff_pos_inf() { assert_eq!(string_from_float(f64::INFINITY), "+Inf"); }
-    #[test] fn ff_neg_inf() { assert_eq!(string_from_float(f64::NEG_INFINITY), "-Inf"); }
-    #[test] fn ff_nan() { assert_eq!(string_from_float(f64::NAN), "NaN"); }
-    #[test] fn ff_pos_zero() { assert_eq!(string_from_float(0.0), "0"); }
-    #[test] fn ff_neg_zero() { assert_eq!(string_from_float(-0.0), "-0"); }
-    #[test] fn ff_negative() { assert_eq!(string_from_float(-1.5), "-1.5"); }
+    #[test]
+    fn ff_small_exponent() {
+        assert_eq!(string_from_float(0.00001), "1e-05");
+    }
+    #[test]
+    fn ff_tiny_exponent() {
+        assert_eq!(string_from_float(1e-10), "1e-10");
+    }
+    #[test]
+    fn ff_huge_exponent() {
+        assert_eq!(string_from_float(1e21), "1e+21");
+    }
+    #[test]
+    fn ff_e5_neg_exponent() {
+        assert_eq!(string_from_float(1e-5), "1e-05");
+    }
+    #[test]
+    fn ff_whole_positional() {
+        assert_eq!(string_from_float(1500.0), "1500");
+    }
+    #[test]
+    fn ff_simple_fraction() {
+        assert_eq!(string_from_float(1.5), "1.5");
+    }
+    #[test]
+    fn ff_two_fraction() {
+        assert_eq!(string_from_float(12.56), "12.56");
+    }
+    #[test]
+    fn ff_sub_one_positional() {
+        assert_eq!(string_from_float(0.0001), "0.0001");
+    }
+    #[test]
+    fn ff_e6_flips_to_exponent() {
+        assert_eq!(string_from_float(1e6), "1e+06");
+    }
+    #[test]
+    fn ff_e5_stays_positional() {
+        assert_eq!(string_from_float(1e5), "100000");
+    }
+    #[test]
+    fn ff_many_fraction() {
+        assert_eq!(string_from_float(123456.789), "123456.789");
+    }
+    #[test]
+    fn ff_pos_inf() {
+        assert_eq!(string_from_float(f64::INFINITY), "+Inf");
+    }
+    #[test]
+    fn ff_neg_inf() {
+        assert_eq!(string_from_float(f64::NEG_INFINITY), "-Inf");
+    }
+    #[test]
+    fn ff_nan() {
+        assert_eq!(string_from_float(f64::NAN), "NaN");
+    }
+    #[test]
+    fn ff_pos_zero() {
+        assert_eq!(string_from_float(0.0), "0");
+    }
+    #[test]
+    fn ff_neg_zero() {
+        assert_eq!(string_from_float(-0.0), "-0");
+    }
+    #[test]
+    fn ff_negative() {
+        assert_eq!(string_from_float(-1.5), "-1.5");
+    }
 
     // ── New kernels ───────────────────────────────────────────────────────────
 
     // string_concat
-    #[test] fn test_concat_basic() { assert_eq!(string_concat(vec!["foo".into(), "bar".into(), "baz".into()]), "foobarbaz"); }
-    #[test] fn test_concat_empty_list() { assert_eq!(string_concat(vec![]), ""); }
-    #[test] fn test_concat_unicode() { assert_eq!(string_concat(vec!["héllo".into(), " ".into(), "wörld".into()]), "héllo wörld"); }
+    #[test]
+    fn test_concat_basic() {
+        assert_eq!(
+            string_concat(vec!["foo".into(), "bar".into(), "baz".into()]),
+            "foobarbaz"
+        );
+    }
+    #[test]
+    fn test_concat_empty_list() {
+        assert_eq!(string_concat(vec![]), "");
+    }
+    #[test]
+    fn test_concat_unicode() {
+        assert_eq!(
+            string_concat(vec!["héllo".into(), " ".into(), "wörld".into()]),
+            "héllo wörld"
+        );
+    }
 
     // string_casefold
-    #[test] fn test_casefold_upper() { assert_eq!(string_casefold("HELLO".into()), "hello"); }
-    #[test] fn test_casefold_mixed() { assert_eq!(string_casefold("CaFé".into()), "café"); }
-    #[test] fn test_casefold_empty() { assert_eq!(string_casefold("".into()), ""); }
+    #[test]
+    fn test_casefold_upper() {
+        assert_eq!(string_casefold("HELLO".into()), "hello");
+    }
+    #[test]
+    fn test_casefold_mixed() {
+        assert_eq!(string_casefold("CaFé".into()), "café");
+    }
+    #[test]
+    fn test_casefold_empty() {
+        assert_eq!(string_casefold("".into()), "");
+    }
 
     // string_drop_left
-    #[test] fn test_drop_left_basic() { assert_eq!(string_drop_left(2, "hello".into()), "llo"); }
-    #[test] fn test_drop_left_zero() { assert_eq!(string_drop_left(0, "hello".into()), "hello"); }
-    #[test] fn test_drop_left_negative() { assert_eq!(string_drop_left(-1, "hello".into()), "hello"); }
-    #[test] fn test_drop_left_exact() { assert_eq!(string_drop_left(5, "hello".into()), ""); }
-    #[test] fn test_drop_left_over() { assert_eq!(string_drop_left(99, "hello".into()), ""); }
-    #[test] fn test_drop_left_unicode() { assert_eq!(string_drop_left(1, "héllo".into()), "éllo"); }
+    #[test]
+    fn test_drop_left_basic() {
+        assert_eq!(string_drop_left(2, "hello".into()), "llo");
+    }
+    #[test]
+    fn test_drop_left_zero() {
+        assert_eq!(string_drop_left(0, "hello".into()), "hello");
+    }
+    #[test]
+    fn test_drop_left_negative() {
+        assert_eq!(string_drop_left(-1, "hello".into()), "hello");
+    }
+    #[test]
+    fn test_drop_left_exact() {
+        assert_eq!(string_drop_left(5, "hello".into()), "");
+    }
+    #[test]
+    fn test_drop_left_over() {
+        assert_eq!(string_drop_left(99, "hello".into()), "");
+    }
+    #[test]
+    fn test_drop_left_unicode() {
+        assert_eq!(string_drop_left(1, "héllo".into()), "éllo");
+    }
 
     // string_drop_right
-    #[test] fn test_drop_right_basic() { assert_eq!(string_drop_right(2, "hello".into()), "hel"); }
-    #[test] fn test_drop_right_zero() { assert_eq!(string_drop_right(0, "hello".into()), "hello"); }
-    #[test] fn test_drop_right_negative() { assert_eq!(string_drop_right(-1, "hello".into()), "hello"); }
-    #[test] fn test_drop_right_exact() { assert_eq!(string_drop_right(5, "hello".into()), ""); }
-    #[test] fn test_drop_right_over() { assert_eq!(string_drop_right(99, "hello".into()), ""); }
-    #[test] fn test_drop_right_unicode() { assert_eq!(string_drop_right(1, "héllo".into()), "héll"); }
+    #[test]
+    fn test_drop_right_basic() {
+        assert_eq!(string_drop_right(2, "hello".into()), "hel");
+    }
+    #[test]
+    fn test_drop_right_zero() {
+        assert_eq!(string_drop_right(0, "hello".into()), "hello");
+    }
+    #[test]
+    fn test_drop_right_negative() {
+        assert_eq!(string_drop_right(-1, "hello".into()), "hello");
+    }
+    #[test]
+    fn test_drop_right_exact() {
+        assert_eq!(string_drop_right(5, "hello".into()), "");
+    }
+    #[test]
+    fn test_drop_right_over() {
+        assert_eq!(string_drop_right(99, "hello".into()), "");
+    }
+    #[test]
+    fn test_drop_right_unicode() {
+        assert_eq!(string_drop_right(1, "héllo".into()), "héll");
+    }
 
     // string_equal_fold
-    #[test] fn test_equal_fold_same() { assert!(string_equal_fold("hello".into(), "HELLO".into())); }
-    #[test] fn test_equal_fold_diff() { assert!(!string_equal_fold("hello".into(), "world".into())); }
-    #[test] fn test_equal_fold_unicode() { assert!(string_equal_fold("café".into(), "CAFÉ".into())); }
-    #[test] fn test_equal_fold_empty() { assert!(string_equal_fold("".into(), "".into())); }
+    #[test]
+    fn test_equal_fold_same() {
+        assert!(string_equal_fold("hello".into(), "HELLO".into()));
+    }
+    #[test]
+    fn test_equal_fold_diff() {
+        assert!(!string_equal_fold("hello".into(), "world".into()));
+    }
+    #[test]
+    fn test_equal_fold_unicode() {
+        assert!(string_equal_fold("café".into(), "CAFÉ".into()));
+    }
+    #[test]
+    fn test_equal_fold_empty() {
+        assert!(string_equal_fold("".into(), "".into()));
+    }
 
     // string_from_list
-    #[test] fn test_from_list_basic() { assert_eq!(string_from_list(vec!['h', 'i']), "hi"); }
-    #[test] fn test_from_list_empty() { assert_eq!(string_from_list(vec![]), ""); }
-    #[test] fn test_from_list_unicode() { assert_eq!(string_from_list(vec!['é', 'à']), "éà"); }
+    #[test]
+    fn test_from_list_basic() {
+        assert_eq!(string_from_list(vec!['h', 'i']), "hi");
+    }
+    #[test]
+    fn test_from_list_empty() {
+        assert_eq!(string_from_list(vec![]), "");
+    }
+    #[test]
+    fn test_from_list_unicode() {
+        assert_eq!(string_from_list(vec!['é', 'à']), "éà");
+    }
 
     // string_is_email
-    #[test] fn test_is_email_valid() { assert!(string_is_email("user@example.com".into())); }
-    #[test] fn test_is_email_no_at() { assert!(!string_is_email("userexample.com".into())); }
-    #[test] fn test_is_email_no_domain_dot() { assert!(!string_is_email("user@example".into())); }
-    #[test] fn test_is_email_name_component() { assert!(!string_is_email("Foo Bar <foo@bar.com>".into())); }
-    #[test] fn test_is_email_empty() { assert!(!string_is_email("".into())); }
-    #[test] fn test_is_email_with_plus() { assert!(string_is_email("user+tag@example.com".into())); }
+    #[test]
+    fn test_is_email_valid() {
+        assert!(string_is_email("user@example.com".into()));
+    }
+    #[test]
+    fn test_is_email_no_at() {
+        assert!(!string_is_email("userexample.com".into()));
+    }
+    #[test]
+    fn test_is_email_no_domain_dot() {
+        assert!(!string_is_email("user@example".into()));
+    }
+    #[test]
+    fn test_is_email_name_component() {
+        assert!(!string_is_email("Foo Bar <foo@bar.com>".into()));
+    }
+    #[test]
+    fn test_is_email_empty() {
+        assert!(!string_is_email("".into()));
+    }
+    #[test]
+    fn test_is_email_with_plus() {
+        assert!(string_is_email("user+tag@example.com".into()));
+    }
 
     // string_is_url
-    #[test] fn test_is_url_http() { assert!(string_is_url("http://example.com".into())); }
-    #[test] fn test_is_url_https() { assert!(string_is_url("https://example.com/path".into())); }
-    #[test] fn test_is_url_ws() { assert!(string_is_url("ws://example.com".into())); }
-    #[test] fn test_is_url_wss() { assert!(string_is_url("wss://example.com".into())); }
-    #[test] fn test_is_url_relative() { assert!(!string_is_url("/api/users".into())); }
-    #[test] fn test_is_url_javascript() { assert!(!string_is_url("javascript:alert(1)".into())); }
-    #[test] fn test_is_url_data() { assert!(!string_is_url("data:text/html,<h1>".into())); }
-    #[test] fn test_is_url_empty() { assert!(!string_is_url("".into())); }
-    #[test] fn test_is_url_ftp() { assert!(!string_is_url("ftp://example.com".into())); }
-    #[test] fn test_is_url_rejects_control_chars() {
+    #[test]
+    fn test_is_url_http() {
+        assert!(string_is_url("http://example.com".into()));
+    }
+    #[test]
+    fn test_is_url_https() {
+        assert!(string_is_url("https://example.com/path".into()));
+    }
+    #[test]
+    fn test_is_url_ws() {
+        assert!(string_is_url("ws://example.com".into()));
+    }
+    #[test]
+    fn test_is_url_wss() {
+        assert!(string_is_url("wss://example.com".into()));
+    }
+    #[test]
+    fn test_is_url_relative() {
+        assert!(!string_is_url("/api/users".into()));
+    }
+    #[test]
+    fn test_is_url_javascript() {
+        assert!(!string_is_url("javascript:alert(1)".into()));
+    }
+    #[test]
+    fn test_is_url_data() {
+        assert!(!string_is_url("data:text/html,<h1>".into()));
+    }
+    #[test]
+    fn test_is_url_empty() {
+        assert!(!string_is_url("".into()));
+    }
+    #[test]
+    fn test_is_url_ftp() {
+        assert!(!string_is_url("ftp://example.com".into()));
+    }
+    #[test]
+    fn test_is_url_rejects_control_chars() {
         // Embedded control bytes (NUL / ESC) → reject (XSS-link-gate parity with Go url.Parse).
         assert!(!string_is_url("http://exa\u{0}mple.com".into()));
         assert!(!string_is_url("https://e\u{1b}vil.com".into()));
     }
 
     // string_pad_left
-    #[test] fn test_pad_left_basic() { assert_eq!(string_pad_left(5, '0', "42".into()), "00042"); }
-    #[test] fn test_pad_left_already_wide() { assert_eq!(string_pad_left(3, '0', "hello".into()), "hello"); }
-    #[test] fn test_pad_left_zero_n() { assert_eq!(string_pad_left(0, ' ', "x".into()), "x"); }
-    #[test] fn test_pad_left_unicode_pad() { assert_eq!(string_pad_left(4, '★', "ab".into()), "★★ab"); }
-    #[test] fn test_pad_left_unicode_str() { assert_eq!(string_pad_left(4, '-', "éà".into()), "--éà"); }
+    #[test]
+    fn test_pad_left_basic() {
+        assert_eq!(string_pad_left(5, '0', "42".into()), "00042");
+    }
+    #[test]
+    fn test_pad_left_already_wide() {
+        assert_eq!(string_pad_left(3, '0', "hello".into()), "hello");
+    }
+    #[test]
+    fn test_pad_left_zero_n() {
+        assert_eq!(string_pad_left(0, ' ', "x".into()), "x");
+    }
+    #[test]
+    fn test_pad_left_unicode_pad() {
+        assert_eq!(string_pad_left(4, '★', "ab".into()), "★★ab");
+    }
+    #[test]
+    fn test_pad_left_unicode_str() {
+        assert_eq!(string_pad_left(4, '-', "éà".into()), "--éà");
+    }
 
     // string_pad_right
-    #[test] fn test_pad_right_basic() { assert_eq!(string_pad_right(5, '-', "x".into()), "x----"); }
-    #[test] fn test_pad_right_already_wide() { assert_eq!(string_pad_right(2, '-', "hello".into()), "hello"); }
-    #[test] fn test_pad_right_zero_n() { assert_eq!(string_pad_right(0, ' ', "x".into()), "x"); }
-    #[test] fn test_pad_right_unicode_pad() { assert_eq!(string_pad_right(4, '★', "ab".into()), "ab★★"); }
+    #[test]
+    fn test_pad_right_basic() {
+        assert_eq!(string_pad_right(5, '-', "x".into()), "x----");
+    }
+    #[test]
+    fn test_pad_right_already_wide() {
+        assert_eq!(string_pad_right(2, '-', "hello".into()), "hello");
+    }
+    #[test]
+    fn test_pad_right_zero_n() {
+        assert_eq!(string_pad_right(0, ' ', "x".into()), "x");
+    }
+    #[test]
+    fn test_pad_right_unicode_pad() {
+        assert_eq!(string_pad_right(4, '★', "ab".into()), "ab★★");
+    }
 
     // string_to_list
-    #[test] fn test_to_list_basic() { assert_eq!(string_to_list("hi".into()), vec!['h', 'i']); }
-    #[test] fn test_to_list_empty() { assert_eq!(string_to_list("".into()), Vec::<char>::new()); }
-    #[test] fn test_to_list_unicode() { assert_eq!(string_to_list("éà".into()), vec!['é', 'à']); }
+    #[test]
+    fn test_to_list_basic() {
+        assert_eq!(string_to_list("hi".into()), vec!['h', 'i']);
+    }
+    #[test]
+    fn test_to_list_empty() {
+        assert_eq!(string_to_list("".into()), Vec::<char>::new());
+    }
+    #[test]
+    fn test_to_list_unicode() {
+        assert_eq!(string_to_list("éà".into()), vec!['é', 'à']);
+    }
 
     // string_trim_start
-    #[test] fn test_trim_start_spaces() { assert_eq!(string_trim_start("  hello".into()), "hello"); }
-    #[test] fn test_trim_start_tabs() { assert_eq!(string_trim_start("\t\nhello".into()), "hello"); }
-    #[test] fn test_trim_start_nbsp() { assert_eq!(string_trim_start("\u{00A0}hello".into()), "hello"); }
-    #[test] fn test_trim_start_no_trailing() { assert_eq!(string_trim_start("  hello  ".into()), "hello  "); }
-    #[test] fn test_trim_start_empty() { assert_eq!(string_trim_start("".into()), ""); }
+    #[test]
+    fn test_trim_start_spaces() {
+        assert_eq!(string_trim_start("  hello".into()), "hello");
+    }
+    #[test]
+    fn test_trim_start_tabs() {
+        assert_eq!(string_trim_start("\t\nhello".into()), "hello");
+    }
+    #[test]
+    fn test_trim_start_nbsp() {
+        assert_eq!(string_trim_start("\u{00A0}hello".into()), "hello");
+    }
+    #[test]
+    fn test_trim_start_no_trailing() {
+        assert_eq!(string_trim_start("  hello  ".into()), "hello  ");
+    }
+    #[test]
+    fn test_trim_start_empty() {
+        assert_eq!(string_trim_start("".into()), "");
+    }
 
     // string_trim_end
-    #[test] fn test_trim_end_spaces() { assert_eq!(string_trim_end("hello  ".into()), "hello"); }
-    #[test] fn test_trim_end_mixed() { assert_eq!(string_trim_end("hello\t\n".into()), "hello"); }
-    #[test] fn test_trim_end_nbsp() { assert_eq!(string_trim_end("hello\u{00A0}".into()), "hello"); }
-    #[test] fn test_trim_end_no_leading() { assert_eq!(string_trim_end("  hello  ".into()), "  hello"); }
-    #[test] fn test_trim_end_empty() { assert_eq!(string_trim_end("".into()), ""); }
+    #[test]
+    fn test_trim_end_spaces() {
+        assert_eq!(string_trim_end("hello  ".into()), "hello");
+    }
+    #[test]
+    fn test_trim_end_mixed() {
+        assert_eq!(string_trim_end("hello\t\n".into()), "hello");
+    }
+    #[test]
+    fn test_trim_end_nbsp() {
+        assert_eq!(string_trim_end("hello\u{00A0}".into()), "hello");
+    }
+    #[test]
+    fn test_trim_end_no_leading() {
+        assert_eq!(string_trim_end("  hello  ".into()), "  hello");
+    }
+    #[test]
+    fn test_trim_end_empty() {
+        assert_eq!(string_trim_end("".into()), "");
+    }
 
     // string_split — Go strings.Split parity
-    #[test] fn test_split_nonempty_sep() { assert_eq!(string_split(",".into(), "a,b,c".into()), vec!["a", "b", "c"]); }
-    #[test] fn test_split_empty_sep_runes() { assert_eq!(string_split("".into(), "abc".into()), vec!["a", "b", "c"]); }
-    #[test] fn test_split_empty_sep_unicode() { assert_eq!(string_split("".into(), "héi".into()), vec!["h", "é", "i"]); }
-    #[test] fn test_split_empty_sep_empty_str() { assert_eq!(string_split("".into(), "".into()), Vec::<String>::new()); }
-    #[test] fn test_split_trailing_sep() { assert_eq!(string_split(",".into(), "a,".into()), vec!["a", ""]); }
+    #[test]
+    fn test_split_nonempty_sep() {
+        assert_eq!(
+            string_split(",".into(), "a,b,c".into()),
+            vec!["a", "b", "c"]
+        );
+    }
+    #[test]
+    fn test_split_empty_sep_runes() {
+        assert_eq!(string_split("".into(), "abc".into()), vec!["a", "b", "c"]);
+    }
+    #[test]
+    fn test_split_empty_sep_unicode() {
+        assert_eq!(string_split("".into(), "héi".into()), vec!["h", "é", "i"]);
+    }
+    #[test]
+    fn test_split_empty_sep_empty_str() {
+        assert_eq!(string_split("".into(), "".into()), Vec::<String>::new());
+    }
+    #[test]
+    fn test_split_trailing_sep() {
+        assert_eq!(string_split(",".into(), "a,".into()), vec!["a", ""]);
+    }
 
     // string_to_int — NO trim: parity with Go's observable `String_toInt`
     // (`strconv.Atoi(s)`, the path the emitted code uses) and Elm's `String.toInt`.
     // Surrounding whitespace ⇒ Nothing; only a clean numeric string parses.
-    #[test] fn test_to_int_plain() { assert!(matches!(string_to_int("42".into()), SkyMaybe::Just(42))); }
-    #[test] fn test_to_int_negative() { assert!(matches!(string_to_int("-5".into()), SkyMaybe::Just(-5))); }
-    #[test] fn test_to_int_no_trim_leading() { assert!(matches!(string_to_int(" 42".into()), SkyMaybe::Nothing)); }
-    #[test] fn test_to_int_no_trim_trailing() { assert!(matches!(string_to_int("42 ".into()), SkyMaybe::Nothing)); }
-    #[test] fn test_to_int_no_trim_both() { assert!(matches!(string_to_int(" 42 ".into()), SkyMaybe::Nothing)); }
-    #[test] fn test_to_int_garbage() { assert!(matches!(string_to_int("4x".into()), SkyMaybe::Nothing)); }
+    #[test]
+    fn test_to_int_plain() {
+        assert!(matches!(string_to_int("42".into()), SkyMaybe::Just(42)));
+    }
+    #[test]
+    fn test_to_int_negative() {
+        assert!(matches!(string_to_int("-5".into()), SkyMaybe::Just(-5)));
+    }
+    #[test]
+    fn test_to_int_no_trim_leading() {
+        assert!(matches!(string_to_int(" 42".into()), SkyMaybe::Nothing));
+    }
+    #[test]
+    fn test_to_int_no_trim_trailing() {
+        assert!(matches!(string_to_int("42 ".into()), SkyMaybe::Nothing));
+    }
+    #[test]
+    fn test_to_int_no_trim_both() {
+        assert!(matches!(string_to_int(" 42 ".into()), SkyMaybe::Nothing));
+    }
+    #[test]
+    fn test_to_int_garbage() {
+        assert!(matches!(string_to_int("4x".into()), SkyMaybe::Nothing));
+    }
 
     // string_to_float — Unicode-whitespace trim
-    #[test] fn test_to_float_plain() { assert!(matches!(string_to_float("1.5".into()), SkyMaybe::Just(v) if v == 1.5)); }
-    #[test] fn test_to_float_trimmed() { assert!(matches!(string_to_float("  1.5\n".into()), SkyMaybe::Just(v) if v == 1.5)); }
-    #[test] fn test_to_float_scientific() { assert!(matches!(string_to_float(" 1e3 ".into()), SkyMaybe::Just(v) if v == 1000.0)); }
-    #[test] fn test_to_float_garbage() { assert!(matches!(string_to_float("1.2.3".into()), SkyMaybe::Nothing)); }
+    #[test]
+    fn test_to_float_plain() {
+        assert!(matches!(string_to_float("1.5".into()), SkyMaybe::Just(v) if v == 1.5));
+    }
+    #[test]
+    fn test_to_float_trimmed() {
+        assert!(matches!(string_to_float("  1.5\n".into()), SkyMaybe::Just(v) if v == 1.5));
+    }
+    #[test]
+    fn test_to_float_scientific() {
+        assert!(matches!(string_to_float(" 1e3 ".into()), SkyMaybe::Just(v) if v == 1000.0));
+    }
+    #[test]
+    fn test_to_float_garbage() {
+        assert!(matches!(string_to_float("1.2.3".into()), SkyMaybe::Nothing));
+    }
 
     // round-trip toList / fromList
-    #[test] fn test_list_roundtrip() {
+    #[test]
+    fn test_list_roundtrip() {
         let s = "héllo wörld".to_string();
         let chars = string_to_list(s.clone());
         assert_eq!(string_from_list(chars), s);

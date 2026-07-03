@@ -30,8 +30,8 @@ use super::super::core::{ok_res, str_err, SkyResult, SkyTask};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{Row, SqlitePool};
 use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -168,7 +168,10 @@ async fn read_logs_value(db_path: &str, service: &str, filter: HubLogFilter) -> 
         // Derive status/latency from the log's attrs (Go `toHubLogRow` parity) —
         // the writer carries `status` / `latency_ms` keys (the same `latency_ms`
         // `aggregate_service_stat` reads). Missing/unparseable → 0.0.
-        let status = attrs.get("status").and_then(|s| parse_float_attr(s)).unwrap_or(0.0);
+        let status = attrs
+            .get("status")
+            .and_then(|s| parse_float_attr(s))
+            .unwrap_or(0.0);
         let latency_ms = attrs
             .get("latency_ms")
             .and_then(|s| parse_float_attr(s))
@@ -253,9 +256,7 @@ async fn read_metrics_value(db_path: &str, service: &str) -> Value {
     let Some(pool) = open_spill(db_path).await else {
         return Value::Array(vec![]);
     };
-    let mut sql = String::from(
-        "SELECT name, type, value, attrs FROM telemetry_metric WHERE 1=1",
-    );
+    let mut sql = String::from("SELECT name, type, value, attrs FROM telemetry_metric WHERE 1=1");
     if !service.is_empty() {
         sql.push_str(" AND service_name = ?");
     }
@@ -359,9 +360,7 @@ async fn read_errors_value(db_path: &str, service: &str) -> Value {
     let Some(pool) = open_spill(db_path).await else {
         return Value::Array(vec![]);
     };
-    let mut sql = String::from(
-        "SELECT message FROM telemetry_log WHERE level = 'error'",
-    );
+    let mut sql = String::from("SELECT message FROM telemetry_log WHERE level = 'error'");
     if !service.is_empty() {
         sql.push_str(" AND service_name = ?");
     }
@@ -495,9 +494,7 @@ where
     E: Send + From<String> + 'static,
     A: DeserializeOwned + Send + 'static,
 {
-    Box::pin(async move {
-        decode_one(json!({ "subject": "", "email": "", "claims": {} }))
-    })
+    Box::pin(async move { decode_one(json!({ "subject": "", "email": "", "claims": {} })) })
 }
 
 // — ServiceStats aggregation (Go `aggregateServiceStat`) —
@@ -842,7 +839,11 @@ mod tests {
         let path = dir.to_string_lossy().to_string();
         let _ = std::fs::remove_file(&path);
         let pool = seed(&path).await;
-        for (tbl, svc) in [("telemetry_log", "b"), ("telemetry_log", "a"), ("telemetry_span", "a")] {
+        for (tbl, svc) in [
+            ("telemetry_log", "b"),
+            ("telemetry_log", "a"),
+            ("telemetry_span", "a"),
+        ] {
             sqlx::query(&format!(
                 "INSERT INTO {tbl} (service_name, time) VALUES (?, '2026-01-01T00:00:00Z')"
             ))
@@ -887,8 +888,14 @@ mod tests {
     }
     impl TestFilter {
         fn none() -> Self {
-            Self { query: String::new(), session: String::new(),
-                   showDebug: false, showInfo: false, showWarn: false, showError: false }
+            Self {
+                query: String::new(),
+                session: String::new(),
+                showDebug: false,
+                showInfo: false,
+                showWarn: false,
+                showError: false,
+            }
         }
     }
 
@@ -901,18 +908,29 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let pool = seed(&path).await;
         for (lvl, msg, attrs) in [
-            ("info", "hello", r#"{"req_id":"r1","session_id":"s1","route":"/a"}"#),
+            (
+                "info",
+                "hello",
+                r#"{"req_id":"r1","session_id":"s1","route":"/a"}"#,
+            ),
             ("error", "boom", r#"{"req_id":"r2","route":"/b"}"#),
         ] {
             sqlx::query(
                 "INSERT INTO telemetry_log (service_name, time, level, message, attrs) \
                  VALUES ('svc', '2026-01-01T00:00:00Z', ?, ?, ?)",
             )
-            .bind(lvl).bind(msg).bind(attrs)
-            .execute(&pool).await.unwrap();
+            .bind(lvl)
+            .bind(msg)
+            .bind(attrs)
+            .execute(&pool)
+            .await
+            .unwrap();
         }
         // showError only → exactly-one-level → just the error row.
-        let f = TestFilter { showError: true, ..TestFilter::none() };
+        let f = TestFilter {
+            showError: true,
+            ..TestFilter::none()
+        };
         let res: SkyResult<String, Vec<Value>> = hub_read_logs(path.clone(), f).await;
         match res {
             SkyResult::Ok(rows) => {
@@ -925,7 +943,10 @@ mod tests {
             SkyResult::Err(_) => panic!("expected Ok"),
         }
         // Free-text query "hello" → only the info row (no level filter).
-        let f2 = TestFilter { query: "hello".to_string(), ..TestFilter::none() };
+        let f2 = TestFilter {
+            query: "hello".to_string(),
+            ..TestFilter::none()
+        };
         let res2: SkyResult<String, Vec<Value>> = hub_read_logs(path.clone(), f2).await;
         match res2 {
             SkyResult::Ok(rows) => {
@@ -950,7 +971,10 @@ mod tests {
                 "INSERT INTO telemetry_log (service_name, time, level, message, attrs) \
                  VALUES (?, '2026-01-01T00:00:00Z', 'info', 'm', '{}')",
             )
-            .bind(svc).execute(&pool).await.unwrap();
+            .bind(svc)
+            .execute(&pool)
+            .await
+            .unwrap();
         }
         let res: SkyResult<String, Vec<Value>> =
             hub_read_filtered_logs(path.clone(), "alpha".to_string(), TestFilter::none()).await;
@@ -978,7 +1002,8 @@ mod tests {
     async fn read_metrics_joins_sorted_labels() {
         let path = std::env::temp_dir()
             .join(format!("hub-met-{}.db", std::process::id()))
-            .to_string_lossy().to_string();
+            .to_string_lossy()
+            .to_string();
         let _ = std::fs::remove_file(&path);
         let pool = seed(&path).await;
         sqlx::query(
@@ -986,7 +1011,9 @@ mod tests {
              VALUES ('svc', '2026-01-01T00:00:00Z', 'reqs', 'counter', 5.0, ?)",
         )
         .bind(r#"{"zone":"eu","app":"web"}"#)
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
         let res: SkyResult<String, Vec<Value>> = hub_read_metrics(path.clone()).await;
         match res {
             SkyResult::Ok(rows) => {
@@ -1005,7 +1032,8 @@ mod tests {
     async fn read_traces_computes_duration() {
         let path = std::env::temp_dir()
             .join(format!("hub-tr-{}.db", std::process::id()))
-            .to_string_lossy().to_string();
+            .to_string_lossy()
+            .to_string();
         let _ = std::fs::remove_file(&path);
         let pool = seed(&path).await;
         sqlx::query(
@@ -1015,7 +1043,9 @@ mod tests {
               '2026-01-01T00:00:00Z', '2026-01-01T00:00:00.100Z', ?)",
         )
         .bind(r#"{"status":"ok"}"#)
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
         let res: SkyResult<String, Vec<Value>> = hub_read_traces(path.clone()).await;
         match res {
             SkyResult::Ok(rows) => {
@@ -1034,7 +1064,8 @@ mod tests {
     async fn read_errors_groups_by_message() {
         let path = std::env::temp_dir()
             .join(format!("hub-err-{}.db", std::process::id()))
-            .to_string_lossy().to_string();
+            .to_string_lossy()
+            .to_string();
         let _ = std::fs::remove_file(&path);
         let pool = seed(&path).await;
         for msg in ["boom", "boom", "split"] {
@@ -1042,7 +1073,10 @@ mod tests {
                 "INSERT INTO telemetry_log (service_name, time, level, message, attrs) \
                  VALUES ('svc', '2026-01-01T00:00:00Z', 'error', ?, '{}')",
             )
-            .bind(msg).execute(&pool).await.unwrap();
+            .bind(msg)
+            .execute(&pool)
+            .await
+            .unwrap();
         }
         let res: SkyResult<String, Vec<Value>> = hub_read_errors(path.clone()).await;
         match res {
@@ -1089,15 +1123,22 @@ mod tests {
     async fn overview_splices_counts() {
         let path = std::env::temp_dir()
             .join(format!("hub-ov-{}.db", std::process::id()))
-            .to_string_lossy().to_string();
+            .to_string_lossy()
+            .to_string();
         let _ = std::fs::remove_file(&path);
         let pool = seed(&path).await;
         sqlx::query("INSERT INTO telemetry_log (service_name, time) VALUES ('s','t')")
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO telemetry_span (service_name, time) VALUES ('s','t')")
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO telemetry_span (service_name, time) VALUES ('s','t')")
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         let res: SkyResult<String, Value> = hub_read_overview(path.clone()).await;
         match res {
             SkyResult::Ok(ov) => {
@@ -1128,7 +1169,8 @@ mod tests {
     async fn service_stats_aggregates_recent() {
         let path = std::env::temp_dir()
             .join(format!("hub-stats-{}.db", std::process::id()))
-            .to_string_lossy().to_string();
+            .to_string_lossy()
+            .to_string();
         let _ = std::fs::remove_file(&path);
         let pool = seed(&path).await;
         // Two recent logs (one error) for service 'svc' → errorRate 0.5 → "err".
@@ -1138,7 +1180,11 @@ mod tests {
                 "INSERT INTO telemetry_log (service_name, time, level, message, attrs) \
                  VALUES ('svc', ?, ?, 'm', '{\"latency_ms\":\"10\"}')",
             )
-            .bind(&now).bind(lvl).execute(&pool).await.unwrap();
+            .bind(&now)
+            .bind(lvl)
+            .execute(&pool)
+            .await
+            .unwrap();
         }
         let res: SkyResult<String, Vec<Value>> = hub_read_service_stats(path.clone()).await;
         match res {

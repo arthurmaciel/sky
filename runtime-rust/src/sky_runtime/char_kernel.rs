@@ -61,11 +61,17 @@ pub fn char_is_alpha(c: char) -> bool {
     )
 }
 
-pub fn char_to_lower(c: char) -> String { c.to_lowercase().to_string() }
-pub fn char_to_upper(c: char) -> String { c.to_uppercase().to_string() }
+pub fn char_to_lower(c: char) -> String {
+    c.to_lowercase().to_string()
+}
+pub fn char_to_upper(c: char) -> String {
+    c.to_uppercase().to_string()
+}
 
 /// `toCode 'A' -> 65` — the Unicode code point as an integer.
-pub fn char_to_code(c: char) -> i64 { c as u32 as i64 }
+pub fn char_to_code(c: char) -> i64 {
+    c as u32 as i64
+}
 
 /// `fromCode 65 -> 'A'`. Out-of-range / surrogate -> U+FFFD (matches Go).
 pub fn char_from_code(n: i64) -> char {

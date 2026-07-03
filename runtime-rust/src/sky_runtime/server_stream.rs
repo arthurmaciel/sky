@@ -108,7 +108,10 @@ where
         content_type
     };
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
-    pending_handlers().lock().unwrap_or_else(|e| e.into_inner()).insert(token, erased);
+    pending_handlers()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(token, erased);
     Box::pin(async move {
         SkyResult::Ok(ServerResponse {
             status: 200,
@@ -127,13 +130,19 @@ pub fn server_stream_emit<E: From<String> + Send + 'static>(
     id: i64,
 ) -> SkyTask<E, ()> {
     Box::pin(async move {
-        let sender = stream_senders().lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned();
+        let sender = stream_senders()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .cloned();
         match sender {
             Some(tx) => match tx.send(chunk).await {
                 Ok(()) => SkyResult::Ok(()),
                 // Receiver dropped — client disconnected. Surface as an error so
                 // a relay's forEachChunk fail-fast stops pulling the upstream.
-                Err(_) => SkyResult::Err("server.stream emit: client disconnected".to_string().into()),
+                Err(_) => {
+                    SkyResult::Err("server.stream emit: client disconnected".to_string().into())
+                }
             },
             None => SkyResult::Ok(()),
         }
@@ -145,7 +154,10 @@ pub fn server_stream_emit<E: From<String> + Send + 'static>(
 /// return; explicit when the handler wants to release the connection early.
 pub fn server_stream_finish<E: From<String> + Send + 'static>(id: i64) -> SkyTask<E, ()> {
     Box::pin(async move {
-        stream_senders().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        stream_senders()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         SkyResult::Ok(())
     })
 }
@@ -171,7 +183,10 @@ pub fn serve_streaming_sentinel(r: &ServerResponse) -> Option<axum::response::Re
     let rest = r.body.strip_prefix(SENTINEL_PREFIX)?;
     let token_str = rest.strip_prefix(sentinel_nonce())?.strip_prefix(':')?;
     let token: i64 = token_str.parse().ok()?;
-    let handler = pending_handlers().lock().unwrap_or_else(|e| e.into_inner()).remove(&token)?;
+    let handler = pending_handlers()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&token)?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(STREAM_CHAN_BUFFER);
     let id = loop {
@@ -180,13 +195,19 @@ pub fn serve_streaming_sentinel(r: &ServerResponse) -> Option<axum::response::Re
             break n;
         }
     };
-    stream_senders().lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
+    stream_senders()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id, tx);
 
     // Drive the handler in its own task; on completion drop the sender so the
     // body stream terminates even if the handler forgot to call `finish`.
     tokio::spawn(async move {
         handler(StreamWriter::StreamWriter(id)).await;
-        stream_senders().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        stream_senders()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
     });
 
     // Receiver → byte stream. unfold yields each chunk; None ends the body when

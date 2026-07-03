@@ -41,7 +41,11 @@ pub async fn readyz() -> impl IntoResponse {
     if READY.load(Ordering::SeqCst) {
         (StatusCode::OK, [JSON], r#"{"status":"ready"}"#)
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, [JSON], r#"{"status":"draining"}"#)
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [JSON],
+            r#"{"status":"draining"}"#,
+        )
     }
 }
 
@@ -51,9 +55,8 @@ pub async fn buildinfo() -> impl IntoResponse {
     let commit = option_env!("SKY_BUILD_COMMIT").unwrap_or("dev");
     let built_at = option_env!("SKY_BUILD_AT").unwrap_or("unknown");
     let version = option_env!("SKY_VERSION").unwrap_or("dev");
-    let body = format!(
-        r#"{{"commit":"{commit}","builtAt":"{built_at}","skyVersion":"{version}"}}"#
-    );
+    let body =
+        format!(r#"{{"commit":"{commit}","builtAt":"{built_at}","skyVersion":"{version}"}}"#);
     (StatusCode::OK, [JSON], body)
 }
 
@@ -79,7 +82,10 @@ pub async fn metrics() -> impl IntoResponse {
 /// OTel-span middleware wraps the whole mux). Counts every request, and for
 /// user-facing requests auto-records a span + an access log so the console has
 /// data without the app calling `Std.Trace`/`Std.Log` itself.
-pub async fn track(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+pub async fn track(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
     // Gate the console + metrics surface (off / production-auth) before serving.
     let path = req.uri().path().to_string();
     let method = req.method().as_str().to_string();
@@ -123,7 +129,10 @@ pub async fn track(req: axum::extract::Request, next: axum::middleware::Next) ->
         let status_str = status.to_string();
         super::super::telemetry::metric_inc(
             "sky_live_requests_total",
-            &[("method", normalize_method(&method)), ("status", &status_str)],
+            &[
+                ("method", normalize_method(&method)),
+                ("status", &status_str),
+            ],
             1,
         );
         let ok = status < 500;
@@ -203,7 +212,9 @@ fn sanitise_path(path: &str) -> String {
 fn is_sub_app() -> bool {
     static SUB_APP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SUB_APP.get_or_init(|| {
-        std::env::var("SKY_LIVE_BASE_PATH").map(|v| !v.is_empty()).unwrap_or(false)
+        std::env::var("SKY_LIVE_BASE_PATH")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
     })
 }
 
@@ -353,7 +364,10 @@ mod tests {
         // SECURITY (the load-bearing invariant): the 500 body carries ONLY the
         // errId — the panic message (here a fake secret) must NEVER reach the
         // client.
-        assert!(body.contains("ref"), "expected an errId `ref` in the body: {body}");
+        assert!(
+            body.contains("ref"),
+            "expected an errId `ref` in the body: {body}"
+        );
         assert!(
             !body.contains("SECRET123") && !body.contains("/etc/secret"),
             "panic message LEAKED into the 500 response body: {body}"

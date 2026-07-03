@@ -41,8 +41,12 @@ pub enum SkySub<M> {
 
 // ─── Cmd kernels ──────────────────────────────────────────────────────────
 
-pub fn cmd_none<M>() -> SkyCmd<M> { SkyCmd::None }
-pub fn cmd_batch<M>(list: Vec<SkyCmd<M>>) -> SkyCmd<M> { SkyCmd::Batch(list) }
+pub fn cmd_none<M>() -> SkyCmd<M> {
+    SkyCmd::None
+}
+pub fn cmd_batch<M>(list: Vec<SkyCmd<M>>) -> SkyCmd<M> {
+    SkyCmd::Batch(list)
+}
 
 /// Cmd.perform : Task err a -> (Result err a -> msg) -> Cmd msg.
 /// Composes the task and the toMsg decoder (which receives the SkyResult) into a
@@ -54,21 +58,31 @@ where
     M: Send + 'static,
     F: FnOnce(SkyResult<E, A>) -> M + Send + 'static,
 {
-    SkyCmd::Perform(Box::new(move || Box::pin(async move { to_msg(task.await) })))
+    SkyCmd::Perform(Box::new(move || {
+        Box::pin(async move { to_msg(task.await) })
+    }))
 }
 
 // ─── Sub kernels ──────────────────────────────────────────────────────────
 
-pub fn sub_none<M>() -> SkySub<M> { SkySub::None }
-pub fn sub_batch<M>(list: Vec<SkySub<M>>) -> SkySub<M> { SkySub::Batch(list) }
+pub fn sub_none<M>() -> SkySub<M> {
+    SkySub::None
+}
+pub fn sub_batch<M>(list: Vec<SkySub<M>>) -> SkySub<M> {
+    SkySub::Batch(list)
+}
 
 /// Sub.every : Int -> msg -> Sub msg — dispatch `msg` every `ms` milliseconds.
-pub fn sub_every<M>(ms: i64, msg: M) -> SkySub<M> { SkySub::Every { ms, msg } }
+pub fn sub_every<M>(ms: i64, msg: M) -> SkySub<M> {
+    SkySub::Every { ms, msg }
+}
 
 /// Time.every : Int -> msg -> Sub msg — alias of `Sub.every` (matches Go's
 /// `Time_every`, which delegates to `Sub_every`). The `Time_every` kernel name
 /// lowers to this.
-pub fn time_every<M>(ms: i64, msg: M) -> SkySub<M> { sub_every(ms, msg) }
+pub fn time_every<M>(ms: i64, msg: M) -> SkySub<M> {
+    sub_every(ms, msg)
+}
 
 // `Sky.Core.Http.Stream.chunks` → `Sub_subscribeStream` lives in `http_stream.rs`
 // now (alongside the stream registry it drains + the bridged `ChunkEvent` enum).
@@ -101,7 +115,10 @@ pub(crate) struct SubManager<M> {
 
 impl<M: Clone + Send + 'static> SubManager<M> {
     pub(crate) fn new(tx: tokio::sync::mpsc::UnboundedSender<CliEvent<M>>) -> Self {
-        SubManager { tx, handles: Vec::new() }
+        SubManager {
+            tx,
+            handles: Vec::new(),
+        }
     }
     pub(crate) fn stop_all(&mut self) {
         for h in self.handles.drain(..) {
@@ -140,8 +157,9 @@ impl<M: Clone + Send + 'static> SubManager<M> {
             SkySub::Source(spawn) => {
                 // Hand the source an emit callback that funnels Msgs into the loop.
                 let tx = self.tx.clone();
-                let emit: std::sync::Arc<dyn Fn(M) + Send + Sync> =
-                    std::sync::Arc::new(move |m| { let _ = tx.send(CliEvent::Msg(m)); });
+                let emit: std::sync::Arc<dyn Fn(M) + Send + Sync> = std::sync::Arc::new(move |m| {
+                    let _ = tx.send(CliEvent::Msg(m));
+                });
                 self.handles.push(spawn(emit));
             }
         }
@@ -150,7 +168,10 @@ impl<M: Clone + Send + 'static> SubManager<M> {
 
 /// Fire a Cmd: None/Batch recurse; Perform spawns the composed task→toMsg thunk
 /// and pushes the resulting Msg back into the loop channel.
-pub(crate) fn cli_run_cmd<M: Send + 'static>(cmd: SkyCmd<M>, tx: &tokio::sync::mpsc::UnboundedSender<CliEvent<M>>) {
+pub(crate) fn cli_run_cmd<M: Send + 'static>(
+    cmd: SkyCmd<M>,
+    tx: &tokio::sync::mpsc::UnboundedSender<CliEvent<M>>,
+) {
     match cmd {
         SkyCmd::None => {}
         SkyCmd::Batch(items) => {
@@ -224,7 +245,11 @@ where
             let stdin = std::io::stdin();
             for line in stdin.lock().lines() {
                 match line {
-                    Ok(l) => { if line_tx.send(CliEvent::Line(l)).is_err() { return; } }
+                    Ok(l) => {
+                        if line_tx.send(CliEvent::Line(l)).is_err() {
+                            return;
+                        }
+                    }
                     Err(_) => break,
                 }
             }

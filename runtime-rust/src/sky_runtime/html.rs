@@ -48,7 +48,10 @@ pub enum Event<M> {
     /// Server-constructed form handler (not produced by the Sky stdlib bridge).
     /// Returns `Option<M>`: a malformed/incomplete form (decode failure) yields
     /// `None` so the live loop dispatches no Msg (see `decode_form`).
-    OnForm(String, std::sync::Arc<dyn Fn(FormData) -> Option<M> + Send + Sync>),
+    OnForm(
+        String,
+        std::sync::Arc<dyn Fn(FormData) -> Option<M> + Send + Sync>,
+    ),
 }
 
 impl<M: PartialEq> PartialEq for Attribute<M> {
@@ -127,8 +130,8 @@ impl<M> std::fmt::Debug for Event<M> {
 }
 
 const VOID: &[&str] = &[
-    "area", "base", "br", "col", "embed", "hr", "img", "input",
-    "link", "meta", "param", "source", "track", "wbr",
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
 ];
 
 /// True for HTML void elements (no children, self-closing). Exposed for the
@@ -441,9 +444,9 @@ fn escape_attr(t: &str) -> String {
 /// emitted, closing the XSS hole with no escaping ambiguity.
 fn is_safe_html_name(name: &str) -> bool {
     !name.is_empty()
-        && name.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.')
-        })
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'))
 }
 
 /// Attribute NAMES that execute script (or embed a scripting context) regardless
@@ -512,7 +515,10 @@ fn is_url_attr(name: &str) -> bool {
 /// are navigational/document-context, where `data:` is a navigable document
 /// (incl. scriptable SVG) and is blocked outright.
 fn is_media_url_attr(name: &str) -> bool {
-    matches!(name.to_ascii_lowercase().as_str(), "src" | "poster" | "background")
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "src" | "poster" | "background"
+    )
 }
 
 /// The URL scheme = the run before the first `:` that precedes any `/`, `?` or
@@ -544,10 +550,20 @@ fn is_inert_data_image(value: &str) -> bool {
     let rest = rest.trim_start().to_ascii_lowercase();
     match rest.strip_prefix("image/") {
         Some(after) => {
-            let subtype: String = after.chars().take_while(|c| *c != ';' && *c != ',').collect();
+            let subtype: String = after
+                .chars()
+                .take_while(|c| *c != ';' && *c != ',')
+                .collect();
             matches!(
                 subtype.as_str(),
-                "png" | "jpeg" | "jpg" | "gif" | "webp" | "bmp" | "avif" | "x-icon"
+                "png"
+                    | "jpeg"
+                    | "jpg"
+                    | "gif"
+                    | "webp"
+                    | "bmp"
+                    | "avif"
+                    | "x-icon"
                     | "vnd.microsoft.icon"
             )
         }
@@ -741,13 +757,19 @@ pub fn html_attr_to_string_<M>(attr: Attribute<M>) -> String {
 // type can hold must impl the trait (else E0599). No Go `%v` analogue worth
 // matching; a stable type-tag placeholder is total and never recurses into `M`.
 impl<M> crate::sky_runtime::stringify::SkyStringify for Html<M> {
-    fn sky_show(&self) -> String { "<html>".to_string() }
+    fn sky_show(&self) -> String {
+        "<html>".to_string()
+    }
 }
 impl<M> crate::sky_runtime::stringify::SkyStringify for Attribute<M> {
-    fn sky_show(&self) -> String { "<html-attribute>".to_string() }
+    fn sky_show(&self) -> String {
+        "<html-attribute>".to_string()
+    }
 }
 impl<M> crate::sky_runtime::stringify::SkyStringify for Event<M> {
-    fn sky_show(&self) -> String { "<event>".to_string() }
+    fn sky_show(&self) -> String {
+        "<event>".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -760,21 +782,32 @@ mod tests {
 
     #[test]
     fn render_escapes_and_emits_attrs_events_void() {
-        let t: Html<()> = Html::HElement("div".into(),
+        let t: Html<()> = Html::HElement(
+            "div".into(),
             vec![Attribute::Attr("class".into(), "x".into())],
             vec![
-                Html::HElement("input".into(),
-                    vec![Attribute::Attr("value".into(), "a<b".into()), Attribute::BoolAttr("disabled".into(), true)],
-                    vec![]),
+                Html::HElement(
+                    "input".into(),
+                    vec![
+                        Attribute::Attr("value".into(), "a<b".into()),
+                        Attribute::BoolAttr("disabled".into(), true),
+                    ],
+                    vec![],
+                ),
                 Html::HText("1 < 2".into()),
                 Html::HRaw("<b>ok</b>".into()),
-            ]);
-        let mut t = t; assign_sky_ids(&mut t, "r");
+            ],
+        );
+        let mut t = t;
+        assign_sky_ids(&mut t, "r");
         let s = render_html(&t);
         assert!(s.contains(r#"<div class="x" sky-id="r">"#), "{s}");
         // Attrs are sorted alphabetically; BoolAttr renders as `k="true"`; void
         // elements self-close — all to match Go renderVNode.
-        assert!(s.contains(r#"<input disabled="true" sky-id="r_0_input" value="a&lt;b" />"#), "{s}");
+        assert!(
+            s.contains(r#"<input disabled="true" sky-id="r_0_input" value="a&lt;b" />"#),
+            "{s}"
+        );
         assert!(s.contains("1 &lt; 2"));
         assert!(s.contains("<b>ok</b>"));
         assert!(s.contains("</div>"));
@@ -819,9 +852,14 @@ mod tests {
     // render_into — both now route through SafeAttrName.
     #[test]
     fn attr_to_string_drops_event_handler_and_srcdoc() {
-        let onload: String = html_attr_to_string_(Attribute::<()>::Attr("onload".into(), "alert(1)".into()));
-        let srcdoc: String = html_attr_to_string_(Attribute::<()>::Attr("srcdoc".into(), "<script>1</script>".into()));
-        let onbool: String = html_attr_to_string_(Attribute::<()>::BoolAttr("onclick".into(), true));
+        let onload: String =
+            html_attr_to_string_(Attribute::<()>::Attr("onload".into(), "alert(1)".into()));
+        let srcdoc: String = html_attr_to_string_(Attribute::<()>::Attr(
+            "srcdoc".into(),
+            "<script>1</script>".into(),
+        ));
+        let onbool: String =
+            html_attr_to_string_(Attribute::<()>::BoolAttr("onclick".into(), true));
         let ok: String = html_attr_to_string_(Attribute::<()>::Attr("alt".into(), "x".into()));
         assert_eq!(onload, "");
         assert_eq!(srcdoc, "");
@@ -847,7 +885,11 @@ mod tests {
         );
         let s = render_html(&t);
         // Exactly ONE style attribute …
-        assert_eq!(s.matches("style=\"").count(), 1, "expected a single style attr: {s}");
+        assert_eq!(
+            s.matches("style=\"").count(),
+            1,
+            "expected a single style attr: {s}"
+        );
         // … containing BOTH the computed declarations AND the user's z-index,
         // joined `; ` (computed has no trailing `;`), computed first/user last.
         assert!(
@@ -900,31 +942,58 @@ mod tests {
         // <textarea value="…"> renders EMPTY in browsers — the value must become
         // the text content. Go parity (live.go renderVNode). Std.Ui.Input.multiline
         // sets a `value` attr; the renderer must move it into the body.
-        let t: Html<()> = Html::HElement("textarea".into(),
+        let t: Html<()> = Html::HElement(
+            "textarea".into(),
             vec![Attribute::Attr("value".into(), "fill the column".into())],
-            vec![]);
+            vec![],
+        );
         let s = render_html(&t);
-        assert!(!s.contains("value=\""), "value attr must be stripped from textarea: {s}");
-        assert!(s.contains(">fill the column</textarea>"), "value must be content: {s}");
+        assert!(
+            !s.contains("value=\""),
+            "value attr must be stripped from textarea: {s}"
+        );
+        assert!(
+            s.contains(">fill the column</textarea>"),
+            "value must be content: {s}"
+        );
     }
 
     #[test]
     fn textarea_value_is_escaped_and_select_strips_value() {
         // textarea content is HTML-escaped (XSS); explicit children win over the
         // attr-derived value; <select> strips a redundant `value` attr (no content).
-        let ta: Html<()> = Html::HElement("textarea".into(),
-            vec![Attribute::Attr("value".into(), "a<b'c".into())], vec![]);
-        assert!(render_html(&ta).contains(">a&lt;b&#39;c</textarea>"), "{}", render_html(&ta));
+        let ta: Html<()> = Html::HElement(
+            "textarea".into(),
+            vec![Attribute::Attr("value".into(), "a<b'c".into())],
+            vec![],
+        );
+        assert!(
+            render_html(&ta).contains(">a&lt;b&#39;c</textarea>"),
+            "{}",
+            render_html(&ta)
+        );
 
-        let ta_kids: Html<()> = Html::HElement("textarea".into(),
+        let ta_kids: Html<()> = Html::HElement(
+            "textarea".into(),
             vec![Attribute::Attr("value".into(), "ignored".into())],
-            vec![Html::HText("explicit".into())]);
+            vec![Html::HText("explicit".into())],
+        );
         let s = render_html(&ta_kids);
-        assert!(s.contains(">explicit</textarea>") && !s.contains("ignored"), "{s}");
+        assert!(
+            s.contains(">explicit</textarea>") && !s.contains("ignored"),
+            "{s}"
+        );
 
-        let sel: Html<()> = Html::HElement("select".into(),
-            vec![Attribute::Attr("value".into(), "x".into())], vec![]);
-        assert!(!render_html(&sel).contains("value="), "select strips value: {}", render_html(&sel));
+        let sel: Html<()> = Html::HElement(
+            "select".into(),
+            vec![Attribute::Attr("value".into(), "x".into())],
+            vec![],
+        );
+        assert!(
+            !render_html(&sel).contains("value="),
+            "select strips value: {}",
+            render_html(&sel)
+        );
     }
 
     #[test]
@@ -949,19 +1018,27 @@ mod tests {
 
     #[test]
     fn render_emits_data_event_attr() {
-        let t: Html<()> = Html::HElement("button".into(),
-            vec![Attribute::EventAttr(Event::OnMsg("click".into(), ()))], vec![]);
-        let mut t = t; assign_sky_ids(&mut t, "r");
+        let t: Html<()> = Html::HElement(
+            "button".into(),
+            vec![Attribute::EventAttr(Event::OnMsg("click".into(), ()))],
+            vec![],
+        );
+        let mut t = t;
+        assign_sky_ids(&mut t, "r");
         let s = render_html(&t);
         assert!(s.contains(r#"data-sky-on="click""#), "{s}");
     }
 
     #[test]
     fn sky_ids_are_stable_and_pathed() {
-        let mut t: Html<()> = Html::HElement("div".into(), vec![], vec![
-            Html::HElement("span".into(), vec![], vec![Html::HText("a".into())]),
-            Html::HElement("span".into(), vec![], vec![]),
-        ]);
+        let mut t: Html<()> = Html::HElement(
+            "div".into(),
+            vec![],
+            vec![
+                Html::HElement("span".into(), vec![], vec![Html::HText("a".into())]),
+                Html::HElement("span".into(), vec![], vec![]),
+            ],
+        );
         assign_sky_ids(&mut t, "r");
         let ids = collect_ids(&t);
         assert_eq!(ids, vec!["r", "r_0_span", "r_1_span"]);
@@ -974,8 +1051,16 @@ mod tests {
         let mut out = vec![];
         fn go<M>(n: &Html<M>, out: &mut Vec<String>) {
             if let Html::HElement(_, attrs, kids) = n {
-                for a in attrs { if let Attribute::Attr(k, v) = a { if k == "sky-id" { out.push(v.clone()); } } }
-                for c in kids { go(c, out); }
+                for a in attrs {
+                    if let Attribute::Attr(k, v) = a {
+                        if k == "sky-id" {
+                            out.push(v.clone());
+                        }
+                    }
+                }
+                for c in kids {
+                    go(c, out);
+                }
             }
         }
         go(n, &mut out);
@@ -993,10 +1078,8 @@ mod tests {
                 vec![Html::HText(k.into())],
             )
         };
-        let mut a: Html<()> =
-            Html::HElement("ul".into(), vec![], vec![li("alpha"), li("beta")]);
-        let mut b: Html<()> =
-            Html::HElement("ul".into(), vec![], vec![li("beta"), li("alpha")]);
+        let mut a: Html<()> = Html::HElement("ul".into(), vec![], vec![li("alpha"), li("beta")]);
+        let mut b: Html<()> = Html::HElement("ul".into(), vec![], vec![li("beta"), li("alpha")]);
         assign_sky_ids(&mut a, "r");
         assign_sky_ids(&mut b, "r");
         let ids_a = collect_ids(&a);
@@ -1005,7 +1088,9 @@ mod tests {
         assert!(ids_a.contains(&"r_0_li:alpha".to_string()), "{ids_a:?}");
         assert!(ids_b.contains(&"r_1_li:alpha".to_string()), "{ids_b:?}");
         // The key disambiguator is present, sanitised.
-        assert!(ids_a.iter().all(|s| s.contains(":alpha") || s.contains(":beta") || s == "r"));
+        assert!(ids_a
+            .iter()
+            .all(|s| s.contains(":alpha") || s.contains(":beta") || s == "r"));
     }
 
     #[test]
@@ -1050,6 +1135,9 @@ mod tests {
         assert_eq!(attr, attr.clone());
         // Debug prints the variant name + event name, not a numeric discriminant.
         let dbg = format!("{:?}", attr);
-        assert!(dbg.contains("OnMsg") && dbg.contains("click"), "debug was: {dbg}");
+        assert!(
+            dbg.contains("OnMsg") && dbg.contains("click"),
+            "debug was: {dbg}"
+        );
     }
 }

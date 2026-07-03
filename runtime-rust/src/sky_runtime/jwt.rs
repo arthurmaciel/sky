@@ -6,7 +6,10 @@ use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, 
 use serde_json::Value as JsonValue;
 
 /// Sky `Jwt_encodeHs256 : String -> String -> Result Error String`
-pub fn jwt_encode_hs256<E: From<String>>(secret: String, claims_json: String) -> SkyResult<E, String> {
+pub fn jwt_encode_hs256<E: From<String>>(
+    secret: String,
+    claims_json: String,
+) -> SkyResult<E, String> {
     // An HMAC key shorter than 32 bytes (256 bits) is below the RFC 7518 §3.2
     // floor for HS256 and yields a low-entropy / forgeable signing secret —
     // a 1-byte key mints a token anyone can re-sign. Reject it rather than emit
@@ -68,7 +71,10 @@ pub fn jwt_decode_hs256<E: From<String>>(secret: String, token: String) -> SkyRe
 }
 
 /// Sky `Jwt_encodeRs256 : String -> String -> Result Error String`
-pub fn jwt_encode_rs256<E: From<String>>(key_pem: String, claims_json: String) -> SkyResult<E, String> {
+pub fn jwt_encode_rs256<E: From<String>>(
+    key_pem: String,
+    claims_json: String,
+) -> SkyResult<E, String> {
     let claims: JsonValue = match serde_json::from_str(&claims_json) {
         Ok(v) => v,
         Err(e) => return SkyResult::Err(format!("jwt-encode-rs: bad claims: {}", e).into()),
@@ -126,9 +132,15 @@ mod tests {
         let secret = "roundtrip-secret-0123456789abcdef".to_string();
         let claims = r#"{"sub":"alice","exp":9999999999}"#.to_string();
         let token: SkyResult<String, String> = jwt_encode_hs256(secret.clone(), claims.clone());
-        let token = match token { SkyResult::Ok(t) => t, SkyResult::Err(e) => panic!("encode: {}", e) };
+        let token = match token {
+            SkyResult::Ok(t) => t,
+            SkyResult::Err(e) => panic!("encode: {}", e),
+        };
         let decoded: SkyResult<String, String> = jwt_decode_hs256(secret, token);
-        let decoded = match decoded { SkyResult::Ok(s) => s, SkyResult::Err(e) => panic!("decode: {}", e) };
+        let decoded = match decoded {
+            SkyResult::Ok(s) => s,
+            SkyResult::Err(e) => panic!("decode: {}", e),
+        };
         assert!(decoded.contains("alice"));
     }
 
@@ -137,9 +149,11 @@ mod tests {
         // Both secrets >= 32 bytes (RFC 7518 §3.2 floor); they differ so verify fails.
         let token: SkyResult<String, String> = jwt_encode_hs256(
             "right-secret-0123456789abcdef0123".to_string(),
-            r#"{"sub":"x","exp":9999999999}"#.to_string());
+            r#"{"sub":"x","exp":9999999999}"#.to_string(),
+        );
         let token = match token {
-            SkyResult::Ok(t) => t, SkyResult::Err(e) => panic!("encode: {}", e),
+            SkyResult::Ok(t) => t,
+            SkyResult::Err(e) => panic!("encode: {}", e),
         };
         let bad: SkyResult<String, String> =
             jwt_decode_hs256("wrong-secret-0123456789abcdef0123".to_string(), token);
@@ -152,8 +166,7 @@ mod tests {
         let enc: SkyResult<String, String> =
             jwt_encode_hs256(String::new(), r#"{"sub":"x","exp":9999999999}"#.to_string());
         assert!(matches!(enc, SkyResult::Err(_)));
-        let dec: SkyResult<String, String> =
-            jwt_decode_hs256(String::new(), "a.b.c".to_string());
+        let dec: SkyResult<String, String> = jwt_decode_hs256(String::new(), "a.b.c".to_string());
         assert!(matches!(dec, SkyResult::Err(_)));
     }
 }

@@ -107,7 +107,12 @@ pub fn record_span(name: &str, dur_us: u64, ok: bool) {
     push_bounded(
         &SPANS,
         SPAN_CAP,
-        SpanEntry { ts_ms: ts, name: name.to_string(), dur_us, ok },
+        SpanEntry {
+            ts_ms: ts,
+            name: name.to_string(),
+            dur_us,
+            ok,
+        },
     );
     spill_span(ts, name, dur_us, ok);
     export_span(ts, name, dur_us, ok);
@@ -136,9 +141,13 @@ pub fn spans_json(limit: usize) -> String {
 /// Production gate (Go's `productionFromEnv`): `ENV` then `SKY_ENV`; unset OR a
 /// dev marker (`dev`/`development`/`local`) → dev (false); anything else → true.
 pub fn production_from_env() -> bool {
-    let mut e = std::env::var("ENV").unwrap_or_default().to_ascii_lowercase();
+    let mut e = std::env::var("ENV")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if e.is_empty() {
-        e = std::env::var("SKY_ENV").unwrap_or_default().to_ascii_lowercase();
+        e = std::env::var("SKY_ENV")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
     }
     if e.is_empty() {
         return false;
@@ -175,7 +184,10 @@ pub fn security_headers() -> Vec<(&'static str, String)> {
     let mut h: Vec<(&'static str, String)> = vec![
         // Go parity.
         ("x-content-type-options", "nosniff".to_string()),
-        ("referrer-policy", "strict-origin-when-cross-origin".to_string()),
+        (
+            "referrer-policy",
+            "strict-origin-when-cross-origin".to_string(),
+        ),
         // Beyond Go: deny powerful features by default for a server-rendered app.
         (
             "permissions-policy",
@@ -195,7 +207,11 @@ pub fn security_headers() -> Vec<(&'static str, String)> {
 /// the error ring + bump the error counter.
 pub fn record_log(level: &str, message: &str) {
     let ts = now_ms();
-    let e = LogEntry { ts_ms: ts, level: level.to_string(), message: message.to_string() };
+    let e = LogEntry {
+        ts_ms: ts,
+        level: level.to_string(),
+        message: message.to_string(),
+    };
     if level.eq_ignore_ascii_case("error") {
         ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
         push_bounded(&ERRORS, ERR_CAP, e.clone());
@@ -284,7 +300,10 @@ fn norm_labels(labels: &[(&str, &str)]) -> Vec<(String, String)> {
 /// no-ops the mismatch, so don't). See `MetricKey.labels` for the cardinality
 /// constraint on `labels`.
 pub fn metric_inc(name: &str, labels: &[(&str, &str)], by: u64) {
-    let key = MetricKey { name: name.to_string(), labels: norm_labels(labels) };
+    let key = MetricKey {
+        name: name.to_string(),
+        labels: norm_labels(labels),
+    };
     let mut g = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     match g.entry(key).or_insert(MetricValue::Counter(0)) {
         MetricValue::Counter(c) => *c = c.saturating_add(by),
@@ -296,7 +315,10 @@ pub fn metric_inc(name: &str, labels: &[(&str, &str)], by: u64) {
 /// floored at 0 — the gauges here (active sessions / connections) never go
 /// negative in correct operation; the floor stops a double-decrement underflow.
 pub fn metric_add_gauge(name: &str, labels: &[(&str, &str)], delta: i64) {
-    let key = MetricKey { name: name.to_string(), labels: norm_labels(labels) };
+    let key = MetricKey {
+        name: name.to_string(),
+        labels: norm_labels(labels),
+    };
     let mut g = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     match g.entry(key).or_insert(MetricValue::Gauge(0)) {
         MetricValue::Gauge(v) => *v = v.saturating_add(delta).max(0),
@@ -316,7 +338,10 @@ pub fn metric_observe(name: &str, labels: &[(&str, &str)], v: f64) {
     if !v.is_finite() || v < 0.0 {
         return;
     }
-    let key = MetricKey { name: name.to_string(), labels: norm_labels(labels) };
+    let key = MetricKey {
+        name: name.to_string(),
+        labels: norm_labels(labels),
+    };
     let mut g = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     let entry = g.entry(key).or_insert_with(|| MetricValue::Histogram {
         boundaries: LATENCY_BUCKETS.to_vec(),
@@ -324,7 +349,13 @@ pub fn metric_observe(name: &str, labels: &[(&str, &str)], v: f64) {
         sum: 0.0,
         count: 0,
     });
-    if let MetricValue::Histogram { boundaries, buckets, sum, count } = entry {
+    if let MetricValue::Histogram {
+        boundaries,
+        buckets,
+        sum,
+        count,
+    } = entry
+    {
         for (i, b) in boundaries.iter().enumerate() {
             if v <= *b {
                 if let Some(c) = buckets.get_mut(i) {
@@ -475,15 +506,25 @@ pub fn write_prom() -> String {
     let mut last_name: Option<&str> = None;
     for (key, val) in g.iter() {
         if last_name != Some(key.name.as_str()) {
-            out.push_str(&format!("# HELP {} {}\n# TYPE {} {}\n",
-                key.name, metric_help(&key.name), key.name, prom_type_token(val)));
+            out.push_str(&format!(
+                "# HELP {} {}\n# TYPE {} {}\n",
+                key.name,
+                metric_help(&key.name),
+                key.name,
+                prom_type_token(val)
+            ));
             last_name = Some(key.name.as_str());
         }
         let labels = render_labels(&key.labels);
         match val {
             MetricValue::Counter(c) => out.push_str(&format!("{}{} {}\n", key.name, labels, c)),
             MetricValue::Gauge(gv) => out.push_str(&format!("{}{} {}\n", key.name, labels, gv)),
-            MetricValue::Histogram { boundaries, buckets, sum, count } => {
+            MetricValue::Histogram {
+                boundaries,
+                buckets,
+                sum,
+                count,
+            } => {
                 // Cumulative _bucket lines, then +Inf, _sum, _count (Go's
                 // writeHistogram). buckets[i] already holds the cumulative count.
                 for (i, b) in boundaries.iter().enumerate() {
@@ -501,7 +542,12 @@ pub fn write_prom() -> String {
                     render_labels_with_le(&key.labels, "+Inf"),
                     count
                 ));
-                out.push_str(&format!("{}_sum{} {}\n", key.name, labels, format_float(*sum)));
+                out.push_str(&format!(
+                    "{}_sum{} {}\n",
+                    key.name,
+                    labels,
+                    format_float(*sum)
+                ));
                 out.push_str(&format!("{}_count{} {}\n", key.name, labels, count));
             }
         }
@@ -577,7 +623,12 @@ mod tests {
         // field must NEVER reach the label — only the bounded variant ident.
         let evil = "x".repeat(5000) + "\n}{ injected control chars";
         assert_eq!(variant_name(&M::SetName(evil)), "SetName");
-        assert_eq!(variant_name(&M::Login { user: "a".repeat(9000) }), "Login");
+        assert_eq!(
+            variant_name(&M::Login {
+                user: "a".repeat(9000)
+            }),
+            "Login"
+        );
 
         // A >64-byte leading ident truncates to 64 without leaking (synthetic
         // Debug — real Sky variant idents are short; this proves the cap).

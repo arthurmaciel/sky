@@ -255,11 +255,15 @@ pub fn system_load_env<E: Send + 'static>(_: ()) -> SkyTask<E, ()> {
         if let Ok(contents) = std::fs::read_to_string(".env") {
             for line in contents.lines() {
                 let line = line.trim();
-                if line.is_empty() || line.starts_with('#') { continue; }
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
                 if let Some((k, v)) = line.split_once('=') {
                     let k = k.trim();
                     let v = v.trim().trim_matches('"').trim_matches('\'');
-                    if read_env_var(k).is_err() { locked_set_var(k, v); }
+                    if read_env_var(k).is_err() {
+                        locked_set_var(k, v);
+                    }
                 }
             }
         }
@@ -286,6 +290,9 @@ mod exit_hook_tests {
         // terminal-restore here so a System.exit quit doesn't bypass cleanup).
         register_exit_hook(bump);
         run_exit_hook();
-        assert!(CALLS.load(Ordering::SeqCst) >= 1, "registered exit hook must run");
+        assert!(
+            CALLS.load(Ordering::SeqCst) >= 1,
+            "registered exit hook must run"
+        );
     }
 }

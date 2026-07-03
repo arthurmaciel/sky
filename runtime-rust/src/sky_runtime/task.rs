@@ -3,7 +3,10 @@ use super::*;
 use std::future::ready;
 
 pub fn block_on<E, A>(future: SkyTask<E, A>) -> SkyResult<E, A>
-where E: From<String> + Send + 'static, A: Send + 'static {
+where
+    E: From<String> + Send + 'static,
+    A: Send + 'static,
+{
     let rt = match tokio::runtime::Runtime::new() {
         Ok(r) => r,
         Err(e) => return SkyResult::Err(format!("tokio runtime init failed: {}", e).into()),
@@ -42,8 +45,14 @@ where E: From<String> + Send + 'static, A: Send + 'static {
 // `SkyResult::Err`), so a panic would be a genuine compiler/runtime bug, not a
 // well-typed-Sky-reachable abort.
 pub fn block_on_current_thread<E, A>(future: SkyTask<E, A>) -> SkyResult<E, A>
-where E: From<String> + Send + 'static, A: Send + 'static {
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+where
+    E: From<String> + Send + 'static,
+    A: Send + 'static,
+{
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(r) => r,
         Err(e) => return SkyResult::Err(format!("tokio runtime init failed: {}", e).into()),
     };
@@ -54,8 +63,15 @@ pub fn task_succeed<E: Send + 'static, A: Send + 'static>(a: A) -> SkyTask<E, A>
     Box::pin(ready(ok_res::<E, A>(a)))
 }
 
-pub fn task_map<E, A, B>(f: impl FnOnce(A) -> B + Send + 'static, task: SkyTask<E, A>) -> SkyTask<E, B>
-where E: Send + 'static, A: Send + 'static, B: Send + 'static {
+pub fn task_map<E, A, B>(
+    f: impl FnOnce(A) -> B + Send + 'static,
+    task: SkyTask<E, A>,
+) -> SkyTask<E, B>
+where
+    E: Send + 'static,
+    A: Send + 'static,
+    B: Send + 'static,
+{
     Box::pin(async move {
         match task.await {
             SkyResult::Ok(a) => ok_res(f(a)),
@@ -64,8 +80,15 @@ where E: Send + 'static, A: Send + 'static, B: Send + 'static {
     })
 }
 
-pub fn task_and_then<E, A, B>(f: impl FnOnce(A) -> SkyTask<E, B> + Send + 'static, task: SkyTask<E, A>) -> SkyTask<E, B>
-where E: Send + 'static, A: Send + 'static, B: Send + 'static {
+pub fn task_and_then<E, A, B>(
+    f: impl FnOnce(A) -> SkyTask<E, B> + Send + 'static,
+    task: SkyTask<E, A>,
+) -> SkyTask<E, B>
+where
+    E: Send + 'static,
+    A: Send + 'static,
+    B: Send + 'static,
+{
     Box::pin(async move {
         match task.await {
             SkyResult::Ok(a) => f(a).await,
@@ -74,12 +97,21 @@ where E: Send + 'static, A: Send + 'static, B: Send + 'static {
     })
 }
 
-pub fn task_map_error<E1, E2, A>(f: impl FnOnce(E1) -> E2 + Send + 'static, task: SkyTask<E1, A>) -> SkyTask<E2, A>
-where E1: Send + 'static, E2: Send + 'static, A: Send + 'static {
-    Box::pin(async move { match task.await {
-        SkyResult::Ok(a) => ok_res(a),
-        SkyResult::Err(e) => SkyResult::Err(f(e)),
-    }})
+pub fn task_map_error<E1, E2, A>(
+    f: impl FnOnce(E1) -> E2 + Send + 'static,
+    task: SkyTask<E1, A>,
+) -> SkyTask<E2, A>
+where
+    E1: Send + 'static,
+    E2: Send + 'static,
+    A: Send + 'static,
+{
+    Box::pin(async move {
+        match task.await {
+            SkyResult::Ok(a) => ok_res(a),
+            SkyResult::Err(e) => SkyResult::Err(f(e)),
+        }
+    })
 }
 
 pub fn task_lazy<E: Send + 'static, A: Send + 'static>(
@@ -92,16 +124,31 @@ pub fn task_from_result<E: Send + 'static, A: Send + 'static>(r: SkyResult<E, A>
     Box::pin(ready(r))
 }
 
-pub fn task_and_then_result<E, A, B>(f: impl FnOnce(A) -> SkyResult<E, B> + Send + 'static, task: SkyTask<E, A>) -> SkyTask<E, B>
-where E: Send + 'static, A: Send + 'static, B: Send + 'static {
-    Box::pin(async move { match task.await {
-        SkyResult::Ok(a) => f(a),
-        SkyResult::Err(e) => SkyResult::Err(e),
-    }})
+pub fn task_and_then_result<E, A, B>(
+    f: impl FnOnce(A) -> SkyResult<E, B> + Send + 'static,
+    task: SkyTask<E, A>,
+) -> SkyTask<E, B>
+where
+    E: Send + 'static,
+    A: Send + 'static,
+    B: Send + 'static,
+{
+    Box::pin(async move {
+        match task.await {
+            SkyResult::Ok(a) => f(a),
+            SkyResult::Err(e) => SkyResult::Err(e),
+        }
+    })
 }
 
-pub fn task_on_error<E, A>(f: impl FnOnce(E) -> SkyTask<E, A> + Send + 'static, task: SkyTask<E, A>) -> SkyTask<E, A>
-where E: Send + 'static, A: Send + 'static {
+pub fn task_on_error<E, A>(
+    f: impl FnOnce(E) -> SkyTask<E, A> + Send + 'static,
+    task: SkyTask<E, A>,
+) -> SkyTask<E, A>
+where
+    E: Send + 'static,
+    A: Send + 'static,
+{
     Box::pin(async move {
         match task.await {
             SkyResult::Ok(a) => ok_res(a),
@@ -115,22 +162,38 @@ pub fn task_fail<E: Send + 'static, A: Send + 'static>(e: E) -> SkyTask<E, A> {
 }
 
 pub fn task_perform<E: Send + 'static, A: Send + 'static>(task: SkyTask<E, A>) -> SkyTask<E, ()> {
-    Box::pin(async move { match task.await { SkyResult::Ok(_) => ok_res(()), SkyResult::Err(e) => SkyResult::Err(e) } })
+    Box::pin(async move {
+        match task.await {
+            SkyResult::Ok(_) => ok_res(()),
+            SkyResult::Err(e) => SkyResult::Err(e),
+        }
+    })
 }
 
-pub fn task_sequence<E: Send + 'static, A: Send + 'static>(tasks: Vec<SkyTask<E, A>>) -> SkyTask<E, Vec<A>> {
+pub fn task_sequence<E: Send + 'static, A: Send + 'static>(
+    tasks: Vec<SkyTask<E, A>>,
+) -> SkyTask<E, Vec<A>> {
     Box::pin(async move {
         let mut out = Vec::with_capacity(tasks.len());
-        for t in tasks { match t.await { SkyResult::Ok(a) => out.push(a), SkyResult::Err(e) => return SkyResult::Err(e) } }
+        for t in tasks {
+            match t.await {
+                SkyResult::Ok(a) => out.push(a),
+                SkyResult::Err(e) => return SkyResult::Err(e),
+            }
+        }
         ok_res(out)
     })
 }
 
-pub fn task_run<E: From<String> + Send + 'static, A: Send + 'static>(task: SkyTask<E, A>) -> SkyResult<E, A> {
+pub fn task_run<E: From<String> + Send + 'static, A: Send + 'static>(
+    task: SkyTask<E, A>,
+) -> SkyResult<E, A> {
     block_on(task)
 }
 
-pub fn task_parallel<E: From<String> + Send + 'static, A: Send + 'static>(tasks: Vec<SkyTask<E, A>>) -> SkyTask<E, Vec<A>> {
+pub fn task_parallel<E: From<String> + Send + 'static, A: Send + 'static>(
+    tasks: Vec<SkyTask<E, A>>,
+) -> SkyTask<E, Vec<A>> {
     Box::pin(async move {
         let handles: Vec<tokio::task::JoinHandle<SkyResult<E, A>>> =
             tasks.into_iter().map(tokio::spawn).collect();
@@ -243,8 +306,7 @@ fn retry_compute_delay(kind: i64, base_ms: i64, attempt: i64, jitter: bool) -> i
         // Uniform in [0.5*d, 1.5*d). lcg_next() is the runtime's total LCG;
         // map its top 53 bits to a float in [0, 1) like random_float does.
         super::random::lcg_init();
-        let unit = (super::random::lcg_next() >> 11) as f64
-            * (1.0 / 9_007_199_254_740_992.0);
+        let unit = (super::random::lcg_next() >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0);
         let scaled = (d as f64) * (0.5 + unit);
         // round-to-nearest, then re-clamp.
         d = scaled.round() as i64;
@@ -288,7 +350,10 @@ mod retry_tests {
         assert_eq!(retry_compute_delay(1, 1000, 20, false), RETRY_DELAY_CAP_MS);
         assert_eq!(retry_compute_delay(1, 1000, 99, false), RETRY_DELAY_CAP_MS);
         // Even a huge base saturates rather than panicking.
-        assert_eq!(retry_compute_delay(1, i64::MAX, 5, false), RETRY_DELAY_CAP_MS);
+        assert_eq!(
+            retry_compute_delay(1, i64::MAX, 5, false),
+            RETRY_DELAY_CAP_MS
+        );
     }
 
     #[test]
@@ -338,7 +403,10 @@ mod retry_tests {
         // Fails attempts 1-2, succeeds on attempt 3; maxAttempts=5 → Ok(3).
         let counter = Arc::new(AtomicI64::new(0));
         let task = task_retry_with(
-            5, 0, false, 0,
+            5,
+            0,
+            false,
+            0,
             |_e: &String| true,
             transient_factory(counter.clone(), 3),
         );
@@ -354,7 +422,10 @@ mod retry_tests {
         // threshold unreachable; maxAttempts=4 → Err after exactly 4 runs.
         let counter = Arc::new(AtomicI64::new(0));
         let task = task_retry_with(
-            4, 0, false, 0,
+            4,
+            0,
+            false,
+            0,
             |_e: &String| true,
             transient_factory(counter.clone(), 999),
         );
@@ -370,7 +441,10 @@ mod retry_tests {
         // should_retry → false: stop after the first Err (1 run), maxAttempts=5.
         let counter = Arc::new(AtomicI64::new(0));
         let task = task_retry_with(
-            5, 0, false, 0,
+            5,
+            0,
+            false,
+            0,
             |_e: &String| false,
             transient_factory(counter.clone(), 999),
         );
@@ -387,7 +461,10 @@ mod retry_tests {
         // threshold high so it never succeeds; predicate gates the loop.
         let counter = Arc::new(AtomicI64::new(0));
         let task = task_retry_with(
-            10, 0, false, 0,
+            10,
+            0,
+            false,
+            0,
             |e: &String| e == "boom-1",
             transient_factory(counter.clone(), 999),
         );
@@ -404,7 +481,10 @@ mod retry_tests {
         // maxAttempts=0 means "run once" (clamped to 1), no retry.
         let counter = Arc::new(AtomicI64::new(0));
         let task = task_retry_with(
-            0, 0, false, 0,
+            0,
+            0,
+            false,
+            0,
             |_e: &String| true,
             transient_factory(counter.clone(), 999),
         );
@@ -420,7 +500,10 @@ mod retry_tests {
         // Threshold 1: succeeds on the first attempt; no further runs.
         let counter = Arc::new(AtomicI64::new(0));
         let task = task_retry_with(
-            5, 0, false, 0,
+            5,
+            0,
+            false,
+            0,
             |_e: &String| true,
             transient_factory(counter.clone(), 1),
         );

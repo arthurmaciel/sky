@@ -121,10 +121,16 @@ fn dispatch_focus_change<Msg: Clone + Send + 'static>(
     if old_idx == new_idx {
         return;
     }
-    if let Some(msg) = focusables.get(old_idx).and_then(|f| extract_msg_named(&f.events, "blur")) {
+    if let Some(msg) = focusables
+        .get(old_idx)
+        .and_then(|f| extract_msg_named(&f.events, "blur"))
+    {
         let _ = tx.send(CliEvent::Msg(msg));
     }
-    if let Some(msg) = focusables.get(new_idx).and_then(|f| extract_msg_named(&f.events, "focus")) {
+    if let Some(msg) = focusables
+        .get(new_idx)
+        .and_then(|f| extract_msg_named(&f.events, "focus"))
+    {
         let _ = tx.send(CliEvent::Msg(msg));
     }
 }
@@ -181,10 +187,8 @@ fn tail_maybe_truncated(tail: &[u8]) -> bool {
 /// `(kind, value)` pair (`tui_app_ui` folds the ctrl modifier into the kind for
 /// the input editor's word-jumps; `tui_app` passes it through). Runs on its own
 /// blocking thread so `on_key` stays off it.
-fn read_keys_loop<Msg, FMap>(
-    tx: &tokio::sync::mpsc::UnboundedSender<CliEvent<Msg>>,
-    map_kind: FMap,
-) where
+fn read_keys_loop<Msg, FMap>(tx: &tokio::sync::mpsc::UnboundedSender<CliEvent<Msg>>, map_kind: FMap)
+where
     FMap: Fn(TuiKey) -> (String, String),
 {
     let mut stdin = std::io::stdin();
@@ -260,7 +264,11 @@ where
 {
     Box::pin(async move {
         if std::env::var("TERM").as_deref() == Ok("dumb") {
-            return SkyResult::Err("Tui: TERM=dumb is not an interactive terminal".to_string().into());
+            return SkyResult::Err(
+                "Tui: TERM=dumb is not an interactive terminal"
+                    .to_string()
+                    .into(),
+            );
         }
         let _guard = match TuiGuard::enter() {
             Ok(g) => g,
@@ -322,7 +330,9 @@ where
     FSubs: Fn(Model) -> SkySub<Msg> + Send + 'static,
     FOnKey: Fn(String, String) -> Msg + Send + 'static,
 {
-    tui_run(init, update, subscriptions, on_key, move |m: &Model| view(m.clone()))
+    tui_run(init, update, subscriptions, on_key, move |m: &Model| {
+        view(m.clone())
+    })
 }
 
 /// Render the Element view (twice: discover focusables, then scroll-correct + the
@@ -341,12 +351,24 @@ where
     FView: Fn(Model) -> Element<Msg>,
 {
     let (cols, rows) = term_size();
-    let (_f1, fs1, content_h) =
-        render_with_focus(&view(model.clone()), cols, rows, *focus_idx, inputs, *scroll_y);
+    let (_f1, fs1, content_h) = render_with_focus(
+        &view(model.clone()),
+        cols,
+        rows,
+        *focus_idx,
+        inputs,
+        *scroll_y,
+    );
     *focus_idx = clamp_focus(*focus_idx, fs1.len());
     *scroll_y = ensure_focus_visible(&fs1, *focus_idx, *scroll_y, rows, content_h);
-    let (frame, fs2, _) =
-        render_with_focus(&view(model.clone()), cols, rows, *focus_idx, inputs, *scroll_y);
+    let (frame, fs2, _) = render_with_focus(
+        &view(model.clone()),
+        cols,
+        rows,
+        *focus_idx,
+        inputs,
+        *scroll_y,
+    );
     paint(&frame);
     fs2
 }
@@ -380,7 +402,11 @@ where
 {
     Box::pin(async move {
         if std::env::var("TERM").as_deref() == Ok("dumb") {
-            return SkyResult::Err("Tui: TERM=dumb is not an interactive terminal".to_string().into());
+            return SkyResult::Err(
+                "Tui: TERM=dumb is not an interactive terminal"
+                    .to_string()
+                    .into(),
+            );
         }
         let _guard = match TuiGuard::enter_mouse() {
             Ok(g) => g,
@@ -428,7 +454,12 @@ where
                             if press && (btn == 64 || btn == 65) {
                                 let (cols, rows) = term_size();
                                 let (_f, _fs, content_h) = render_with_focus(
-                                    &view(model.clone()), cols, rows, focus_idx, &mut inputs, scroll_y,
+                                    &view(model.clone()),
+                                    cols,
+                                    rows,
+                                    focus_idx,
+                                    &mut inputs,
+                                    scroll_y,
                                 );
                                 let max_scroll = content_h.saturating_sub(rows);
                                 scroll_y = if btn == 64 {
@@ -437,7 +468,12 @@ where
                                     (scroll_y + 3).min(max_scroll)
                                 };
                                 let (frame, fs, _) = render_with_focus(
-                                    &view(model.clone()), cols, rows, focus_idx, &mut inputs, scroll_y,
+                                    &view(model.clone()),
+                                    cols,
+                                    rows,
+                                    focus_idx,
+                                    &mut inputs,
+                                    scroll_y,
                                 );
                                 paint(&frame);
                                 focusables = fs;
@@ -464,7 +500,11 @@ where
                                     }
                                     if produced.is_none() {
                                         focusables = render_and_paint(
-                                            &view, &model, &mut inputs, &mut focus_idx, &mut scroll_y,
+                                            &view,
+                                            &model,
+                                            &mut inputs,
+                                            &mut focus_idx,
+                                            &mut scroll_y,
                                         );
                                         continue;
                                     }
@@ -481,89 +521,110 @@ where
                         // A left-press that produced a click Msg skips the key
                         // logic below (the `else`) and dispatches `produced`.
                     } else {
-                    let n = focusables.len();
-                    let focused_input =
-                        focusables.get(focus_idx).map(|f| f.is_input).unwrap_or(false);
-                    let is_shift_tab = kind == "other" && value.contains('Z');
-                    let nav_fwd = kind == "tab" || (kind == "down" && !focused_input);
-                    let nav_back = is_shift_tab || (kind == "up" && !focused_input);
-                    // A focused <textarea>'s Enter inserts a newline (multiline
-                    // edit), not a submit: remap to a char-insert so the generic
-                    // edit path below handles it uniformly.
-                    let is_textarea =
-                        focusables.get(focus_idx).map(|f| f.input_type == "textarea").unwrap_or(false);
-                    let (kind, value) = if focused_input && is_textarea && kind == "enter" {
-                        ("char".to_string(), "\n".to_string())
-                    } else {
-                        (kind, value)
-                    };
-
-                    if (nav_fwd || nav_back) && n > 0 {
-                        let old_focus = focus_idx;
-                        focus_idx = if nav_back {
-                            (focus_idx + n - 1) % n
-                        } else {
-                            (focus_idx + 1) % n
-                        };
-                        focusables =
-                            render_and_paint(&view, &model, &mut inputs, &mut focus_idx, &mut scroll_y);
-                        // onBlur (old) + onFocus (new) — Go's tuiDispatchFocusChange.
-                        dispatch_focus_change(&focusables, old_focus, focus_idx, &tx);
-                        continue;
-                    }
-
-                    if kind == "ctrl" {
-                        produced = Some(on_key(kind, value));
-                    } else if focused_input {
-                        let is_cbr = focusables
+                        let n = focusables.len();
+                        let focused_input = focusables
                             .get(focus_idx)
-                            .map(|f| f.is_checkbox_or_radio())
+                            .map(|f| f.is_input)
                             .unwrap_or(false);
-                        if is_cbr && (kind == "space" || kind == "enter") {
-                            produced = focusables.get(focus_idx).and_then(|f| extract_click_msg(&f.events));
-                            if produced.is_none() {
-                                continue;
-                            }
-                        } else if kind == "enter" {
-                            let buf = inputs.get(focus_idx).buffer.clone();
-                            produced = focusables.get(focus_idx).and_then(|f| {
-                                extract_input_msg(&f.events, "change", &buf)
-                                    .or_else(|| extract_input_msg(&f.events, "input", &buf))
-                            });
-                            if produced.is_none() {
-                                continue;
-                            }
+                        let is_shift_tab = kind == "other" && value.contains('Z');
+                        let nav_fwd = kind == "tab" || (kind == "down" && !focused_input);
+                        let nav_back = is_shift_tab || (kind == "up" && !focused_input);
+                        // A focused <textarea>'s Enter inserts a newline (multiline
+                        // edit), not a submit: remap to a char-insert so the generic
+                        // edit path below handles it uniformly.
+                        let is_textarea = focusables
+                            .get(focus_idx)
+                            .map(|f| f.input_type == "textarea")
+                            .unwrap_or(false);
+                        let (kind, value) = if focused_input && is_textarea && kind == "enter" {
+                            ("char".to_string(), "\n".to_string())
                         } else {
-                            let changed = edit_input(inputs.get(focus_idx), &kind, &value);
-                            if changed {
-                                let buf = inputs.get(focus_idx).buffer.clone();
-                                inputs.get(focus_idx).last_value = buf.clone();
+                            (kind, value)
+                        };
+
+                        if (nav_fwd || nav_back) && n > 0 {
+                            let old_focus = focus_idx;
+                            focus_idx = if nav_back {
+                                (focus_idx + n - 1) % n
+                            } else {
+                                (focus_idx + 1) % n
+                            };
+                            focusables = render_and_paint(
+                                &view,
+                                &model,
+                                &mut inputs,
+                                &mut focus_idx,
+                                &mut scroll_y,
+                            );
+                            // onBlur (old) + onFocus (new) — Go's tuiDispatchFocusChange.
+                            dispatch_focus_change(&focusables, old_focus, focus_idx, &tx);
+                            continue;
+                        }
+
+                        if kind == "ctrl" {
+                            produced = Some(on_key(kind, value));
+                        } else if focused_input {
+                            let is_cbr = focusables
+                                .get(focus_idx)
+                                .map(|f| f.is_checkbox_or_radio())
+                                .unwrap_or(false);
+                            if is_cbr && (kind == "space" || kind == "enter") {
                                 produced = focusables
                                     .get(focus_idx)
-                                    .and_then(|f| extract_input_msg(&f.events, "input", &buf));
+                                    .and_then(|f| extract_click_msg(&f.events));
                                 if produced.is_none() {
-                                    // local echo (no onInput handler) — repaint only.
-                                    focusables = render_and_paint(
-                                        &view, &model, &mut inputs, &mut focus_idx, &mut scroll_y,
-                                    );
+                                    continue;
+                                }
+                            } else if kind == "enter" {
+                                let buf = inputs.get(focus_idx).buffer.clone();
+                                produced = focusables.get(focus_idx).and_then(|f| {
+                                    extract_input_msg(&f.events, "change", &buf)
+                                        .or_else(|| extract_input_msg(&f.events, "input", &buf))
+                                });
+                                if produced.is_none() {
                                     continue;
                                 }
                             } else {
-                                // cursor move / unhandled edit key — repaint the cursor.
-                                focusables = render_and_paint(
-                                    &view, &model, &mut inputs, &mut focus_idx, &mut scroll_y,
-                                );
+                                let changed = edit_input(inputs.get(focus_idx), &kind, &value);
+                                if changed {
+                                    let buf = inputs.get(focus_idx).buffer.clone();
+                                    inputs.get(focus_idx).last_value = buf.clone();
+                                    produced = focusables
+                                        .get(focus_idx)
+                                        .and_then(|f| extract_input_msg(&f.events, "input", &buf));
+                                    if produced.is_none() {
+                                        // local echo (no onInput handler) — repaint only.
+                                        focusables = render_and_paint(
+                                            &view,
+                                            &model,
+                                            &mut inputs,
+                                            &mut focus_idx,
+                                            &mut scroll_y,
+                                        );
+                                        continue;
+                                    }
+                                } else {
+                                    // cursor move / unhandled edit key — repaint the cursor.
+                                    focusables = render_and_paint(
+                                        &view,
+                                        &model,
+                                        &mut inputs,
+                                        &mut focus_idx,
+                                        &mut scroll_y,
+                                    );
+                                    continue;
+                                }
+                            }
+                        } else if (kind == "enter" || kind == "space") && focus_idx < n {
+                            produced = focusables
+                                .get(focus_idx)
+                                .and_then(|f| extract_click_msg(&f.events));
+                            if produced.is_none() {
                                 continue;
                             }
+                        } else {
+                            produced = Some(on_key(kind, value));
                         }
-                    } else if (kind == "enter" || kind == "space") && focus_idx < n {
-                        produced = focusables.get(focus_idx).and_then(|f| extract_click_msg(&f.events));
-                        if produced.is_none() {
-                            continue;
-                        }
-                    } else {
-                        produced = Some(on_key(kind, value));
-                    }
                     } // end key-logic else (non-mouse)
                 }
             }

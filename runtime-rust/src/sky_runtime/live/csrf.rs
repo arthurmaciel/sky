@@ -168,7 +168,10 @@ fn origin_mismatch(headers: &HeaderMap) -> bool {
     if frame_ancestors().is_some() {
         return false;
     }
-    let origin = match headers.get(axum::http::header::ORIGIN).and_then(|h| h.to_str().ok()) {
+    let origin = match headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|h| h.to_str().ok())
+    {
         Some(o) => o,
         None => return false, // no Origin (e.g. same-origin GET-turned-POST) — don't reject
     };
@@ -185,7 +188,10 @@ fn origin_mismatch(headers: &HeaderMap) -> bool {
 /// The axum middleware. Validates CSRF on mutating, non-exempt requests; passes
 /// everything else through. Reads only headers (the Sky.Live POST body is JSON
 /// with the token in `X-Sky-Csrf`, so no body buffering is needed).
-pub async fn csrf_middleware(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+pub async fn csrf_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
     use subtle::ConstantTimeEq;
 
     if !csrf_enabled() {
@@ -211,7 +217,10 @@ pub async fn csrf_middleware(req: axum::extract::Request, next: axum::middleware
     }
 
     let cookie_tok = cookie_value(headers, csrf_cookie_name()).unwrap_or_default();
-    let header_tok = headers.get(CSRF_HEADER).and_then(|h| h.to_str().ok()).unwrap_or("");
+    let header_tok = headers
+        .get(CSRF_HEADER)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
     if cookie_tok.is_empty() || header_tok.is_empty() {
         telemetry::record_log("warn", "csrf.rejected reason=missing");
         return (StatusCode::FORBIDDEN, "{\"status\":\"csrf_missing\"}").into_response();

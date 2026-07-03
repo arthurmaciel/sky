@@ -15,7 +15,10 @@ fn trace_enabled() -> bool {
 }
 
 // Trace.span : String -> Task e a -> Task e a
-pub fn trace_span<E: Send + 'static, A: Send + 'static>(name: String, task: SkyTask<E, A>) -> SkyTask<E, A> {
+pub fn trace_span<E: Send + 'static, A: Send + 'static>(
+    name: String,
+    task: SkyTask<E, A>,
+) -> SkyTask<E, A> {
     Box::pin(async move {
         let on = trace_enabled();
         let start = Instant::now();
@@ -30,7 +33,12 @@ pub fn trace_span<E: Send + 'static, A: Send + 'static>(name: String, task: SkyT
         super::telemetry::record_span(&name, elapsed.as_micros() as u64, ok);
         if on {
             let outcome = if ok { "ok" } else { "err" };
-            eprintln!("[trace] span end {} ({} ms, {})", name, elapsed.as_millis(), outcome);
+            eprintln!(
+                "[trace] span end {} ({} ms, {})",
+                name,
+                elapsed.as_millis(),
+                outcome
+            );
         }
         result
     })

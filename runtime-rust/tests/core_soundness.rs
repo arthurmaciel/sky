@@ -24,7 +24,10 @@ fn to_u8_vec_truncates_out_of_range_without_panic() {
     assert_eq!(sky_runtime::core::to_u8_vec(&[256]), vec![0u8]);
     assert_eq!(sky_runtime::core::to_u8_vec(&[257]), vec![1u8]);
     assert_eq!(sky_runtime::core::to_u8_vec(&[-1]), vec![255u8]);
-    assert_eq!(sky_runtime::core::to_u8_vec(&[i64::MAX, i64::MIN]), vec![255u8, 0u8]);
+    assert_eq!(
+        sky_runtime::core::to_u8_vec(&[i64::MAX, i64::MIN]),
+        vec![255u8, 0u8]
+    );
     assert_eq!(sky_runtime::core::to_u8_vec(&[]), Vec::<u8>::new());
 }
 
@@ -57,17 +60,17 @@ fn to_u8_array_zero_length_ok_on_empty_err_on_nonempty() {
 
 #[test]
 fn to_array_generic_exact_ok_mismatch_err() {
-    let ok = sky_runtime::core::to_array::<SkyError, String, 2>(&[
-        "a".to_string(),
-        "b".to_string(),
-    ]);
+    let ok =
+        sky_runtime::core::to_array::<SkyError, String, 2>(&["a".to_string(), "b".to_string()]);
     assert!(ok.is_ok());
-    assert_eq!(ok.with_default([String::new(), String::new()]), ["a".to_string(), "b".to_string()]);
+    assert_eq!(
+        ok.with_default([String::new(), String::new()]),
+        ["a".to_string(), "b".to_string()]
+    );
 
     let short = sky_runtime::core::to_array::<SkyError, String, 2>(&["a".to_string()]);
     assert!(short.is_err());
-    let long =
-        sky_runtime::core::to_array::<SkyError, i64, 2>(&[1, 2, 3]);
+    let long = sky_runtime::core::to_array::<SkyError, i64, 2>(&[1, 2, 3]);
     assert!(long.is_err());
 }
 
@@ -81,15 +84,23 @@ fn sky_maybe_map_and_then_with_default() {
     assert!(just.is_just() && !just.is_nothing());
     assert!(nothing.is_nothing() && !nothing.is_just());
 
-    assert_eq!(sky_runtime::core::sky_maybe_map(SkyMaybe::Just(10i64), |x| x + 1), SkyMaybe::Just(11));
-    assert_eq!(sky_runtime::core::sky_maybe_map(SkyMaybe::Nothing, |x: i64| x + 1), SkyMaybe::Nothing);
+    assert_eq!(
+        sky_runtime::core::sky_maybe_map(SkyMaybe::Just(10i64), |x| x + 1),
+        SkyMaybe::Just(11)
+    );
+    assert_eq!(
+        sky_runtime::core::sky_maybe_map(SkyMaybe::Nothing, |x: i64| x + 1),
+        SkyMaybe::Nothing
+    );
 
     assert_eq!(
         sky_runtime::core::sky_maybe_and_then(SkyMaybe::Just(10i64), |x| SkyMaybe::Just(x * 2)),
         SkyMaybe::Just(20)
     );
     assert_eq!(
-        sky_runtime::core::sky_maybe_and_then(SkyMaybe::Just(10i64), |_: i64| SkyMaybe::<i64>::Nothing),
+        sky_runtime::core::sky_maybe_and_then(SkyMaybe::Just(10i64), |_: i64| {
+            SkyMaybe::<i64>::Nothing
+        }),
         SkyMaybe::Nothing
     );
     assert_eq!(
@@ -99,8 +110,14 @@ fn sky_maybe_map_and_then_with_default() {
 
     assert_eq!(SkyMaybe::Just(7i64).with_default(0), 7);
     assert_eq!(SkyMaybe::<i64>::Nothing.with_default(0), 0);
-    assert_eq!(sky_runtime::core::maybe_with_default(99i64, SkyMaybe::Nothing), 99);
-    assert_eq!(sky_runtime::core::maybe_with_default(99i64, SkyMaybe::Just(1)), 1);
+    assert_eq!(
+        sky_runtime::core::maybe_with_default(99i64, SkyMaybe::Nothing),
+        99
+    );
+    assert_eq!(
+        sky_runtime::core::maybe_with_default(99i64, SkyMaybe::Just(1)),
+        1
+    );
 }
 
 // ── SkyResult combinators — both variants ──────────────────────────────────
@@ -115,21 +132,18 @@ fn sky_result_map_and_then_with_default() {
 
     let mapped = sky_runtime::core::sky_result_map(SkyResult::<SkyError, i64>::Ok(10), |x| x + 5);
     assert_eq!(mapped.with_default(0), 15);
-    let mapped_err = sky_runtime::core::sky_result_map(
-        SkyResult::<SkyError, i64>::Err(str_err("e")),
-        |x| x + 5,
-    );
+    let mapped_err =
+        sky_runtime::core::sky_result_map(SkyResult::<SkyError, i64>::Err(str_err("e")), |x| x + 5);
     assert!(mapped_err.is_err());
 
-    let chained = sky_runtime::core::sky_result_and_then(
-        SkyResult::<SkyError, i64>::Ok(10),
-        |x| SkyResult::Ok(x * 3),
-    );
+    let chained = sky_runtime::core::sky_result_and_then(SkyResult::<SkyError, i64>::Ok(10), |x| {
+        SkyResult::Ok(x * 3)
+    });
     assert_eq!(chained.with_default(0), 30);
-    let chained_to_err = sky_runtime::core::sky_result_and_then(
-        SkyResult::<SkyError, i64>::Ok(10),
-        |_| SkyResult::<SkyError, i64>::Err(str_err("downstream")),
-    );
+    let chained_to_err =
+        sky_runtime::core::sky_result_and_then(SkyResult::<SkyError, i64>::Ok(10), |_| {
+            SkyResult::<SkyError, i64>::Err(str_err("downstream"))
+        });
     assert!(chained_to_err.is_err());
     // and_then on Err must NOT run the function (short-circuit).
     let not_run = sky_runtime::core::sky_result_and_then(
@@ -138,8 +152,14 @@ fn sky_result_map_and_then_with_default() {
     );
     assert!(not_run.is_err());
 
-    assert_eq!(sky_runtime::core::result_with_default(0i64, SkyResult::<SkyError, i64>::Ok(42)), 42);
-    assert_eq!(sky_runtime::core::result_with_default(0i64, SkyResult::<SkyError, i64>::Err(str_err("x"))), 0);
+    assert_eq!(
+        sky_runtime::core::result_with_default(0i64, SkyResult::<SkyError, i64>::Ok(42)),
+        42
+    );
+    assert_eq!(
+        sky_runtime::core::result_with_default(0i64, SkyResult::<SkyError, i64>::Err(str_err("x"))),
+        0
+    );
 }
 
 // ── result_traverse: all-ok collects; first Err short-circuits ─────────────
@@ -156,7 +176,13 @@ fn result_traverse_all_ok_collects_in_order() {
 #[test]
 fn result_traverse_short_circuits_on_first_err() {
     let r = sky_runtime::core::result_traverse::<i64, i64, SkyError>(
-        |x| if x == 2 { SkyResult::Err(str_err("two")) } else { SkyResult::Ok(x) },
+        |x| {
+            if x == 2 {
+                SkyResult::Err(str_err("two"))
+            } else {
+                SkyResult::Ok(x)
+            }
+        },
         vec![1, 2, 3],
     );
     assert!(r.is_err());
@@ -164,10 +190,7 @@ fn result_traverse_short_circuits_on_first_err() {
 
 #[test]
 fn result_traverse_empty_is_ok_empty() {
-    let r = sky_runtime::core::result_traverse::<i64, i64, SkyError>(
-        SkyResult::Ok,
-        vec![],
-    );
+    let r = sky_runtime::core::result_traverse::<i64, i64, SkyError>(SkyResult::Ok, vec![]);
     assert_eq!(r.with_default(vec![99]), Vec::<i64>::new());
 }
 
@@ -175,8 +198,14 @@ fn result_traverse_empty_is_ok_empty() {
 
 #[test]
 fn sky_maybe_to_option_both_variants() {
-    assert_eq!(sky_runtime::core::sky_maybe_to_option(SkyMaybe::Just(5i64)), Some(5));
-    assert_eq!(sky_runtime::core::sky_maybe_to_option(SkyMaybe::<i64>::Nothing), None);
+    assert_eq!(
+        sky_runtime::core::sky_maybe_to_option(SkyMaybe::Just(5i64)),
+        Some(5)
+    );
+    assert_eq!(
+        sky_runtime::core::sky_maybe_to_option(SkyMaybe::<i64>::Nothing),
+        None
+    );
     // The .as_deref() path the codegen uses for Option<&str> is sound.
     let just = sky_runtime::core::sky_maybe_to_option(SkyMaybe::Just("hi".to_string()));
     assert_eq!(just.as_deref(), Some("hi"));

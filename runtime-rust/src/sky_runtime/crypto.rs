@@ -7,13 +7,17 @@ use super::*;
 // (A prior `Vec<i64>` return diverged from both the Sky type and Go: a Sky call
 // site treating the result as a String/Bytes mismatched at codegen.)
 pub fn crypto_random_bytes<E: From<String> + Send + 'static>(n: i64) -> SkyTask<E, String> {
-    use aes_gcm::aead::{OsRng, rand_core::RngCore};
+    use aes_gcm::aead::{rand_core::RngCore, OsRng};
     Box::pin(async move {
         // SECURITY: Mirror Go oracle exactly: reject size <= 0 || size > 1024
         // (rt.go ~l6536: `if size <= 0 || size > 1024 { return ErrInvalidInput }`)
         // to prevent unbounded attacker-controlled allocation (DoS vector).
         if n <= 0 || n > 1024 {
-            return SkyResult::Err("Crypto.randomBytes: size must be 1..1024".to_string().into());
+            return SkyResult::Err(
+                "Crypto.randomBytes: size must be 1..1024"
+                    .to_string()
+                    .into(),
+            );
         }
         let count = n as usize;
         let mut buf = vec![0u8; count];
@@ -40,14 +44,18 @@ fn hex_lower(buf: &[u8]) -> String {
 // `-_` alphabet, no `=` pad. Width `n` is bytes of ENTROPY; the returned string is
 // longer (ceil(n*4/3) chars). (A prior hex encoding diverged from Go's base64.)
 pub fn crypto_random_token<E: From<String> + Send + 'static>(n: i64) -> SkyTask<E, String> {
-    use aes_gcm::aead::{OsRng, rand_core::RngCore};
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use aes_gcm::aead::{rand_core::RngCore, OsRng};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     Box::pin(async move {
         // SECURITY: Mirror Go oracle exactly: reject size <= 0 || size > 1024
         // (rt.go ~l6553: `if size <= 0 || size > 1024 { return ErrInvalidInput }`)
         // to prevent unbounded attacker-controlled allocation (DoS vector).
         if n <= 0 || n > 1024 {
-            return SkyResult::Err("Crypto.randomToken: size must be 1..1024".to_string().into());
+            return SkyResult::Err(
+                "Crypto.randomToken: size must be 1..1024"
+                    .to_string()
+                    .into(),
+            );
         }
         let count = n as usize;
         let mut buf = vec![0u8; count];
@@ -57,16 +65,20 @@ pub fn crypto_random_token<E: From<String> + Send + 'static>(n: i64) -> SkyTask<
 }
 
 pub fn crypto_sha256(s: String) -> String {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(s.as_bytes());
     let result = h.finalize();
-    result.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("")
+    result
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 /// Sky `sha512 : String -> String` — hex-encoded SHA-512 digest.
 pub fn crypto_sha512(s: String) -> String {
-    use sha2::{Sha512, Digest};
+    use sha2::{Digest, Sha512};
     let mut h = Sha512::new();
     h.update(s.as_bytes());
     let result = h.finalize();
@@ -82,7 +94,7 @@ pub fn crypto_sha512(s: String) -> String {
 ///
 /// Sky `sha1 : String -> String` — hex-encoded SHA-1 digest.
 pub fn crypto_sha1(s: String) -> String {
-    use sha1::{Sha1, Digest};
+    use sha1::{Digest, Sha1};
     let mut h = Sha1::new();
     h.update(s.as_bytes());
     h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
@@ -90,7 +102,7 @@ pub fn crypto_sha1(s: String) -> String {
 
 /// Sky `md5 : String -> String` — hex-encoded MD5 digest.
 pub fn crypto_md5(s: String) -> String {
-    use md5::{Md5, Digest};
+    use md5::{Digest, Md5};
     let mut h = Md5::new();
     h.update(s.as_bytes());
     h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
@@ -106,10 +118,14 @@ pub fn crypto_hmac_sha256(key: String, msg: String) -> String {
     // channel, and a fallback MAC would be a silently-wrong hash (a security defect).
     // SKY-RUST-AUDIT:ACCEPTED (Arthur Maciel, 2026-06-13) — infallible HMAC ctor; pure kernel has no Result channel; a fallback MAC is a security defect [ledger #1]
     #[allow(clippy::expect_used)]
-    let mut mac = HmacSha256::new_from_slice(key.as_bytes())
-        .expect("Hmac<Sha256> accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(key.as_bytes()).expect("Hmac<Sha256> accepts any key length");
     mac.update(msg.as_bytes());
-    mac.finalize().into_bytes().iter().map(|b| format!("{:02x}", b)).collect()
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 /// Sky `hmacSha512 : String -> String -> String`.
@@ -122,10 +138,14 @@ pub fn crypto_hmac_sha512(key: String, msg: String) -> String {
     // channel, and a fallback MAC would be a silently-wrong hash (a security defect).
     // SKY-RUST-AUDIT:ACCEPTED (Arthur Maciel, 2026-06-13) — infallible HMAC ctor; pure kernel has no Result channel; a fallback MAC is a security defect [ledger #1]
     #[allow(clippy::expect_used)]
-    let mut mac = HmacSha512::new_from_slice(key.as_bytes())
-        .expect("Hmac<Sha512> accepts any key length");
+    let mut mac =
+        HmacSha512::new_from_slice(key.as_bytes()).expect("Hmac<Sha512> accepts any key length");
     mac.update(msg.as_bytes());
-    mac.finalize().into_bytes().iter().map(|b| format!("{:02x}", b)).collect()
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 /// Sky `rsaSha256Sign : String -> String -> Result Error String`
@@ -135,10 +155,18 @@ pub fn crypto_hmac_sha512(key: String, msg: String) -> String {
 /// (rt.go ~l6472: tries ParsePKCS1PrivateKey then ParsePKCS8PrivateKey).
 /// Returns standard-base64-encoded signature (base64.StdEncoding, rt.go ~l6488).
 #[cfg(feature = "crypto")]
-pub fn crypto_rsa_sha256_sign<E: From<String>>(key_pem: String, msg: String) -> SkyResult<E, String> {
-    use rsa::{pkcs1::DecodeRsaPrivateKey, pkcs8::DecodePrivateKey, pkcs1v15::SigningKey, signature::{Signer, SignatureEncoding}};
+pub fn crypto_rsa_sha256_sign<E: From<String>>(
+    key_pem: String,
+    msg: String,
+) -> SkyResult<E, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use rsa::{
+        pkcs1::DecodeRsaPrivateKey,
+        pkcs1v15::SigningKey,
+        pkcs8::DecodePrivateKey,
+        signature::{SignatureEncoding, Signer},
+    };
     use sha2::Sha256;
-    use base64::{Engine, engine::general_purpose::STANDARD};
 
     // Try PKCS#8 first (the openssl default), then fall back to PKCS#1 — mirrors Go.
     let priv_key = if let Ok(k) = rsa::RsaPrivateKey::from_pkcs8_pem(&key_pem) {
@@ -146,7 +174,11 @@ pub fn crypto_rsa_sha256_sign<E: From<String>>(key_pem: String, msg: String) -> 
     } else if let Ok(k) = rsa::RsaPrivateKey::from_pkcs1_pem(&key_pem) {
         k
     } else {
-        return SkyResult::Err("Crypto.rsaSha256Sign: could not parse the private key".to_string().into());
+        return SkyResult::Err(
+            "Crypto.rsaSha256Sign: could not parse the private key"
+                .to_string()
+                .into(),
+        );
     };
     let signing_key = SigningKey::<Sha256>::new(priv_key);
     // try_sign (not sign): `Signer::sign` PANICS on an internal signing failure
@@ -155,9 +187,7 @@ pub fn crypto_rsa_sha256_sign<E: From<String>>(key_pem: String, msg: String) -> 
     let signature = match signing_key.try_sign(msg.as_bytes()) {
         Ok(s) => s,
         Err(e) => {
-            return SkyResult::Err(
-                format!("Crypto.rsaSha256Sign: signing failed: {}", e).into(),
-            )
+            return SkyResult::Err(format!("Crypto.rsaSha256Sign: signing failed: {}", e).into())
         }
     };
     // Go returns base64.StdEncoding (standard base64, with padding) — match exactly.
@@ -172,9 +202,14 @@ pub fn crypto_rsa_sha256_sign<E: From<String>>(key_pem: String, msg: String) -> 
 /// Signature is standard-base64 (base64.StdEncoding, rt.go ~l6511).
 #[cfg(feature = "crypto")]
 pub fn crypto_rsa_sha256_verify(key_pem: String, msg: String, sig_b64: String) -> bool {
-    use rsa::{pkcs1::DecodeRsaPublicKey, pkcs8::DecodePublicKey, pkcs1v15::{Signature, VerifyingKey}, signature::Verifier};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use rsa::{
+        pkcs1::DecodeRsaPublicKey,
+        pkcs1v15::{Signature, VerifyingKey},
+        pkcs8::DecodePublicKey,
+        signature::Verifier,
+    };
     use sha2::Sha256;
-    use base64::{Engine, engine::general_purpose::STANDARD};
 
     // Try SPKI/PKIX first (-----BEGIN PUBLIC KEY-----), then PKCS#1 — mirrors Go.
     let pub_key = if let Ok(k) = rsa::RsaPublicKey::from_public_key_pem(&key_pem) {
@@ -232,20 +267,38 @@ const PBKDF2_ITERS: u32 = 100_000;
 
 // Decode a base64 key string to exactly 32 bytes, or an error message.
 fn aead_read_key(name: &str, key: &str) -> Result<Vec<u8>, String> {
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    let k = STANDARD.decode(key.as_bytes())
-        .map_err(|_| format!("{}: key must be a 32-byte key from Crypto.aesKeyFromPassword", name))?;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let k = STANDARD.decode(key.as_bytes()).map_err(|_| {
+        format!(
+            "{}: key must be a 32-byte key from Crypto.aesKeyFromPassword",
+            name
+        )
+    })?;
     if k.len() != AEAD_KEY_BYTES {
-        return Err(format!("{}: key must be {} bytes, got {} (derive via Crypto.aesKeyFromPassword)", name, AEAD_KEY_BYTES, k.len()));
+        return Err(format!(
+            "{}: key must be {} bytes, got {} (derive via Crypto.aesKeyFromPassword)",
+            name,
+            AEAD_KEY_BYTES,
+            k.len()
+        ));
     }
     Ok(k)
 }
 
 // Crypto.aesGcmEncrypt : String -> String -> Result Error String
-pub fn crypto_aes_gcm_encrypt<E: From<String>>(key: String, plaintext: String) -> SkyResult<E, String> {
-    use aes_gcm::{Aes256Gcm, Nonce, KeyInit, aead::{Aead, OsRng, rand_core::RngCore}};
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    let k = match aead_read_key("Crypto.aesGcmEncrypt", &key) { Ok(k) => k, Err(e) => return SkyResult::Err(e.into()) };
+pub fn crypto_aes_gcm_encrypt<E: From<String>>(
+    key: String,
+    plaintext: String,
+) -> SkyResult<E, String> {
+    use aes_gcm::{
+        aead::{rand_core::RngCore, Aead, OsRng},
+        Aes256Gcm, KeyInit, Nonce,
+    };
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let k = match aead_read_key("Crypto.aesGcmEncrypt", &key) {
+        Ok(k) => k,
+        Err(e) => return SkyResult::Err(e.into()),
+    };
     // aead_read_key validated len == 32 just above, so the Err is structurally
     // unreachable — but propagate into the existing SkyResult channel rather than panic.
     let cipher = match Aes256Gcm::new_from_slice(&k) {
@@ -266,12 +319,29 @@ pub fn crypto_aes_gcm_encrypt<E: From<String>>(key: String, plaintext: String) -
 }
 
 // Crypto.aesGcmDecrypt : String -> String -> Result Error String
-pub fn crypto_aes_gcm_decrypt<E: From<String>>(key: String, encoded: String) -> SkyResult<E, String> {
-    use aes_gcm::{Aes256Gcm, Nonce, KeyInit, aead::Aead};
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    let k = match aead_read_key("Crypto.aesGcmDecrypt", &key) { Ok(k) => k, Err(e) => return SkyResult::Err(e.into()) };
-    let buf = match STANDARD.decode(encoded.as_bytes()) { Ok(b) => b, Err(e) => return SkyResult::Err(format!("Crypto.aesGcmDecrypt: invalid base64: {}", e).into()) };
-    if buf.len() < 12 { return SkyResult::Err("Crypto.aesGcmDecrypt: ciphertext too short".to_string().into()); }
+pub fn crypto_aes_gcm_decrypt<E: From<String>>(
+    key: String,
+    encoded: String,
+) -> SkyResult<E, String> {
+    use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let k = match aead_read_key("Crypto.aesGcmDecrypt", &key) {
+        Ok(k) => k,
+        Err(e) => return SkyResult::Err(e.into()),
+    };
+    let buf = match STANDARD.decode(encoded.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            return SkyResult::Err(format!("Crypto.aesGcmDecrypt: invalid base64: {}", e).into())
+        }
+    };
+    if buf.len() < 12 {
+        return SkyResult::Err(
+            "Crypto.aesGcmDecrypt: ciphertext too short"
+                .to_string()
+                .into(),
+        );
+    }
     let (nonce_bytes, ct) = buf.split_at(12);
     let cipher = match Aes256Gcm::new_from_slice(&k) {
         Ok(c) => c,
@@ -285,7 +355,9 @@ pub fn crypto_aes_gcm_decrypt<E: From<String>>(key: String, encoded: String) -> 
         Ok(pt) => match String::from_utf8(pt) {
             Ok(s) => SkyResult::Ok(s),
             Err(_) => SkyResult::Err(
-                "Crypto.aesGcmDecrypt: decrypted plaintext is not valid UTF-8".to_string().into(),
+                "Crypto.aesGcmDecrypt: decrypted plaintext is not valid UTF-8"
+                    .to_string()
+                    .into(),
             ),
         },
         Err(e) => SkyResult::Err(format!("Crypto.aesGcmDecrypt: {}", e).into()),
@@ -293,10 +365,19 @@ pub fn crypto_aes_gcm_decrypt<E: From<String>>(key: String, encoded: String) -> 
 }
 
 // Crypto.chacha20Encrypt : String -> String -> Result Error String
-pub fn crypto_chacha20_encrypt<E: From<String>>(key: String, plaintext: String) -> SkyResult<E, String> {
-    use chacha20poly1305::{ChaCha20Poly1305, Nonce, KeyInit, aead::{Aead, OsRng, rand_core::RngCore}};
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    let k = match aead_read_key("Crypto.chacha20Encrypt", &key) { Ok(k) => k, Err(e) => return SkyResult::Err(e.into()) };
+pub fn crypto_chacha20_encrypt<E: From<String>>(
+    key: String,
+    plaintext: String,
+) -> SkyResult<E, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use chacha20poly1305::{
+        aead::{rand_core::RngCore, Aead, OsRng},
+        ChaCha20Poly1305, KeyInit, Nonce,
+    };
+    let k = match aead_read_key("Crypto.chacha20Encrypt", &key) {
+        Ok(k) => k,
+        Err(e) => return SkyResult::Err(e.into()),
+    };
     let cipher = match ChaCha20Poly1305::new_from_slice(&k) {
         Ok(c) => c,
         Err(e) => return SkyResult::Err(format!("Crypto.chacha20Encrypt: {}", e).into()),
@@ -315,12 +396,29 @@ pub fn crypto_chacha20_encrypt<E: From<String>>(key: String, plaintext: String) 
 }
 
 // Crypto.chacha20Decrypt : String -> String -> Result Error String
-pub fn crypto_chacha20_decrypt<E: From<String>>(key: String, encoded: String) -> SkyResult<E, String> {
-    use chacha20poly1305::{ChaCha20Poly1305, Nonce, KeyInit, aead::Aead};
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    let k = match aead_read_key("Crypto.chacha20Decrypt", &key) { Ok(k) => k, Err(e) => return SkyResult::Err(e.into()) };
-    let buf = match STANDARD.decode(encoded.as_bytes()) { Ok(b) => b, Err(e) => return SkyResult::Err(format!("Crypto.chacha20Decrypt: invalid base64: {}", e).into()) };
-    if buf.len() < 12 { return SkyResult::Err("Crypto.chacha20Decrypt: ciphertext too short".to_string().into()); }
+pub fn crypto_chacha20_decrypt<E: From<String>>(
+    key: String,
+    encoded: String,
+) -> SkyResult<E, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, Nonce};
+    let k = match aead_read_key("Crypto.chacha20Decrypt", &key) {
+        Ok(k) => k,
+        Err(e) => return SkyResult::Err(e.into()),
+    };
+    let buf = match STANDARD.decode(encoded.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            return SkyResult::Err(format!("Crypto.chacha20Decrypt: invalid base64: {}", e).into())
+        }
+    };
+    if buf.len() < 12 {
+        return SkyResult::Err(
+            "Crypto.chacha20Decrypt: ciphertext too short"
+                .to_string()
+                .into(),
+        );
+    }
     let (nonce_bytes, ct) = buf.split_at(12);
     let cipher = match ChaCha20Poly1305::new_from_slice(&k) {
         Ok(c) => c,
@@ -332,7 +430,9 @@ pub fn crypto_chacha20_decrypt<E: From<String>>(key: String, encoded: String) ->
         Ok(pt) => match String::from_utf8(pt) {
             Ok(s) => SkyResult::Ok(s),
             Err(_) => SkyResult::Err(
-                "Crypto.chacha20Decrypt: decrypted plaintext is not valid UTF-8".to_string().into(),
+                "Crypto.chacha20Decrypt: decrypted plaintext is not valid UTF-8"
+                    .to_string()
+                    .into(),
             ),
         },
         Err(e) => SkyResult::Err(format!("Crypto.chacha20Decrypt: {}", e).into()),
@@ -342,9 +442,14 @@ pub fn crypto_chacha20_decrypt<E: From<String>>(key: String, encoded: String) ->
 // Crypto.aesKeyFromPassword : String -> String -> String
 // PBKDF2-HMAC-SHA256, 100k iters, 32-byte key, returned base64-encoded.
 pub fn crypto_aes_key_from_password(password: String, salt: String) -> String {
-    use base64::{Engine, engine::general_purpose::STANDARD};
+    use base64::{engine::general_purpose::STANDARD, Engine};
     let mut key = [0u8; AEAD_KEY_BYTES];
-    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), salt.as_bytes(), PBKDF2_ITERS, &mut key);
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+        password.as_bytes(),
+        salt.as_bytes(),
+        PBKDF2_ITERS,
+        &mut key,
+    );
     STANDARD.encode(key)
 }
 
@@ -359,9 +464,9 @@ mod tests_more_hashes {
 
     const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     const EMPTY_SHA512: &str = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e";
-    const EMPTY_SHA1:   &str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
-    const EMPTY_MD5:    &str = "d41d8cd98f00b204e9800998ecf8427e";
-    const ABC_SHA256:   &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    const EMPTY_SHA1: &str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+    const EMPTY_MD5: &str = "d41d8cd98f00b204e9800998ecf8427e";
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     #[test]
     fn test_sha256_empty_and_abc() {
@@ -385,14 +490,21 @@ mod tests_more_hashes {
     }
 
     // RFC 4231 test case 1: key = 0x0b*20, data = "Hi There"
-    const HMAC_SHA256_RFC1: &str = "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7";
+    const HMAC_SHA256_RFC1: &str =
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7";
     const HMAC_SHA512_RFC1: &str = "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854";
 
     #[test]
     fn test_hmac_sha256_rfc4231() {
         let key: String = (0..20).map(|_| '\u{000b}').collect();
-        assert_eq!(crypto_hmac_sha256(key.clone(), "Hi There".to_string()), HMAC_SHA256_RFC1);
-        assert_eq!(crypto_hmac_sha512(key, "Hi There".to_string()), HMAC_SHA512_RFC1);
+        assert_eq!(
+            crypto_hmac_sha256(key.clone(), "Hi There".to_string()),
+            HMAC_SHA256_RFC1
+        );
+        assert_eq!(
+            crypto_hmac_sha512(key, "Hi There".to_string()),
+            HMAC_SHA512_RFC1
+        );
     }
 
     const RSA_PRIV_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----
@@ -415,8 +527,8 @@ TsgxkiXH9sjXrPHT1hXn2tKCv9MkR8MD1Ndh6jo7inBZUK0YG7H6Jx0CAwEAAQ==
     #[test]
     fn test_rsa_sign_verify_roundtrip() {
         let msg = "hello, sky".to_string();
-        let sig: SkyResult<String, String> = crypto_rsa_sha256_sign(
-            RSA_PRIV_PEM.to_string(), msg.clone());
+        let sig: SkyResult<String, String> =
+            crypto_rsa_sha256_sign(RSA_PRIV_PEM.to_string(), msg.clone());
         // Sign returns standard base64 (mirrors Go's base64.StdEncoding).
         let sig_b64 = match sig {
             SkyResult::Ok(s) => s,
@@ -424,7 +536,10 @@ TsgxkiXH9sjXrPHT1hXn2tKCv9MkR8MD1Ndh6jo7inBZUK0YG7H6Jx0CAwEAAQ==
         };
         // Verify takes the PUBLIC key, not the private key (mirrors Go oracle).
         assert!(crypto_rsa_sha256_verify(
-            RSA_PUB_PEM.to_string(), msg, sig_b64));
+            RSA_PUB_PEM.to_string(),
+            msg,
+            sig_b64
+        ));
     }
 
     #[test]
@@ -433,13 +548,23 @@ TsgxkiXH9sjXrPHT1hXn2tKCv9MkR8MD1Ndh6jo7inBZUK0YG7H6Jx0CAwEAAQ==
         assert!(!crypto_rsa_sha256_verify(
             RSA_PUB_PEM.to_string(),
             "hello".to_string(),
-            "deadbeef".to_string()));
+            "deadbeef".to_string()
+        ));
     }
 
     #[test]
     fn test_constant_time_equal() {
-        assert!(crypto_constant_time_equal("abc".to_string(), "abc".to_string()));
-        assert!(!crypto_constant_time_equal("abc".to_string(), "abd".to_string()));
-        assert!(!crypto_constant_time_equal("abc".to_string(), "ab".to_string()));
+        assert!(crypto_constant_time_equal(
+            "abc".to_string(),
+            "abc".to_string()
+        ));
+        assert!(!crypto_constant_time_equal(
+            "abc".to_string(),
+            "abd".to_string()
+        ));
+        assert!(!crypto_constant_time_equal(
+            "abc".to_string(),
+            "ab".to_string()
+        ));
     }
 }

@@ -55,12 +55,17 @@ pub struct MemoryStore<Model, Msg> {
 
 impl<Model, Msg> MemoryStore<Model, Msg> {
     pub fn new(ttl: Duration) -> Self {
-        MemoryStore { sessions: RwLock::new(HashMap::new()), ttl }
+        MemoryStore {
+            sessions: RwLock::new(HashMap::new()),
+            ttl,
+        }
     }
 }
 
 #[async_trait]
-impl<Model: Send + 'static, Msg: Send + 'static> SessionStore<Model, Msg> for MemoryStore<Model, Msg> {
+impl<Model: Send + 'static, Msg: Send + 'static> SessionStore<Model, Msg>
+    for MemoryStore<Model, Msg>
+{
     async fn get(&self, sid: &str) -> Option<StoreHit<Model, Msg>> {
         let mut w = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         w.get_mut(sid).map(|(h, seen)| {
@@ -75,7 +80,10 @@ impl<Model: Send + 'static, Msg: Send + 'static> SessionStore<Model, Msg> for Me
             .insert(sid.to_string(), (handle, Instant::now()));
     }
     async fn delete(&self, sid: &str) {
-        self.sessions.write().unwrap_or_else(|e| e.into_inner()).remove(sid);
+        self.sessions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(sid);
     }
     async fn sweep(&self) {
         let now = Instant::now();
@@ -124,7 +132,11 @@ impl<Model, Msg> SqliteStore<Model, Msg> {
         )
         .execute(&pool)
         .await?;
-        Ok(SqliteStore { pool, mem_cache: RwLock::new(HashMap::new()), ttl })
+        Ok(SqliteStore {
+            pool,
+            mem_cache: RwLock::new(HashMap::new()),
+            ttl,
+        })
     }
 }
 
@@ -146,33 +158,59 @@ where
         };
         if let Some(h) = cached {
             let _ = sqlx::query("UPDATE sky_sessions SET last_seen = ? WHERE sid = ?")
-                .bind(now_secs()).bind(sid).execute(&self.pool).await;
+                .bind(now_secs())
+                .bind(sid)
+                .execute(&self.pool)
+                .await;
             return Some(StoreHit::Live(h));
         }
         // Cold: decode the persisted model checkpoint (post-restart / other replica).
         let row: Option<(String,)> = sqlx::query_as("SELECT blob FROM sky_sessions WHERE sid = ?")
-            .bind(sid).fetch_optional(&self.pool).await.ok().flatten();
+            .bind(sid)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten();
         let blob = row?.0;
         let model: Model = serde_json::from_str(&blob).ok()?;
         let _ = sqlx::query("UPDATE sky_sessions SET last_seen = ? WHERE sid = ?")
-            .bind(now_secs()).bind(sid).execute(&self.pool).await;
+            .bind(now_secs())
+            .bind(sid)
+            .execute(&self.pool)
+            .await;
         Some(StoreHit::Cold(model))
     }
     async fn set(&self, sid: &str, handle: SessionHandle<Model, Msg>) {
-        let model = handle.lock().unwrap_or_else(|e| e.into_inner()).model.clone();
-        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), (handle, Instant::now()));
+        let model = handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .model
+            .clone();
+        self.mem_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(sid.to_string(), (handle, Instant::now()));
         if let Ok(blob) = serde_json::to_string(&model) {
             let _ = sqlx::query(
                 "INSERT INTO sky_sessions (sid, blob, last_seen) VALUES (?, ?, ?) \
                  ON CONFLICT(sid) DO UPDATE SET blob=excluded.blob, last_seen=excluded.last_seen",
             )
-            .bind(sid).bind(blob).bind(now_secs()).execute(&self.pool).await;
+            .bind(sid)
+            .bind(blob)
+            .bind(now_secs())
+            .execute(&self.pool)
+            .await;
         }
     }
     async fn delete(&self, sid: &str) {
-        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).remove(sid);
+        self.mem_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(sid);
         let _ = sqlx::query("DELETE FROM sky_sessions WHERE sid = ?")
-            .bind(sid).execute(&self.pool).await;
+            .bind(sid)
+            .execute(&self.pool)
+            .await;
     }
     async fn sweep(&self) {
         // Total cutoff: an absurd `SKY_LIVE_TTL` (u64 near 2^63) would make a bare
@@ -180,9 +218,12 @@ where
         // arithmetic). `try_from` → i64::MAX on overflow, then saturating_sub clamps,
         // so an oversized TTL degrades to "never expire" instead of faulting. For all
         // realistic TTLs this is byte-identical to the old expression.
-        let cutoff = now_secs().saturating_sub(i64::try_from(self.ttl.as_secs()).unwrap_or(i64::MAX));
+        let cutoff =
+            now_secs().saturating_sub(i64::try_from(self.ttl.as_secs()).unwrap_or(i64::MAX));
         let _ = sqlx::query("DELETE FROM sky_sessions WHERE last_seen < ?")
-            .bind(cutoff).execute(&self.pool).await;
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await;
         // Bound the in-RAM handle cache by idle-TTL too. Without this, every
         // distinct sid ever seen (e.g. a flood of cookie-less requests) leaves a
         // live handle in mem_cache forever → unbounded growth → OOM (session-DoS).
@@ -190,7 +231,9 @@ where
         // checkpoint blob on its next request.
         let now = Instant::now();
         let ttl = self.ttl;
-        self.mem_cache.write().unwrap_or_else(|e| e.into_inner())
+        self.mem_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
             .retain(|_, (_, seen)| now.duration_since(*seen) <= ttl);
     }
 }
@@ -219,7 +262,11 @@ impl<Model, Msg> PostgresStore<Model, Msg> {
         )
         .execute(&pool)
         .await?;
-        Ok(PostgresStore { pool, mem_cache: RwLock::new(HashMap::new()), ttl })
+        Ok(PostgresStore {
+            pool,
+            mem_cache: RwLock::new(HashMap::new()),
+            ttl,
+        })
     }
 }
 
@@ -240,20 +287,37 @@ where
         };
         if let Some(h) = cached {
             let _ = sqlx::query("UPDATE sky_sessions SET last_seen = $1 WHERE sid = $2")
-                .bind(now_secs()).bind(sid).execute(&self.pool).await;
+                .bind(now_secs())
+                .bind(sid)
+                .execute(&self.pool)
+                .await;
             return Some(StoreHit::Live(h));
         }
         let row: Option<(String,)> = sqlx::query_as("SELECT blob FROM sky_sessions WHERE sid = $1")
-            .bind(sid).fetch_optional(&self.pool).await.ok().flatten();
+            .bind(sid)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten();
         let blob = row?.0;
         let model: Model = serde_json::from_str(&blob).ok()?;
         let _ = sqlx::query("UPDATE sky_sessions SET last_seen = $1 WHERE sid = $2")
-            .bind(now_secs()).bind(sid).execute(&self.pool).await;
+            .bind(now_secs())
+            .bind(sid)
+            .execute(&self.pool)
+            .await;
         Some(StoreHit::Cold(model))
     }
     async fn set(&self, sid: &str, handle: SessionHandle<Model, Msg>) {
-        let model = handle.lock().unwrap_or_else(|e| e.into_inner()).model.clone();
-        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), (handle, Instant::now()));
+        let model = handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .model
+            .clone();
+        self.mem_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(sid.to_string(), (handle, Instant::now()));
         if let Ok(blob) = serde_json::to_string(&model) {
             let _ = sqlx::query(
                 "INSERT INTO sky_sessions (sid, blob, last_seen) VALUES ($1, $2, $3) \
@@ -263,9 +327,14 @@ where
         }
     }
     async fn delete(&self, sid: &str) {
-        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).remove(sid);
+        self.mem_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(sid);
         let _ = sqlx::query("DELETE FROM sky_sessions WHERE sid = $1")
-            .bind(sid).execute(&self.pool).await;
+            .bind(sid)
+            .execute(&self.pool)
+            .await;
     }
     async fn sweep(&self) {
         // Total cutoff: an absurd `SKY_LIVE_TTL` (u64 near 2^63) would make a bare
@@ -273,14 +342,19 @@ where
         // arithmetic). `try_from` → i64::MAX on overflow, then saturating_sub clamps,
         // so an oversized TTL degrades to "never expire" instead of faulting. For all
         // realistic TTLs this is byte-identical to the old expression.
-        let cutoff = now_secs().saturating_sub(i64::try_from(self.ttl.as_secs()).unwrap_or(i64::MAX));
+        let cutoff =
+            now_secs().saturating_sub(i64::try_from(self.ttl.as_secs()).unwrap_or(i64::MAX));
         let _ = sqlx::query("DELETE FROM sky_sessions WHERE last_seen < $1")
-            .bind(cutoff).execute(&self.pool).await;
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await;
         // Bound the in-RAM handle cache by idle-TTL too (see SqliteStore::sweep)
         // — otherwise a cookie-less request flood grows mem_cache without bound.
         let now = Instant::now();
         let ttl = self.ttl;
-        self.mem_cache.write().unwrap_or_else(|e| e.into_inner())
+        self.mem_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
             .retain(|_, (_, seen)| now.duration_since(*seen) <= ttl);
     }
 }
@@ -354,8 +428,15 @@ where
     }
     async fn set(&self, sid: &str, handle: SessionHandle<Model, Msg>) {
         use redis::AsyncCommands;
-        let model = handle.lock().unwrap_or_else(|e| e.into_inner()).model.clone();
-        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), (handle, Instant::now()));
+        let model = handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .model
+            .clone();
+        self.mem_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(sid.to_string(), (handle, Instant::now()));
         if let Ok(blob) = serde_json::to_string(&model) {
             let mut conn = self.conn.clone();
             let _: Result<(), _> = conn.set_ex(redis_key(sid), blob, self.ttl_secs).await;
@@ -363,7 +444,10 @@ where
     }
     async fn delete(&self, sid: &str) {
         use redis::AsyncCommands;
-        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).remove(sid);
+        self.mem_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(sid);
         let mut conn = self.conn.clone();
         let _: Result<(), _> = conn.del(redis_key(sid)).await;
     }
@@ -374,7 +458,9 @@ where
         // session re-hydrates Cold from Redis on its next request.
         let now = Instant::now();
         let ttl = Duration::from_secs(self.ttl_secs);
-        self.mem_cache.write().unwrap_or_else(|e| e.into_inner())
+        self.mem_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
             .retain(|_, (_, seen)| now.duration_since(*seen) <= ttl);
     }
 }
@@ -383,7 +469,11 @@ where
 /// memory on any error — never crash. The `Model: Serialize` bound is for the
 /// persistent backends; memory needs none, but a single signature keeps the
 /// codegen call uniform (it derives serde on the model when emitting this).
-pub async fn choose_store<Model, Msg>(kind: &str, path: &str, ttl: Duration) -> Arc<dyn SessionStore<Model, Msg>>
+pub async fn choose_store<Model, Msg>(
+    kind: &str,
+    path: &str,
+    ttl: Duration,
+) -> Arc<dyn SessionStore<Model, Msg>>
 where
     Model: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
     Msg: Send + Sync + 'static,
@@ -395,7 +485,9 @@ where
                 eprintln!("[sky.live] session store: sqlite @ {path}");
                 return Arc::new(s);
             }
-            Err(e) => eprintln!("[sky.live] sqlite store unavailable ({e}); falling back to memory"),
+            Err(e) => {
+                eprintln!("[sky.live] sqlite store unavailable ({e}); falling back to memory")
+            }
         }
     }
     #[cfg(feature = "db")]
@@ -405,7 +497,9 @@ where
                 eprintln!("[sky.live] session store: postgres");
                 return Arc::new(s);
             }
-            Err(e) => eprintln!("[sky.live] postgres store unavailable ({e}); falling back to memory"),
+            Err(e) => {
+                eprintln!("[sky.live] postgres store unavailable ({e}); falling back to memory")
+            }
         }
     }
     #[cfg(feature = "redis_store")]
@@ -494,7 +588,11 @@ mod go_format_tests {
         let prefix = line
             .strip_suffix("[sky.live] session store: memory (ttl=1h0m0s)")
             .unwrap_or("");
-        assert_eq!(prefix.len(), 20, "timestamp prefix `YYYY/MM/DD HH:MM:SS ` is 20 chars: {prefix:?}");
+        assert_eq!(
+            prefix.len(),
+            20,
+            "timestamp prefix `YYYY/MM/DD HH:MM:SS ` is 20 chars: {prefix:?}"
+        );
         assert_eq!(prefix.matches('/').count(), 2);
         assert_eq!(prefix.matches(':').count(), 2);
     }
@@ -537,7 +635,14 @@ mod tests {
         let (tx, _rx) = channel::<()>(1);
         let tree: Html<()> = Html::HText(String::new());
         let index = build_index(&tree);
-        Arc::new(Mutex::new(SessionEntry { model, last_view: tree, index, seq: 0, sse_tx: None, msg_tx: tx }))
+        Arc::new(Mutex::new(SessionEntry {
+            model,
+            last_view: tree,
+            index,
+            seq: 0,
+            sse_tx: None,
+            msg_tx: tx,
+        }))
     }
 
     /// Restart survival: a store writes a checkpoint, a FRESH store over the same
@@ -549,14 +654,16 @@ mod tests {
         let p = path.to_str().unwrap();
         let _ = std::fs::remove_file(p);
         {
-            let s: SqliteStore<i32, ()> = SqliteStore::new(p, Duration::from_secs(60)).await.unwrap();
+            let s: SqliteStore<i32, ()> =
+                SqliteStore::new(p, Duration::from_secs(60)).await.unwrap();
             s.set("s1", handle_i32(42)).await;
             // same-process get is a Live cache hit
             assert!(matches!(s.get("s1").await, Some(StoreHit::Live(_))));
         }
         {
             // "restart": new store, empty mem-cache → decodes the checkpoint
-            let s: SqliteStore<i32, ()> = SqliteStore::new(p, Duration::from_secs(60)).await.unwrap();
+            let s: SqliteStore<i32, ()> =
+                SqliteStore::new(p, Duration::from_secs(60)).await.unwrap();
             match s.get("s1").await {
                 Some(StoreHit::Cold(m)) => assert_eq!(m, 42),
                 _ => panic!("expected Cold(42) after restart"),
@@ -577,16 +684,22 @@ mod tests {
     #[cfg(feature = "db")]
     #[tokio::test]
     async fn postgres_store_checkpoint_survives_restart() {
-        let Ok(url) = std::env::var("SKY_TEST_PG_URL") else { return };
+        let Ok(url) = std::env::var("SKY_TEST_PG_URL") else {
+            return;
+        };
         let sid = format!("pgtest_{}", std::process::id());
         {
-            let s: PostgresStore<i32, ()> = PostgresStore::new(&url, Duration::from_secs(60)).await.unwrap();
+            let s: PostgresStore<i32, ()> = PostgresStore::new(&url, Duration::from_secs(60))
+                .await
+                .unwrap();
             s.delete(&sid).await;
             s.set(&sid, handle_i32(7)).await;
             assert!(matches!(s.get(&sid).await, Some(StoreHit::Live(_))));
         }
         {
-            let s: PostgresStore<i32, ()> = PostgresStore::new(&url, Duration::from_secs(60)).await.unwrap();
+            let s: PostgresStore<i32, ()> = PostgresStore::new(&url, Duration::from_secs(60))
+                .await
+                .unwrap();
             match s.get(&sid).await {
                 Some(StoreHit::Cold(m)) => assert_eq!(m, 7),
                 _ => panic!("expected Cold(7) after restart"),
@@ -599,16 +712,22 @@ mod tests {
     #[cfg(feature = "redis_store")]
     #[tokio::test]
     async fn redis_store_checkpoint_survives_restart() {
-        let Ok(url) = std::env::var("SKY_TEST_REDIS_URL") else { return };
+        let Ok(url) = std::env::var("SKY_TEST_REDIS_URL") else {
+            return;
+        };
         let sid = format!("redistest_{}", std::process::id());
         {
-            let s: RedisStore<i32, ()> = RedisStore::new(&url, Duration::from_secs(60)).await.unwrap();
+            let s: RedisStore<i32, ()> = RedisStore::new(&url, Duration::from_secs(60))
+                .await
+                .unwrap();
             s.delete(&sid).await;
             s.set(&sid, handle_i32(9)).await;
             assert!(matches!(s.get(&sid).await, Some(StoreHit::Live(_))));
         }
         {
-            let s: RedisStore<i32, ()> = RedisStore::new(&url, Duration::from_secs(60)).await.unwrap();
+            let s: RedisStore<i32, ()> = RedisStore::new(&url, Duration::from_secs(60))
+                .await
+                .unwrap();
             match s.get(&sid).await {
                 Some(StoreHit::Cold(m)) => assert_eq!(m, 9),
                 _ => panic!("expected Cold(9) after restart"),
@@ -626,7 +745,13 @@ mod tests {
         // touch "active" so it survives the sweep
         let _ = s.get("active").await;
         s.sweep().await;
-        assert!(s.get("active").await.is_some(), "touched session should survive");
-        assert!(s.get("idle").await.is_none(), "idle session should be evicted");
+        assert!(
+            s.get("active").await.is_some(),
+            "touched session should survive"
+        );
+        assert!(
+            s.get("idle").await.is_none(),
+            "idle session should be evicted"
+        );
     }
 }

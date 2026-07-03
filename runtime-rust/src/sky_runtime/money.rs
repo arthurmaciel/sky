@@ -16,7 +16,11 @@ use std::sync::{Mutex, OnceLock};
 // ── Currency table ─────────────────────────────────────────────────
 
 /// One row of the ISO 4217 / cryptocurrency lookup table.
-struct CurrencyInfo { minor_units: u32, symbol: &'static str, name: &'static str }
+struct CurrencyInfo {
+    minor_units: u32,
+    symbol: &'static str,
+    name: &'static str,
+}
 
 fn lookup_currency(code: &str) -> Option<CurrencyInfo> {
     let c = code.trim().to_uppercase();
@@ -78,7 +82,11 @@ fn lookup_currency(code: &str) -> Option<CurrencyInfo> {
         "BTC" => (8, "₿", "Bitcoin"),
         _ => return None,
     };
-    Some(CurrencyInfo { minor_units, symbol, name })
+    Some(CurrencyInfo {
+        minor_units,
+        symbol,
+        name,
+    })
 }
 
 /// "Is this a known ISO 4217 / crypto code?" — used by `money_is_known_currency`.
@@ -89,17 +97,26 @@ fn is_known(code: &str) -> bool {
 // ── Property kernels ───────────────────────────────────────────────
 
 pub fn money_minor_units(code: String) -> i64 {
-    match lookup_currency(&code) { Some(c) => c.minor_units as i64, None => 2 }
+    match lookup_currency(&code) {
+        Some(c) => c.minor_units as i64,
+        None => 2,
+    }
 }
 
 pub fn money_symbol(code: String) -> String {
     let upper = code.trim().to_uppercase();
-    match lookup_currency(&upper) { Some(c) => c.symbol.to_string(), None => upper }
+    match lookup_currency(&upper) {
+        Some(c) => c.symbol.to_string(),
+        None => upper,
+    }
 }
 
 pub fn money_currency_name(code: String) -> String {
     let upper = code.trim().to_uppercase();
-    match lookup_currency(&upper) { Some(c) => c.name.to_string(), None => upper }
+    match lookup_currency(&upper) {
+        Some(c) => c.name.to_string(),
+        None => upper,
+    }
 }
 
 pub fn money_is_known_currency(code: String) -> bool {
@@ -128,7 +145,10 @@ pub fn money_format(code: String, amount: Decimal) -> String {
 /// `formatWithCode : Code -> Decimal -> String` — "12.34 USD" for B2B output.
 pub fn money_format_with_code(code: String, amount: Decimal) -> String {
     let upper = code.trim().to_uppercase();
-    let minor = match lookup_currency(&upper) { Some(c) => c.minor_units, None => 2 };
+    let minor = match lookup_currency(&upper) {
+        Some(c) => c.minor_units,
+        None => 2,
+    };
     format!("{:.*} {}", minor as usize, amount.0, upper)
 }
 
@@ -141,7 +161,11 @@ fn rates() -> &'static Mutex<HashMap<(String, String), RD>> {
 
 /// `setRate : Code -> Code -> Decimal -> Result Error ()`.
 /// Negative or zero rate → error. Inverse auto-registered.
-pub fn money_set_rate<E: From<String>>(from: String, to: String, rate: Decimal) -> SkyResult<E, ()> {
+pub fn money_set_rate<E: From<String>>(
+    from: String,
+    to: String,
+    rate: Decimal,
+) -> SkyResult<E, ()> {
     if rate.0.is_zero() || rate.0.is_sign_negative() {
         return SkyResult::Err("Money.setRate: rate must be positive".to_string().into());
     }
@@ -182,9 +206,9 @@ pub fn money_get_rate<E: From<String>>(from: String, to: String) -> SkyResult<E,
     let map = rates().lock().unwrap_or_else(|e| e.into_inner());
     match map.get(&(from.clone(), to.clone())) {
         Some(r) => SkyResult::Ok(Decimal(*r)),
-        None => SkyResult::Err(
-            format!("Money.getRate: no rate registered for {}→{}", from, to).into()
-        ),
+        None => {
+            SkyResult::Err(format!("Money.getRate: no rate registered for {}→{}", from, to).into())
+        }
     }
 }
 
@@ -192,7 +216,9 @@ pub fn money_get_rate<E: From<String>>(from: String, to: String) -> SkyResult<E,
 pub fn money_has_rate(from: String, to: String) -> bool {
     let from = from.trim().to_uppercase();
     let to = to.trim().to_uppercase();
-    if from == to { return true; }
+    if from == to {
+        return true;
+    }
     let map = rates().lock().unwrap_or_else(|e| e.into_inner());
     map.contains_key(&(from, to))
 }
@@ -220,7 +246,9 @@ pub fn money_clear_rates<E: From<String>>() -> SkyResult<E, ()> {
 /// values) the function returns an empty Vec rather than panicking; normal
 /// monetary amounts (< 10^15 major units) are unaffected.
 pub fn money_allocate(places: i64, parts: i64, amount: Decimal) -> Vec<Decimal> {
-    if parts <= 0 { return Vec::new(); }
+    if parts <= 0 {
+        return Vec::new();
+    }
     let places = places.max(0) as u32;
     // Shift to minor units (× 10^places). `10_i64.checked_pow` guards i64
     // overflow for extreme `places` values (≥ 19). On None we saturate to
@@ -270,7 +298,9 @@ pub fn money_allocate(places: i64, parts: i64, amount: Decimal) -> Vec<Decimal> 
     // once per slot — a per-call amplification vector. A "fair split" of money
     // realistically tops out in the thousands; 100k is already extravagant, so cap
     // there to cut the worst-case allocation + loop work 10× vs the prior 1e6 bound.
-    if parts > 100_000 { return Vec::new(); }
+    if parts > 100_000 {
+        return Vec::new();
+    }
     let mut out = Vec::with_capacity(parts as usize);
     for i in 0..parts {
         // base ± 1 (toward zero by sign) for the first |remainder| slots.
@@ -293,7 +323,9 @@ pub fn money_allocate(places: i64, parts: i64, amount: Decimal) -> Vec<Decimal> 
 
 // Silence unused-warning on SkyMaybe import (kept for symmetry with sibling kernels).
 #[allow(dead_code)]
-fn _unused_skymaybe<T>() -> SkyMaybe<T> { SkyMaybe::Nothing }
+fn _unused_skymaybe<T>() -> SkyMaybe<T> {
+    SkyMaybe::Nothing
+}
 
 #[cfg(test)]
 mod tests {
@@ -301,7 +333,9 @@ mod tests {
     use rust_decimal::Decimal as RD;
     use std::str::FromStr;
 
-    fn d(s: &str) -> Decimal { Decimal(RD::from_str(s).unwrap()) }
+    fn d(s: &str) -> Decimal {
+        Decimal(RD::from_str(s).unwrap())
+    }
 
     // Serialise tests that mutate the process-global fx-rate registry
     // (`rates()`). cargo runs tests in parallel, so without this guard one
@@ -320,7 +354,11 @@ mod tests {
         let shares = money_allocate(2, 3, d("-100.00"));
         assert_eq!(shares.len(), 3);
         let sum: RD = shares.iter().fold(RD::from(0), |acc, s| acc + s.0);
-        assert_eq!(sum, RD::from_str("-100.00").unwrap(), "negative shares must sum to the input");
+        assert_eq!(
+            sum,
+            RD::from_str("-100.00").unwrap(),
+            "negative shares must sum to the input"
+        );
         // Residue lands on the first slot, toward zero by sign (more negative).
         assert_eq!(shares[0].0, RD::from_str("-33.34").unwrap());
     }
@@ -377,10 +415,16 @@ mod tests {
 
     #[test]
     fn test_money_format_with_code() {
-        assert_eq!(money_format_with_code("USD".into(), d("12.34")), "12.34 USD");
+        assert_eq!(
+            money_format_with_code("USD".into(), d("12.34")),
+            "12.34 USD"
+        );
         assert_eq!(money_format_with_code("jpy".into(), d("1234")), "1234 JPY");
         // BHD has 3 minor units
-        assert_eq!(money_format_with_code("BHD".into(), d("1.234")), "1.234 BHD");
+        assert_eq!(
+            money_format_with_code("BHD".into(), d("1.234")),
+            "1.234 BHD"
+        );
     }
 
     #[test]
@@ -399,7 +443,11 @@ mod tests {
         }
         // Identity
         let r2: SkyResult<String, Decimal> = money_get_rate("USD".into(), "USD".into());
-        if let SkyResult::Ok(v) = r2 { assert_eq!(v.0, RD::from(1)); } else { panic!("identity rate failed"); }
+        if let SkyResult::Ok(v) = r2 {
+            assert_eq!(v.0, RD::from(1));
+        } else {
+            panic!("identity rate failed");
+        }
         // Missing
         let r3: SkyResult<String, Decimal> = money_get_rate("USD".into(), "XYZ".into());
         assert!(matches!(r3, SkyResult::Err(_)));

@@ -144,7 +144,11 @@ mod imp {
         let args = v
             .get("args")
             .and_then(|a| a.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         Some((sky_id, event, args))
     }
@@ -153,7 +157,10 @@ mod imp {
     fn render<Model, Msg, FView>(
         view: &FView,
         model: &Model,
-    ) -> (String, crate::sky_runtime::live::dispatch::HandlerIndex<Msg>)
+    ) -> (
+        String,
+        crate::sky_runtime::live::dispatch::HandlerIndex<Msg>,
+    )
     where
         Model: Clone,
         Msg: Clone,
@@ -196,10 +203,10 @@ mod imp {
             use tao::dpi::LogicalSize;
             use tao::event::{Event, WindowEvent};
             use tao::event_loop::{ControlFlow, EventLoopBuilder};
-            use tao::window::WindowBuilder;
-            use wry::WebViewBuilder;
             #[cfg(target_os = "linux")]
             use tao::platform::unix::WindowExtUnix;
+            use tao::window::WindowBuilder;
+            use wry::WebViewBuilder;
             #[cfg(target_os = "linux")]
             use wry::WebViewBuilderExtUnix;
 
@@ -239,11 +246,11 @@ mod imp {
             // Modern wry: `WebViewBuilder::new()` is no-arg; the window is supplied
             // at build time. The IPC handler closure receives the message as a
             // `wry::http::Request<String>`; we forward its body to the TEA loop.
-            let builder = WebViewBuilder::new()
-                .with_html(html)
-                .with_ipc_handler(move |req: wry::http::Request<String>| {
+            let builder = WebViewBuilder::new().with_html(html).with_ipc_handler(
+                move |req: wry::http::Request<String>| {
                     let _ = proxy.send_event(UserEvent::Ipc(req.into_body()));
-                });
+                },
+            );
             // Build per-OS: raw-window-handle path off Linux, gtk widget on Linux
             // (so Wayland + X11 both work). Both return `wry::Result<WebView>`.
             #[cfg(not(target_os = "linux"))]
@@ -267,7 +274,10 @@ mod imp {
             event_loop.run(move |event, _target, control_flow| {
                 *control_flow = ControlFlow::Wait;
                 match event {
-                    Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+                    Event::WindowEvent {
+                        event: WindowEvent::CloseRequested,
+                        ..
+                    } => {
                         *control_flow = ControlFlow::Exit;
                     }
                     Event::UserEvent(UserEvent::Ipc(body)) => {

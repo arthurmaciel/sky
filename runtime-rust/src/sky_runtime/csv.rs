@@ -127,7 +127,10 @@ pub fn csv_parse<E: From<String>>(text: String) -> SkyResult<E, CsvDoc> {
 }
 
 /// Csv.parseWithDelimiter : String -> String -> Result Error Csv
-pub fn csv_parse_with_delimiter<E: From<String>>(delim: String, text: String) -> SkyResult<E, CsvDoc> {
+pub fn csv_parse_with_delimiter<E: From<String>>(
+    delim: String,
+    text: String,
+) -> SkyResult<E, CsvDoc> {
     let byte = match validated_delimiter::<E>(&delim) {
         SkyResult::Ok(b) => b,
         SkyResult::Err(e) => return SkyResult::Err(e),
@@ -155,7 +158,9 @@ pub fn csv_encode_with_delimiter(delim: String, doc: CsvDoc) -> String {
 
 /// Csv.parseStreamFromFile : String -> Task Error (List (List String))
 /// Returns every row (including the header).
-pub fn csv_parse_stream_from_file<E: From<String> + Send + 'static>(path: String) -> SkyTask<E, Vec<Vec<String>>> {
+pub fn csv_parse_stream_from_file<E: From<String> + Send + 'static>(
+    path: String,
+) -> SkyTask<E, Vec<Vec<String>>> {
     let result = (|| -> Result<Vec<Vec<String>>, String> {
         // Stream rows from a BufReader<File> rather than slurping the whole file
         // into a String first — the csv reader pulls records incrementally, so a
@@ -177,7 +182,10 @@ pub fn csv_parse_stream_from_file<E: From<String> + Send + 'static>(path: String
         for rec in rdr.records() {
             let r = rec.map_err(|e| e.to_string())?;
             if out.len() >= max_rows {
-                return Err(format!("exceeds row cap of {} (raise SKY_CSV_MAX_ROWS)", max_rows));
+                return Err(format!(
+                    "exceeds row cap of {} (raise SKY_CSV_MAX_ROWS)",
+                    max_rows
+                ));
             }
             out.push(r.iter().map(|s| s.to_string()).collect());
         }
@@ -195,7 +203,10 @@ mod tests {
 
     #[test]
     fn formula_guard_is_opt_in() {
-        let doc = CsvDoc { header: vec!["a".into()], rows: vec![vec!["=SUM(A1)".into()]] };
+        let doc = CsvDoc {
+            header: vec!["a".into()],
+            rows: vec![vec!["=SUM(A1)".into()]],
+        };
         // Default OFF: lossless (formula cell emitted verbatim, just CSV-quoted).
         std::env::remove_var("SKY_CSV_SANITIZE_FORMULAS");
         assert!(encode_delim(&doc, b',').contains("=SUM(A1)"));
@@ -208,7 +219,10 @@ mod tests {
     #[test]
     fn parse_then_encode_roundtrip() {
         let doc: SkyResult<String, CsvDoc> = csv_parse("a,b\n1,2\n3,4".to_string());
-        let d = match doc { SkyResult::Ok(d) => d, _ => panic!("parse failed") };
+        let d = match doc {
+            SkyResult::Ok(d) => d,
+            _ => panic!("parse failed"),
+        };
         assert_eq!(d.header, vec!["a", "b"]);
         assert_eq!(d.rows, vec![vec!["1", "2"], vec!["3", "4"]]);
         let out = csv_encode(d);
@@ -217,7 +231,10 @@ mod tests {
 
     #[test]
     fn quoting() {
-        let doc = CsvDoc { header: vec!["x".into()], rows: vec![vec!["a,b".into()]] };
+        let doc = CsvDoc {
+            header: vec!["x".into()],
+            rows: vec![vec!["a,b".into()]],
+        };
         assert_eq!(csv_encode(doc), "x\n\"a,b\"\n");
     }
 }

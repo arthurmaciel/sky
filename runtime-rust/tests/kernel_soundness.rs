@@ -37,9 +37,15 @@ fn mod_by_negative_divisor_matches_go() {
 #[test]
 fn basics_fst_snd_identity_always() {
     assert_eq!(sky_runtime::basics::basics_fst((1i64, "x".to_string())), 1);
-    assert_eq!(sky_runtime::basics::basics_snd((1i64, "x".to_string())), "x".to_string());
+    assert_eq!(
+        sky_runtime::basics::basics_snd((1i64, "x".to_string())),
+        "x".to_string()
+    );
     assert_eq!(sky_runtime::basics::basics_identity(42i64), 42);
-    assert_eq!(sky_runtime::basics::basics_always(7i64, "ignored".to_string()), 7);
+    assert_eq!(
+        sky_runtime::basics::basics_always(7i64, "ignored".to_string()),
+        7
+    );
 }
 
 proptest! {

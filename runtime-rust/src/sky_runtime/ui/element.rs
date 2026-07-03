@@ -162,32 +162,52 @@ pub enum Element<M> {
 // no example stringifies one), so a stable type-tag placeholder is the total,
 // correct rendering — never panics, never recurses into the `M` payload.
 impl crate::sky_runtime::stringify::SkyStringify for Color {
-    fn sky_show(&self) -> String { "<color>".to_string() }
+    fn sky_show(&self) -> String {
+        "<color>".to_string()
+    }
 }
 impl crate::sky_runtime::stringify::SkyStringify for Length {
-    fn sky_show(&self) -> String { "<length>".to_string() }
+    fn sky_show(&self) -> String {
+        "<length>".to_string()
+    }
 }
 impl crate::sky_runtime::stringify::SkyStringify for HAlign {
-    fn sky_show(&self) -> String { "<halign>".to_string() }
+    fn sky_show(&self) -> String {
+        "<halign>".to_string()
+    }
 }
 impl crate::sky_runtime::stringify::SkyStringify for VAlign {
-    fn sky_show(&self) -> String { "<valign>".to_string() }
+    fn sky_show(&self) -> String {
+        "<valign>".to_string()
+    }
 }
 impl crate::sky_runtime::stringify::SkyStringify for Location {
-    fn sky_show(&self) -> String { "<location>".to_string() }
+    fn sky_show(&self) -> String {
+        "<location>".to_string()
+    }
 }
 impl crate::sky_runtime::stringify::SkyStringify for PseudoClass {
-    fn sky_show(&self) -> String { "<pseudo-class>".to_string() }
+    fn sky_show(&self) -> String {
+        "<pseudo-class>".to_string()
+    }
 }
 impl crate::sky_runtime::stringify::SkyStringify for Description {
-    fn sky_show(&self) -> String { "<description>".to_string() }
+    fn sky_show(&self) -> String {
+        "<description>".to_string()
+    }
 }
 impl crate::sky_runtime::stringify::SkyStringify for LayoutContext {
-    fn sky_show(&self) -> String { "<layout-context>".to_string() }
+    fn sky_show(&self) -> String {
+        "<layout-context>".to_string()
+    }
 }
 impl<M> crate::sky_runtime::stringify::SkyStringify for Attribute<M> {
-    fn sky_show(&self) -> String { "<ui-attribute>".to_string() }
+    fn sky_show(&self) -> String {
+        "<ui-attribute>".to_string()
+    }
 }
 impl<M> crate::sky_runtime::stringify::SkyStringify for Element<M> {
-    fn sky_show(&self) -> String { "<element>".to_string() }
+    fn sky_show(&self) -> String {
+        "<element>".to_string()
+    }
 }

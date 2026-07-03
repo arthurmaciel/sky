@@ -23,10 +23,17 @@ pub struct TuiKey {
 
 impl TuiKey {
     fn of(kind: &str) -> Self {
-        TuiKey { kind: kind.to_string(), ..TuiKey::default() }
+        TuiKey {
+            kind: kind.to_string(),
+            ..TuiKey::default()
+        }
     }
     fn val(kind: &str, value: String) -> Self {
-        TuiKey { kind: kind.to_string(), value, ..TuiKey::default() }
+        TuiKey {
+            kind: kind.to_string(),
+            value,
+            ..TuiKey::default()
+        }
     }
 }
 
@@ -89,7 +96,10 @@ fn decode_csi(buf: &[u8]) -> (TuiKey, usize) {
                     return (TuiKey::val("mouse", format!("{body}:{tag}")), end);
                 }
             }
-            (TuiKey::val("other", lossy(buf.get(..end).unwrap_or(buf))), end)
+            (
+                TuiKey::val("other", lossy(buf.get(..end).unwrap_or(buf))),
+                end,
+            )
         }
         // CSI 1;<mod><final> — modifier-prefixed arrows / Home / End / F-keys
         Some(b'1') if buf.len() >= 6 && buf.get(3) == Some(&b';') => {
@@ -111,10 +121,19 @@ fn decode_csi(buf: &[u8]) -> (TuiKey, usize) {
                 match modb {
                     b'2' => ev.shift = true,
                     b'3' => ev.alt = true,
-                    b'4' => { ev.shift = true; ev.alt = true; }
+                    b'4' => {
+                        ev.shift = true;
+                        ev.alt = true;
+                    }
                     b'5' => ev.ctrl = true,
-                    b'6' => { ev.shift = true; ev.ctrl = true; }
-                    b'7' => { ev.alt = true; ev.ctrl = true; }
+                    b'6' => {
+                        ev.shift = true;
+                        ev.ctrl = true;
+                    }
+                    b'7' => {
+                        ev.alt = true;
+                        ev.ctrl = true;
+                    }
                     _ => {}
                 }
                 return (ev, 6);
@@ -146,7 +165,10 @@ fn decode_csi(buf: &[u8]) -> (TuiKey, usize) {
                     break;
                 }
             }
-            (TuiKey::val("other", lossy(buf.get(..end).unwrap_or(buf))), end)
+            (
+                TuiKey::val("other", lossy(buf.get(..end).unwrap_or(buf))),
+                end,
+            )
         }
         // Plain CSI arrows / Home / End
         Some(b'A') => (TuiKey::of("up"), 3),
@@ -164,7 +186,10 @@ fn decode_csi(buf: &[u8]) -> (TuiKey, usize) {
                     break;
                 }
             }
-            (TuiKey::val("other", lossy(buf.get(..end).unwrap_or(buf))), end)
+            (
+                TuiKey::val("other", lossy(buf.get(..end).unwrap_or(buf))),
+                end,
+            )
         }
     }
 }

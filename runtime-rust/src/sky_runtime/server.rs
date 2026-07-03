@@ -13,9 +13,9 @@
 
 use super::*;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
 /// Sky.Http.Server.Request — field names/types match the Sky record alias.
 // camelCase is required: Sky field access (`req.remoteAddr`) resolves onto
@@ -55,8 +55,11 @@ pub struct ServerCookie {
 /// A handler erased of its Sky error type `E`: it awaits the Sky task and maps
 /// the result to either the response (Ok) or a 500 marker (Err). Erasing E here
 /// keeps `ServerRoute` non-generic so it bridges to the non-generic Sky `Route`.
-type ErasedHandler =
-    Arc<dyn Fn(ServerRequest) -> Pin<Box<dyn Future<Output = Result<ServerResponse, String>> + Send>> + Send + Sync>;
+type ErasedHandler = Arc<
+    dyn Fn(ServerRequest) -> Pin<Box<dyn Future<Output = Result<ServerResponse, String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// The Sky `Handler` type (`Request -> Task Error Response`) reified as a
 /// shareable, error-typed closure. The Rust codegen renders the `Handler` type
@@ -65,8 +68,7 @@ type ErasedHandler =
 /// this `Arc<dyn Fn>`, because a real route handler CAPTURES app state
 /// (`handleRegister cfg db`) and a capturing closure cannot coerce to a bare
 /// `fn` pointer.
-pub type ServerHandler<E> =
-    Arc<dyn Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync>;
+pub type ServerHandler<E> = Arc<dyn Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync>;
 
 /// Accept a route / middleware handler as EITHER a bare closure / fn item OR an
 /// already-boxed `ServerHandler<E>` (the Arc the `Handler` alias renders as),
@@ -85,11 +87,15 @@ impl<E, F> IntoServerHandler<E> for F
 where
     F: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
 {
-    fn into_server_handler(self) -> ServerHandler<E> { Arc::new(self) }
+    fn into_server_handler(self) -> ServerHandler<E> {
+        Arc::new(self)
+    }
 }
 
 impl<E> IntoServerHandler<E> for ServerHandler<E> {
-    fn into_server_handler(self) -> ServerHandler<E> { self }
+    fn into_server_handler(self) -> ServerHandler<E> {
+        self
+    }
 }
 
 // The codegen Arc-wraps a partial-applied route handler at its construction site
@@ -103,20 +109,25 @@ impl<E, F> IntoServerHandler<E> for Arc<F>
 where
     F: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
 {
-    fn into_server_handler(self) -> ServerHandler<E> { self }
+    fn into_server_handler(self) -> ServerHandler<E> {
+        self
+    }
 }
 
 /// Discriminated union over the two possible route targets — replaces the
 /// two `Option` fields so both-None is unrepresentable.
 #[derive(Clone)]
-enum RouteTarget { Handler(ErasedHandler), Static(String) }
+enum RouteTarget {
+    Handler(ErasedHandler),
+    Static(String),
+}
 
 /// Sky.Http.Server.Route (opaque). Non-generic — see ErasedHandler.
 #[derive(Clone)]
 pub struct ServerRoute {
     pub method: String,
     pub path: String,
-    target: RouteTarget,   // private; was the two pub Options
+    target: RouteTarget, // private; was the two pub Options
 }
 
 // ─── handler erasure ──────────────────────────────────────────────────────
@@ -144,30 +155,54 @@ where
     E: Send + 'static,
     H: IntoServerHandler<E>,
 {
-    ServerRoute { method: method.to_string(), path, target: RouteTarget::Handler(erase(h.into_server_handler())) }
+    ServerRoute {
+        method: method.to_string(),
+        path,
+        target: RouteTarget::Handler(erase(h.into_server_handler())),
+    }
 }
 
 // ─── routing kernels ──────────────────────────────────────────────────────
 
 pub fn server_get<E, H>(path: String, h: H) -> ServerRoute
-where E: Send + 'static, H: IntoServerHandler<E>
-{ route("GET", path, h) }
+where
+    E: Send + 'static,
+    H: IntoServerHandler<E>,
+{
+    route("GET", path, h)
+}
 
 pub fn server_post<E, H>(path: String, h: H) -> ServerRoute
-where E: Send + 'static, H: IntoServerHandler<E>
-{ route("POST", path, h) }
+where
+    E: Send + 'static,
+    H: IntoServerHandler<E>,
+{
+    route("POST", path, h)
+}
 
 pub fn server_put<E, H>(path: String, h: H) -> ServerRoute
-where E: Send + 'static, H: IntoServerHandler<E>
-{ route("PUT", path, h) }
+where
+    E: Send + 'static,
+    H: IntoServerHandler<E>,
+{
+    route("PUT", path, h)
+}
 
 pub fn server_delete<E, H>(path: String, h: H) -> ServerRoute
-where E: Send + 'static, H: IntoServerHandler<E>
-{ route("DELETE", path, h) }
+where
+    E: Send + 'static,
+    H: IntoServerHandler<E>,
+{
+    route("DELETE", path, h)
+}
 
 pub fn server_any<E, H>(path: String, h: H) -> ServerRoute
-where E: Send + 'static, H: IntoServerHandler<E>
-{ route("ANY", path, h) }
+where
+    E: Send + 'static,
+    H: IntoServerHandler<E>,
+{
+    route("ANY", path, h)
+}
 
 /// Server.api : String -> (Request -> Task Error Response) -> Route
 ///
@@ -176,13 +211,14 @@ where E: Send + 'static, H: IntoServerHandler<E>
 /// (`WithoutCsrf`) is a browser-session / double-submit concern from Sky.Live
 /// with no analogue on the Rust HTTP server, so it has no effect here.
 pub fn server_api<E, H>(spec: String, h: H) -> ServerRoute
-where E: Send + 'static, H: IntoServerHandler<E>
+where
+    E: Send + 'static,
+    H: IntoServerHandler<E>,
 {
     // split_once is total by construction — no raw `spec[..idx]` range slice
     // (the restriction-lint footgun if the delimiter ever became multi-byte).
     let (method, path) = match spec.split_once(' ') {
-        Some((m, p)) if !m.is_empty() =>
-            (m.trim().to_uppercase(), p.trim().to_string()),
+        Some((m, p)) if !m.is_empty() => (m.trim().to_uppercase(), p.trim().to_string()),
         _ => ("ANY".to_string(), spec.trim().to_string()),
     };
     route(&method, path, h)
@@ -190,21 +226,42 @@ where E: Send + 'static, H: IntoServerHandler<E>
 
 /// Server.static : String -> String -> Route  (urlPrefix, dir)
 pub fn server_static(path: String, dir: String) -> ServerRoute {
-    ServerRoute { method: "GET".to_string(), path, target: RouteTarget::Static(dir) }
+    ServerRoute {
+        method: "GET".to_string(),
+        path,
+        target: RouteTarget::Static(dir),
+    }
 }
 
 // ─── response builders (pure) ─────────────────────────────────────────────
 
 fn resp(status: i64, body: String, ct: &str) -> ServerResponse {
-    ServerResponse { status, body, headers: HashMap::new(), contentType: ct.to_string() }
+    ServerResponse {
+        status,
+        body,
+        headers: HashMap::new(),
+        contentType: ct.to_string(),
+    }
 }
 
-pub fn server_text(body: String) -> ServerResponse { resp(200, body, "text/plain") }
-pub fn server_json(body: String) -> ServerResponse { resp(200, body, "application/json") }
-pub fn server_html(body: String) -> ServerResponse { resp(200, body, "text/html") }
+pub fn server_text(body: String) -> ServerResponse {
+    resp(200, body, "text/plain")
+}
+pub fn server_json(body: String) -> ServerResponse {
+    resp(200, body, "application/json")
+}
+pub fn server_html(body: String) -> ServerResponse {
+    resp(200, body, "text/html")
+}
 
-pub fn server_with_status(status: i64, mut r: ServerResponse) -> ServerResponse { r.status = status; r }
-pub fn server_with_header(k: String, v: String, mut r: ServerResponse) -> ServerResponse { r.headers.insert(k, v); r }
+pub fn server_with_status(status: i64, mut r: ServerResponse) -> ServerResponse {
+    r.status = status;
+    r
+}
+pub fn server_with_header(k: String, v: String, mut r: ServerResponse) -> ServerResponse {
+    r.headers.insert(k, v);
+    r
+}
 /// Sky `redirect : String -> Response` — a 302 to `location`. Matches the Sky
 /// kernel's one-arg contract and Go's `Server_redirectT` (status is hardcoded,
 /// not a parameter; use `withStatus` to override).
@@ -217,21 +274,35 @@ pub fn server_redirect(location: String) -> ServerResponse {
 // ─── request accessors (pure) ─────────────────────────────────────────────
 
 pub fn server_param(name: String, req: ServerRequest) -> SkyMaybe<String> {
-    match req.params.get(&name) { Some(v) => SkyMaybe::Just(v.clone()), None => SkyMaybe::Nothing }
+    match req.params.get(&name) {
+        Some(v) => SkyMaybe::Just(v.clone()),
+        None => SkyMaybe::Nothing,
+    }
 }
 pub fn server_query_param(name: String, req: ServerRequest) -> SkyMaybe<String> {
-    match req.query.get(&name) { Some(v) => SkyMaybe::Just(v.clone()), None => SkyMaybe::Nothing }
+    match req.query.get(&name) {
+        Some(v) => SkyMaybe::Just(v.clone()),
+        None => SkyMaybe::Nothing,
+    }
 }
 pub fn server_header(name: String, req: ServerRequest) -> SkyMaybe<String> {
-    match req.headers.get(&name) { Some(v) => SkyMaybe::Just(v.clone()), None => SkyMaybe::Nothing }
+    match req.headers.get(&name) {
+        Some(v) => SkyMaybe::Just(v.clone()),
+        None => SkyMaybe::Nothing,
+    }
 }
 pub fn server_get_cookie(name: String, req: ServerRequest) -> SkyMaybe<String> {
-    match req.cookies.get(&name) { Some(v) => SkyMaybe::Just(v.clone()), None => SkyMaybe::Nothing }
+    match req.cookies.get(&name) {
+        Some(v) => SkyMaybe::Just(v.clone()),
+        None => SkyMaybe::Nothing,
+    }
 }
 
 // ─── cookies ──────────────────────────────────────────────────────────────
 
-pub fn server_cookie(name: String, value: String) -> ServerCookie { ServerCookie { name, value } }
+pub fn server_cookie(name: String, value: String) -> ServerCookie {
+    ServerCookie { name, value }
+}
 
 /// Strip any byte that could smuggle extra cookie attributes or inject a header
 /// line. We drop CTLs (incl. CR/LF), `;`, `,`, and whitespace from both the
@@ -242,7 +313,15 @@ pub fn server_cookie(name: String, value: String) -> ServerCookie { ServerCookie
 /// grammar anyway.
 fn sanitise_cookie_field(s: &str) -> String {
     s.chars()
-        .filter(|&c| !c.is_control() && c != ';' && c != ',' && c != ' ' && c != '\t' && c != '"' && c != '\\')
+        .filter(|&c| {
+            !c.is_control()
+                && c != ';'
+                && c != ','
+                && c != ' '
+                && c != '\t'
+                && c != '"'
+                && c != '\\'
+        })
         .collect()
 }
 
@@ -261,7 +340,10 @@ pub fn server_with_cookie(c: ServerCookie, mut r: ServerResponse) -> ServerRespo
     } else {
         ""
     };
-    let v = format!("{}={}; HttpOnly; Path=/; SameSite=Lax{}", name, value, secure);
+    let v = format!(
+        "{}={}; HttpOnly; Path=/; SameSite=Lax{}",
+        name, value, secure
+    );
     r.headers.insert("Set-Cookie".to_string(), v);
     r
 }
@@ -284,7 +366,9 @@ fn parse_query(q: Option<&str>) -> HashMap<String, String> {
     let mut out = HashMap::new();
     if let Some(q) = q {
         for pair in q.split('&') {
-            if pair.is_empty() { continue; }
+            if pair.is_empty() {
+                continue;
+            }
             let mut it = pair.splitn(2, '=');
             let k = it.next().unwrap_or("");
             let v = it.next().unwrap_or("");
@@ -296,7 +380,9 @@ fn parse_query(q: Option<&str>) -> HashMap<String, String> {
     out
 }
 
-fn urldecode(s: &str) -> String { form_url_decode(s) }
+fn urldecode(s: &str) -> String {
+    form_url_decode(s)
+}
 
 /// Percent-decode a raw path-param value so `Server.param` matches the decoding
 /// `Server.queryParam` already applies (`RawPathParams` hands back the raw,
@@ -305,7 +391,9 @@ fn urldecode(s: &str) -> String { form_url_decode(s) }
 /// pure percent-decode rather than `form_url_decode` (which maps `+` → space).
 /// Lossy + total (never panics on invalid UTF-8).
 fn decode_path_param(v: &str) -> String {
-    percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned()
+    percent_encoding::percent_decode_str(v)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 fn parse_cookies(header: &str, out: &mut HashMap<String, String>) {
@@ -323,8 +411,10 @@ fn parse_cookies(header: &str, out: &mut HashMap<String, String>) {
 /// `WriteHeader(413)`, rt.go:7738). The previous code collapsed an oversize
 /// (and any body read error) into an empty body via `.unwrap_or_default()`,
 /// silently handing the handler `""` instead of refusing the request.
-async fn build_request(req: axum::extract::Request) -> Result<(ServerRequest, Option<axum::extract::ws::WebSocketUpgrade>), u16> {
-    use axum::extract::{RawPathParams, FromRequestParts};
+async fn build_request(
+    req: axum::extract::Request,
+) -> Result<(ServerRequest, Option<axum::extract::ws::WebSocketUpgrade>), u16> {
+    use axum::extract::{FromRequestParts, RawPathParams};
     let method = req.method().as_str().to_string();
     let uri = req.uri().clone();
     let path = uri.path().to_string();
@@ -333,13 +423,18 @@ async fn build_request(req: axum::extract::Request) -> Result<(ServerRequest, Op
     let mut cookies = HashMap::new();
     for (k, v) in req.headers() {
         if let Ok(s) = v.to_str() {
-            if k.as_str().eq_ignore_ascii_case("cookie") { parse_cookies(s, &mut cookies); }
+            if k.as_str().eq_ignore_ascii_case("cookie") {
+                parse_cookies(s, &mut cookies);
+            }
             headers.insert(k.as_str().to_string(), s.to_string());
         }
     }
     let (mut parts, body) = req.into_parts();
     let params = match RawPathParams::from_request_parts(&mut parts, &()).await {
-        Ok(rpp) => rpp.iter().map(|(k, v)| (k.to_string(), decode_path_param(v))).collect(),
+        Ok(rpp) => rpp
+            .iter()
+            .map(|(k, v)| (k.to_string(), decode_path_param(v)))
+            .collect(),
         Err(_) => HashMap::new(),
     };
     // remoteAddr: trust the real TCP peer (ConnectInfo) by DEFAULT. Only honour a
@@ -376,7 +471,8 @@ async fn build_request(req: axum::extract::Request) -> Result<(ServerRequest, Op
     // (succeeds only when the Connection/Upgrade/Sec-WebSocket-* headers are
     // present). Stashed via task-local so server_web_socket_upgrade can reach it.
     let upgrader = axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &())
-        .await.ok();
+        .await
+        .ok();
     let cap = max_body();
     // Reject an oversize body with 413 instead of silently truncating to "".
     // Pre-check Content-Length when declared (deterministic for non-chunked
@@ -397,7 +493,19 @@ async fn build_request(req: axum::extract::Request) -> Result<(ServerRequest, Op
         // is moot. Either way never hand the handler a silently-truncated body.
         Err(_) => return Err(413),
     };
-    Ok((ServerRequest { method, path, body, headers, params, query, cookies, remoteAddr: remote_addr }, upgrader))
+    Ok((
+        ServerRequest {
+            method,
+            path,
+            body,
+            headers,
+            params,
+            query,
+            cookies,
+            remoteAddr: remote_addr,
+        },
+        upgrader,
+    ))
 }
 
 fn to_axum_response(r: ServerResponse) -> axum::response::Response {
@@ -420,7 +528,10 @@ fn to_axum_response(r: ServerResponse) -> axum::response::Response {
     // emitting both would produce two `content-type` headers on the wire; an
     // explicit handler override wins (parity with the security-headers `if-unset`
     // policy below).
-    let has_ct_header = r.headers.keys().any(|k| k.eq_ignore_ascii_case("content-type"));
+    let has_ct_header = r
+        .headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("content-type"));
     if !r.contentType.is_empty() && !has_ct_header {
         builder = builder.header("content-type", r.contentType.clone());
     }
@@ -444,8 +555,8 @@ fn to_axum_response(r: ServerResponse) -> axum::response::Response {
 }
 
 fn method_router(method: &str, h: ErasedHandler) -> axum::routing::MethodRouter {
-    use axum::routing::{get, post, put, delete, any};
     use axum::response::IntoResponse;
+    use axum::routing::{any, delete, get, post, put};
     let svc = move |req: axum::extract::Request| {
         let h = h.clone();
         async move {
@@ -460,18 +571,26 @@ fn method_router(method: &str, h: ErasedHandler) -> axum::routing::MethodRouter 
             // Run the handler with the WS upgrader + a response slot in scope.
             // If the handler called server_web_socket_upgrade, it stashed the
             // real 101 response in WS_RESPONSE — prefer it over the sentinel.
-            WS_UPGRADER.scope(std::cell::Cell::new(upgrader), async move {
-                WS_RESPONSE.scope(std::cell::Cell::new(None), async move {
-                    let result = h(sky_req).await;
-                    if let Some(ws_resp) = WS_RESPONSE.with(|c| c.take()) {
-                        return ws_resp;
-                    }
-                    match result {
-                        Ok(resp) => to_axum_response(resp),
-                        Err(_) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response(),
-                    }
-                }).await
-            }).await
+            WS_UPGRADER
+                .scope(std::cell::Cell::new(upgrader), async move {
+                    WS_RESPONSE
+                        .scope(std::cell::Cell::new(None), async move {
+                            let result = h(sky_req).await;
+                            if let Some(ws_resp) = WS_RESPONSE.with(|c| c.take()) {
+                                return ws_resp;
+                            }
+                            match result {
+                                Ok(resp) => to_axum_response(resp),
+                                Err(_) => (
+                                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                    "Internal Server Error",
+                                )
+                                    .into_response(),
+                            }
+                        })
+                        .await
+                })
+                .await
         }
     };
     match method.to_uppercase().as_str() {
@@ -493,13 +612,19 @@ fn strip_trailing_slash(p: &str) -> String {
 }
 
 /// Server.listen : Int -> List Route -> Task Error ()  — serves via axum/tokio.
-pub fn server_listen<E: From<String> + Send + 'static>(port: i64, routes: Vec<ServerRoute>) -> SkyTask<E, ()> {
+pub fn server_listen<E: From<String> + Send + 'static>(
+    port: i64,
+    routes: Vec<ServerRoute>,
+) -> SkyTask<E, ()> {
     Box::pin(async move {
         let mut app: axum::Router = axum::Router::new();
         for r in routes {
             match r.target {
                 RouteTarget::Static(dir) => {
-                    app = app.nest_service(&strip_trailing_slash(&r.path), tower_http::services::ServeDir::new(dir));
+                    app = app.nest_service(
+                        &strip_trailing_slash(&r.path),
+                        tower_http::services::ServeDir::new(dir),
+                    );
                 }
                 RouteTarget::Handler(h) => {
                     app = app.route(&r.path, method_router(&r.method, h));
@@ -553,8 +678,8 @@ pub fn server_listen<E: From<String> + Send + 'static>(port: i64, routes: Vec<Se
 // `defaultCfg |> withOnX` record updates compile — see the design doc on why
 // non-capturing handlers are the first-cut limit).
 
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// Sky.Http.Server.WebSocket.WebSocketServer — opaque per-peer handle. The
 /// variant name matches the Sky constructor so `case sock of WebSocketServer
@@ -591,7 +716,11 @@ pub struct WsServerCfg<E> {
     pub originPatterns: Vec<String>,
 }
 
-enum WsOut { Text(String), Binary(Vec<u8>), Close }
+enum WsOut {
+    Text(String),
+    Binary(Vec<u8>),
+    Close,
+}
 
 /// Per-peer outbound queue depth. A slow/idle WebSocket consumer must NOT let the
 /// server buffer unboundedly (OOM) — the channel is bounded and a full queue drops
@@ -619,7 +748,11 @@ tokio::task_local! {
     static WS_RESPONSE: std::cell::Cell<Option<axum::response::Response>>;
 }
 
-async fn ws_loop<E: From<String> + Send + 'static>(mut socket: axum::extract::ws::WebSocket, cfg: WsServerCfg<E>, id: i64) {
+async fn ws_loop<E: From<String> + Send + 'static>(
+    mut socket: axum::extract::ws::WebSocket,
+    cfg: WsServerCfg<E>,
+    id: i64,
+) {
     use axum::extract::ws::Message;
     // Mirror Go's SetReadLimit: treat 0/negative as "unset" → apply the 1 MiB
     // default (wsDefaultMaxMessageBytes = 1 << 20 in runtime-go/rt/websocket.go).
@@ -633,7 +766,10 @@ async fn ws_loop<E: From<String> + Send + 'static>(mut socket: axum::extract::ws
     // builder methods (those landed in axum 0.8+). The in-loop size checks below
     // (Text/Binary arms) are the framing-layer enforcement for this version.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<WsOut>(ws_send_buffer());
-    ws_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
+    ws_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id, tx);
     let _ = (cfg.onConnect)(WsHandle::WebSocketServer(id)).await;
     loop {
         tokio::select! {
@@ -669,16 +805,26 @@ async fn ws_loop<E: From<String> + Send + 'static>(mut socket: axum::extract::ws
         }
     }
     let _ = (cfg.onClose)(WsHandle::WebSocketServer(id)).await;
-    ws_registry().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    ws_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
 }
 
 fn ws_production() -> bool {
-    let v = std::env::var("ENV").or_else(|_| std::env::var("SKY_ENV")).unwrap_or_default();
+    let v = std::env::var("ENV")
+        .or_else(|_| std::env::var("SKY_ENV"))
+        .unwrap_or_default();
     !matches!(v.as_str(), "" | "dev" | "development" | "local")
 }
 
 fn ws_resp(status: i64, body: &str) -> ServerResponse {
-    ServerResponse { status, body: body.to_string(), headers: HashMap::new(), contentType: "text/plain".to_string() }
+    ServerResponse {
+        status,
+        body: body.to_string(),
+        headers: HashMap::new(),
+        contentType: "text/plain".to_string(),
+    }
 }
 
 /// Glob match with `*` wildcards (e.g. "https://*.example.com"). `*` matches any
@@ -707,18 +853,24 @@ fn ws_origin_matches(pattern: &str, origin: &str) -> bool {
     let mut rest = origin;
     // First segment must be a prefix (unless pattern starts with '*').
     if let Some(first) = parts.first() {
-        if !rest.starts_with(first) { return false; }
+        if !rest.starts_with(first) {
+            return false;
+        }
         rest = rest.get(first.len()..).unwrap_or("");
     }
     // Middle segments must appear in order. (parts.len() >= 2 here — the
     // len == 1 case returned early — so the slice is total.)
     for seg in parts.get(1..parts.len() - 1).unwrap_or(&[]) {
-        if seg.is_empty() { continue; }
+        if seg.is_empty() {
+            continue;
+        }
         match rest.find(seg) {
             Some(i) => {
                 // `rest[..i]` was covered by the preceding `*`, and `seg` is a
                 // literal anchor after it → enforce host-only.
-                if !host_safe(rest.get(..i).unwrap_or("")) { return false; }
+                if !host_safe(rest.get(..i).unwrap_or("")) {
+                    return false;
+                }
                 rest = rest.get(i + seg.len()..).unwrap_or("");
             }
             None => return false,
@@ -730,25 +882,39 @@ fn ws_origin_matches(pattern: &str, origin: &str) -> bool {
         // Pattern ends with `*` → trailing region unrestricted (explicit allow-all).
         return true;
     }
-    if !rest.ends_with(last) { return false; }
+    if !rest.ends_with(last) {
+        return false;
+    }
     // The span the trailing `*` covered (before the literal suffix) must be a host.
     host_safe(rest.get(..rest.len() - last.len()).unwrap_or(""))
 }
 
 /// ServerWebSocket_upgrade : Request -> WebSocketServerCfg -> Task Error Response
-pub fn server_web_socket_upgrade<E: From<String> + Send + 'static>(req: ServerRequest, cfg: WsServerCfg<E>) -> SkyTask<E, ServerResponse> {
+pub fn server_web_socket_upgrade<E: From<String> + Send + 'static>(
+    req: ServerRequest,
+    cfg: WsServerCfg<E>,
+) -> SkyTask<E, ServerResponse> {
     Box::pin(async move {
         // Origin allowlist. Production with no patterns → reject (matches Go). With
         // patterns set (any mode), the request's Origin must match one of them.
         if ws_production() && cfg.originPatterns.is_empty() {
-            return ok_res(ws_resp(403, "websocket: origin allowlist required in production"));
+            return ok_res(ws_resp(
+                403,
+                "websocket: origin allowlist required in production",
+            ));
         }
         if !cfg.originPatterns.is_empty() {
-            let origin = req.headers.iter()
+            let origin = req
+                .headers
+                .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("origin"))
                 .map(|(_, v)| v.as_str())
                 .unwrap_or("");
-            if !cfg.originPatterns.iter().any(|p| ws_origin_matches(p, origin)) {
+            if !cfg
+                .originPatterns
+                .iter()
+                .any(|p| ws_origin_matches(p, origin))
+            {
                 return ok_res(ws_resp(403, "websocket: origin not allowed"));
             }
         }
@@ -759,7 +925,12 @@ pub fn server_web_socket_upgrade<E: From<String> + Send + 'static>(req: ServerRe
                 let resp = up.on_upgrade(move |socket| ws_loop(socket, cfg, id));
                 let _ = WS_RESPONSE.try_with(|c| c.set(Some(resp)));
                 // Sentinel — method_router returns WS_RESPONSE instead of this.
-                ok_res(ServerResponse { status: 101, body: String::new(), headers: HashMap::new(), contentType: String::new() })
+                ok_res(ServerResponse {
+                    status: 101,
+                    body: String::new(),
+                    headers: HashMap::new(),
+                    contentType: String::new(),
+                })
             }
             None => ok_res(ws_resp(400, "websocket: expected an Upgrade request")),
         }
@@ -769,48 +940,75 @@ pub fn server_web_socket_upgrade<E: From<String> + Send + 'static>(req: ServerRe
 fn ws_send_raw(id: i64, out: WsOut) -> bool {
     // try_send (non-blocking): a full per-peer queue (slow consumer) drops the
     // frame and returns false rather than buffering unboundedly — bounded memory.
-    match ws_registry().lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
+    match ws_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+    {
         Some(tx) => tx.try_send(out).is_ok(),
         None => false,
     }
 }
 
 /// ServerWebSocket_sendToClient : Int -> String -> Task Error ()
-pub fn server_web_socket_send_to_client<E: From<String> + Send + 'static>(id: i64, msg: String) -> SkyTask<E, ()> {
+pub fn server_web_socket_send_to_client<E: From<String> + Send + 'static>(
+    id: i64,
+    msg: String,
+) -> SkyTask<E, ()> {
     Box::pin(async move {
-        if ws_send_raw(id, WsOut::Text(msg)) { ok_res(()) }
-        else { SkyResult::Err(format!("ws: no client {}", id).into()) }
+        if ws_send_raw(id, WsOut::Text(msg)) {
+            ok_res(())
+        } else {
+            SkyResult::Err(format!("ws: no client {}", id).into())
+        }
     })
 }
 
 /// ServerWebSocket_sendBinaryToClient : Int -> String -> Task Error ()
-pub fn server_web_socket_send_binary_to_client<E: From<String> + Send + 'static>(id: i64, msg: String) -> SkyTask<E, ()> {
+pub fn server_web_socket_send_binary_to_client<E: From<String> + Send + 'static>(
+    id: i64,
+    msg: String,
+) -> SkyTask<E, ()> {
     Box::pin(async move {
-        if ws_send_raw(id, WsOut::Binary(sky_bytes(&msg))) { ok_res(()) }
-        else { SkyResult::Err(format!("ws: no client {}", id).into()) }
+        if ws_send_raw(id, WsOut::Binary(sky_bytes(&msg))) {
+            ok_res(())
+        } else {
+            SkyResult::Err(format!("ws: no client {}", id).into())
+        }
     })
 }
 
 /// ServerWebSocket_broadcast : List Int -> String -> Task Error ()
-pub fn server_web_socket_broadcast<E: From<String> + Send + 'static>(ids: Vec<i64>, msg: String) -> SkyTask<E, ()> {
+pub fn server_web_socket_broadcast<E: From<String> + Send + 'static>(
+    ids: Vec<i64>,
+    msg: String,
+) -> SkyTask<E, ()> {
     Box::pin(async move {
         let mut any_ok = false;
         {
             let reg = ws_registry().lock().unwrap_or_else(|e| e.into_inner());
             for id in &ids {
                 if let Some(tx) = reg.get(id) {
-                    if tx.try_send(WsOut::Text(msg.clone())).is_ok() { any_ok = true; }
+                    if tx.try_send(WsOut::Text(msg.clone())).is_ok() {
+                        any_ok = true;
+                    }
                 }
             }
         }
-        if ids.is_empty() || any_ok { ok_res(()) }
-        else { SkyResult::Err("ws broadcast: every send failed".to_string().into()) }
+        if ids.is_empty() || any_ok {
+            ok_res(())
+        } else {
+            SkyResult::Err("ws broadcast: every send failed".to_string().into())
+        }
     })
 }
 
 /// ServerWebSocket_closeClient : Int -> Task Error () (idempotent)
 pub fn server_web_socket_close_client<E: From<String> + Send + 'static>(id: i64) -> SkyTask<E, ()> {
-    Box::pin(async move { let _ = ws_send_raw(id, WsOut::Close); ok_res(()) })
+    Box::pin(async move {
+        let _ = ws_send_raw(id, WsOut::Close);
+        ok_res(())
+    })
 }
 
 // ─── Sky.Http.Middleware + Sky.Http.RateLimit ─────────────────────────────
@@ -820,13 +1018,23 @@ pub fn server_web_socket_close_client<E: From<String> + Send + 'static>(id: i64)
 // the next's input H), so no concrete `Handler` type is named.
 
 fn header_ci<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
-    headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
 }
 
 fn plain_resp(status: i64, body: &str, extra: &[(&str, &str)]) -> ServerResponse {
     let mut headers = HashMap::new();
-    for (k, v) in extra { headers.insert(k.to_string(), v.to_string()); }
-    ServerResponse { status, body: body.to_string(), headers, contentType: "text/plain".to_string() }
+    for (k, v) in extra {
+        headers.insert(k.to_string(), v.to_string());
+    }
+    ServerResponse {
+        status,
+        body: body.to_string(),
+        headers,
+        contentType: "text/plain".to_string(),
+    }
 }
 
 /// Middleware.withCors : List String -> Handler -> Handler. Echoes an allowed
@@ -847,10 +1055,20 @@ where
             None
         };
         if req.method.eq_ignore_ascii_case("OPTIONS") {
-            let mut resp = plain_resp(204, "", &[
-                ("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS"),
-                ("access-control-allow-headers", "Content-Type, Authorization"),
-            ]);
+            let mut resp = plain_resp(
+                204,
+                "",
+                &[
+                    (
+                        "access-control-allow-methods",
+                        "GET, POST, PUT, DELETE, OPTIONS",
+                    ),
+                    (
+                        "access-control-allow-headers",
+                        "Content-Type, Authorization",
+                    ),
+                ],
+            );
             if let Some(a) = allow {
                 // A reflected SPECIFIC origin (not `*`) makes the response
                 // origin-dependent — emit `Vary: Origin` so a shared/intermediary
@@ -860,14 +1078,20 @@ where
                     // MERGE, don't clobber: a handler may already have set Vary
                     // (e.g. `Accept-Encoding`). Append `Origin` unless present.
                     let vary = match resp.headers.get("Vary") {
-                        Some(prev) if !prev.split(',').any(|p| p.trim().eq_ignore_ascii_case("origin")) =>
-                            format!("{}, Origin", prev),
+                        Some(prev)
+                            if !prev
+                                .split(',')
+                                .any(|p| p.trim().eq_ignore_ascii_case("origin")) =>
+                        {
+                            format!("{}, Origin", prev)
+                        }
                         Some(prev) => prev.clone(),
                         None => "Origin".to_string(),
                     };
                     resp.headers.insert("Vary".to_string(), vary);
                 }
-                resp.headers.insert("access-control-allow-origin".to_string(), a);
+                resp.headers
+                    .insert("access-control-allow-origin".to_string(), a);
             }
             return Box::pin(async move { ok_res(resp) });
         }
@@ -879,17 +1103,23 @@ where
                         // See preflight branch: a reflected specific origin needs
                         // `Vary: Origin` to be cache-safe.
                         if a != "*" {
-                    // MERGE, don't clobber: a handler may already have set Vary
-                    // (e.g. `Accept-Encoding`). Append `Origin` unless present.
-                    let vary = match resp.headers.get("Vary") {
-                        Some(prev) if !prev.split(',').any(|p| p.trim().eq_ignore_ascii_case("origin")) =>
-                            format!("{}, Origin", prev),
-                        Some(prev) => prev.clone(),
-                        None => "Origin".to_string(),
-                    };
-                    resp.headers.insert("Vary".to_string(), vary);
-                }
-                        resp.headers.insert("access-control-allow-origin".to_string(), a);
+                            // MERGE, don't clobber: a handler may already have set Vary
+                            // (e.g. `Accept-Encoding`). Append `Origin` unless present.
+                            let vary = match resp.headers.get("Vary") {
+                                Some(prev)
+                                    if !prev
+                                        .split(',')
+                                        .any(|p| p.trim().eq_ignore_ascii_case("origin")) =>
+                                {
+                                    format!("{}, Origin", prev)
+                                }
+                                Some(prev) => prev.clone(),
+                                None => "Origin".to_string(),
+                            };
+                            resp.headers.insert("Vary".to_string(), vary);
+                        }
+                        resp.headers
+                            .insert("access-control-allow-origin".to_string(), a);
                     }
                     ok_res(resp)
                 }
@@ -913,8 +1143,17 @@ where
         let task = h(req);
         Box::pin(async move {
             let result = task.await;
-            let status = match &result { SkyResult::Ok(r) => r.status, SkyResult::Err(_) => 500 };
-            eprintln!("[sky.http] {} {} {} {}ms", method, path, status, start.elapsed().as_millis());
+            let status = match &result {
+                SkyResult::Ok(r) => r.status,
+                SkyResult::Err(_) => 500,
+            };
+            eprintln!(
+                "[sky.http] {} {} {} {}ms",
+                method,
+                path,
+                status,
+                start.elapsed().as_millis()
+            );
             result
         })
     })
@@ -937,7 +1176,11 @@ where
             h(req)
         } else {
             Box::pin(async move {
-                ok_res(plain_resp(401, "Unauthorized", &[("www-authenticate", "Basic realm=\"Sky\"")]))
+                ok_res(plain_resp(
+                    401,
+                    "Unauthorized",
+                    &[("www-authenticate", "Basic realm=\"Sky\"")],
+                ))
             })
         }
     })
@@ -945,7 +1188,12 @@ where
 
 /// Middleware.withRateLimit : String -> Int -> Int -> Handler -> Handler.
 /// Per-(key, client-IP) fixed window; 429 when exceeded.
-pub fn middleware_with_rate_limit<E, H>(key: String, limit: i64, window_secs: i64, h: H) -> ServerHandler<E>
+pub fn middleware_with_rate_limit<E, H>(
+    key: String,
+    limit: i64,
+    window_secs: i64,
+    h: H,
+) -> ServerHandler<E>
 where
     E: Send + 'static,
     H: IntoServerHandler<E>,
@@ -969,32 +1217,60 @@ where
 const RL_SWEEP_EVERY: u64 = 256;
 
 fn unix_secs_f64() -> f64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
-struct WindowEntry { start: f64, count: i64 }
+struct WindowEntry {
+    start: f64,
+    count: i64,
+}
 
 fn fixed_window_allow(key: &str, client: &str, limit: i64, window_secs: i64) -> bool {
     static W: OnceLock<Mutex<HashMap<(String, String), WindowEntry>>> = OnceLock::new();
     static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let now = unix_secs_f64();
     let window = window_secs.max(1) as f64;
-    let mut m = W.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = W
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // Evict fully-expired entries so the map can't grow without bound (distinct
     // clients/keys would otherwise accumulate forever → memory-DoS). The O(n) scan
     // is AMORTIZED to every RL_SWEEP_EVERY calls so an attacker can't force a
     // full-map scan per request (CPU amplification). An expired entry resets to
     // count 0 on access anyway, so a lingering one between sweeps is
     // behaviour-preserving for the surviving (live) entries.
-    if TICK.fetch_add(1, Ordering::Relaxed).is_multiple_of(RL_SWEEP_EVERY) {
+    if TICK
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(RL_SWEEP_EVERY)
+    {
         m.retain(|_, ent| now - ent.start < window);
     }
-    let e = m.entry((key.to_string(), client.to_string())).or_insert(WindowEntry { start: now, count: 0 });
-    if now - e.start >= window { e.start = now; e.count = 0; }
-    if e.count < limit.max(0) { e.count += 1; true } else { false }
+    let e = m
+        .entry((key.to_string(), client.to_string()))
+        .or_insert(WindowEntry {
+            start: now,
+            count: 0,
+        });
+    if now - e.start >= window {
+        e.start = now;
+        e.count = 0;
+    }
+    if e.count < limit.max(0) {
+        e.count += 1;
+        true
+    } else {
+        false
+    }
 }
 
-struct Bucket { tokens: f64, last: f64 }
+struct Bucket {
+    tokens: f64,
+    last: f64,
+}
 
 /// RateLimit.allow : String -> String -> Int -> Int -> Bool — token bucket per
 /// (name, key); capacity tokens, refilled `refill_per_sec`. True if a token was
@@ -1005,7 +1281,10 @@ pub fn rate_limit_allow(name: String, key: String, capacity: i64, refill_per_sec
     let cap = capacity.max(0) as f64;
     let now = unix_secs_f64();
     let refill = refill_per_sec.max(0) as f64;
-    let mut m = B.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = B
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // Evict an entry if EITHER it has refilled back to full (indistinguishable
     // from a fresh bucket) OR it has been idle longer than RL_IDLE_TTL. The
     // idle bound is refill-INDEPENDENT: with refill_per_sec == 0 a partially-drained
@@ -1015,16 +1294,27 @@ pub fn rate_limit_allow(name: String, key: String, capacity: i64, refill_per_sec
     // attacker supplying many distinct keys can't force a full-map scan per request
     // (CPU amplification). Either way the current entry is re-created below if swept.
     const RL_IDLE_TTL: f64 = 3600.0; // 1 h with no access → reclaim
-    if TICK.fetch_add(1, Ordering::Relaxed).is_multiple_of(RL_SWEEP_EVERY) {
+    if TICK
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(RL_SWEEP_EVERY)
+    {
         m.retain(|_, bk| {
             let refilled = (bk.tokens + (now - bk.last) * refill).min(cap);
             refilled < cap && (now - bk.last) < RL_IDLE_TTL
         });
     }
-    let b = m.entry((name, key)).or_insert(Bucket { tokens: cap, last: now });
+    let b = m.entry((name, key)).or_insert(Bucket {
+        tokens: cap,
+        last: now,
+    });
     b.tokens = (b.tokens + (now - b.last) * refill).min(cap);
     b.last = now;
-    if b.tokens >= 1.0 { b.tokens -= 1.0; true } else { false }
+    if b.tokens >= 1.0 {
+        b.tokens -= 1.0;
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -1036,7 +1326,8 @@ mod tests {
     fn build_routes_and_response() {
         // Validate the crux: a Sky-shaped handler closure boxes into a Route.
         let r: ServerRoute = server_get::<String, _>("/".to_string(), |_req: ServerRequest| {
-            Box::pin(ready(ok_res::<String, _>(server_text("hi".to_string())))) as SkyTask<String, ServerResponse>
+            Box::pin(ready(ok_res::<String, _>(server_text("hi".to_string()))))
+                as SkyTask<String, ServerResponse>
         });
         assert_eq!(r.method, "GET");
         assert!(matches!(r.target, RouteTarget::Handler(_)));
@@ -1046,23 +1337,56 @@ mod tests {
 
     #[test]
     fn origin_glob_matching() {
-        assert!(ws_origin_matches("https://app.example.com", "https://app.example.com"));
-        assert!(!ws_origin_matches("https://app.example.com", "https://evil.com"));
-        assert!(ws_origin_matches("https://*.example.com", "https://app.example.com"));
-        assert!(ws_origin_matches("https://*.example.com", "https://a.b.example.com"));
-        assert!(!ws_origin_matches("https://*.example.com", "https://example.com"));
-        assert!(!ws_origin_matches("https://*.example.com", "http://app.example.com"));
+        assert!(ws_origin_matches(
+            "https://app.example.com",
+            "https://app.example.com"
+        ));
+        assert!(!ws_origin_matches(
+            "https://app.example.com",
+            "https://evil.com"
+        ));
+        assert!(ws_origin_matches(
+            "https://*.example.com",
+            "https://app.example.com"
+        ));
+        assert!(ws_origin_matches(
+            "https://*.example.com",
+            "https://a.b.example.com"
+        ));
+        assert!(!ws_origin_matches(
+            "https://*.example.com",
+            "https://example.com"
+        ));
+        assert!(!ws_origin_matches(
+            "https://*.example.com",
+            "http://app.example.com"
+        ));
         assert!(ws_origin_matches("*", "anything://x"));
         assert!(ws_origin_matches("*.local", "x.local"));
         assert!(!ws_origin_matches("*.local", "x.remote"));
         // CSWSH glob-bypass: the trusted suffix must not be reachable behind a
         // path / userinfo / query delimiter smuggled through the `*`.
-        assert!(!ws_origin_matches("https://*.example.com", "https://evil.com/.example.com"));
-        assert!(!ws_origin_matches("https://*.example.com", "https://evil.com@x.example.com"));
-        assert!(!ws_origin_matches("https://*.example.com", "https://evil.com?.example.com"));
-        assert!(!ws_origin_matches("https://*.example.com", "https://evil.com#.example.com"));
+        assert!(!ws_origin_matches(
+            "https://*.example.com",
+            "https://evil.com/.example.com"
+        ));
+        assert!(!ws_origin_matches(
+            "https://*.example.com",
+            "https://evil.com@x.example.com"
+        ));
+        assert!(!ws_origin_matches(
+            "https://*.example.com",
+            "https://evil.com?.example.com"
+        ));
+        assert!(!ws_origin_matches(
+            "https://*.example.com",
+            "https://evil.com#.example.com"
+        ));
         // A trailing `*` is an explicit allow-all of the remainder (opt-in).
-        assert!(ws_origin_matches("https://app.example.com*", "https://app.example.com/anything"));
+        assert!(ws_origin_matches(
+            "https://app.example.com*",
+            "https://app.example.com/anything"
+        ));
     }
 
     #[test]

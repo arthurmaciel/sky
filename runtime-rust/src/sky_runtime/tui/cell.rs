@@ -21,7 +21,14 @@ pub struct Cell {
 
 impl Cell {
     pub fn blank() -> Self {
-        Cell { ch: ' ', width: 1, fg: None, bg: None, bold: false, underline: false }
+        Cell {
+            ch: ' ',
+            width: 1,
+            fg: None,
+            bg: None,
+            bold: false,
+            underline: false,
+        }
     }
 }
 
@@ -57,7 +64,11 @@ pub struct Grid {
 
 impl Grid {
     pub fn new(cols: usize, rows: usize) -> Self {
-        Grid { cols, rows, cells: vec![Cell::blank(); cols.saturating_mul(rows)] }
+        Grid {
+            cols,
+            rows,
+            cells: vec![Cell::blank(); cols.saturating_mul(rows)],
+        }
     }
 
     fn idx(&self, col: usize, row: usize) -> Option<usize> {
@@ -112,11 +123,25 @@ mod tests {
     #[test]
     fn grid_is_total() {
         let mut g = Grid::new(3, 2);
-        g.set(1, 1, Cell { ch: 'x', ..Cell::blank() });
+        g.set(
+            1,
+            1,
+            Cell {
+                ch: 'x',
+                ..Cell::blank()
+            },
+        );
         assert_eq!(g.get(1, 1).map(|c| c.ch), Some('x'));
         assert_eq!(g.get(0, 0).map(|c| c.ch), Some(' '));
         // out of bounds: write is a no-op, read is None
-        g.set(99, 99, Cell { ch: 'z', ..Cell::blank() });
+        g.set(
+            99,
+            99,
+            Cell {
+                ch: 'z',
+                ..Cell::blank()
+            },
+        );
         assert_eq!(g.get(99, 99), None);
         assert_eq!(g.get(3, 0), None); // col == cols (boundary)
         g.clear();

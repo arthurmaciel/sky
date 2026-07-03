@@ -91,7 +91,9 @@ fn write_stderr_line(line: &str) {
 ///   - `\t` (0x09) is preserved as-is (benign, readable in plain log viewers).
 fn sanitise_log_msg(msg: &str) -> std::borrow::Cow<'_, str> {
     // Fast path: most messages are clean — scan without allocating.
-    let needs_escape = msg.bytes().any(|b| matches!(b, 0x00..=0x08 | 0x0A..=0x1F | 0x7F) && b != b'\t');
+    let needs_escape = msg
+        .bytes()
+        .any(|b| matches!(b, 0x00..=0x08 | 0x0A..=0x1F | 0x7F) && b != b'\t');
     if !needs_escape {
         return std::borrow::Cow::Borrowed(msg);
     }
@@ -138,7 +140,12 @@ fn log_emit(level: i32, level_name: &str, msg: &str) {
     // Plain mode: sanitise before writing so control chars / embedded newlines
     // can't forge extra log lines (the JSON path is safe via json_escape already).
     let safe_msg = sanitise_log_msg(msg);
-    let line = format!("{} {} {}", rfc3339_nano_now(), level_name.to_ascii_uppercase(), safe_msg);
+    let line = format!(
+        "{} {} {}",
+        rfc3339_nano_now(),
+        level_name.to_ascii_uppercase(),
+        safe_msg
+    );
     if to_stderr {
         write_stderr_line(&line);
     } else {

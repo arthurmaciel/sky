@@ -102,7 +102,9 @@ pub fn email_send<E: From<String> + Send + 'static>(
         }
         if msg.to.is_empty() {
             return SkyResult::Err(
-                "email.send: at least one recipient required".to_string().into(),
+                "email.send: at least one recipient required"
+                    .to_string()
+                    .into(),
             );
         }
         match provider {
@@ -256,7 +258,11 @@ async fn send_sendgrid<E: From<String>>(api_key: &str, m: &EmailMessage) -> SkyR
         "content": content,
     });
     if !m.replyTo.is_empty() {
-        json_obj_set(&mut body, "reply_to", serde_json::json!({ "email": m.replyTo }));
+        json_obj_set(
+            &mut body,
+            "reply_to",
+            serde_json::json!({ "email": m.replyTo }),
+        );
     }
     if !m.attachments.is_empty() {
         // SendGrid v3 attachments: base64 `content` (decode the Latin-1 byte-string
@@ -307,7 +313,9 @@ fn json_obj_set(v: &mut serde_json::Value, key: &str, val: serde_json::Value) {
 async fn send_ses<E: From<String>>(cfg: &SesConfig, m: &EmailMessage) -> SkyResult<E, String> {
     if cfg.region.is_empty() || cfg.key.is_empty() || cfg.secret.is_empty() {
         return SkyResult::Err(
-            "email.send/Ses: region+key+secret required".to_string().into(),
+            "email.send/Ses: region+key+secret required"
+                .to_string()
+                .into(),
         );
     }
     // SES v2 simple-content (used below) cannot carry attachments — that needs the
@@ -343,7 +351,10 @@ async fn send_ses<E: From<String>>(cfg: &SesConfig, m: &EmailMessage) -> SkyResu
         "Body": { "Text": { "Data": m.textBody, "Charset": "UTF-8" } },
     });
     if !m.htmlBody.is_empty() {
-        if let Some(b) = simple.get_mut("Body").and_then(serde_json::Value::as_object_mut) {
+        if let Some(b) = simple
+            .get_mut("Body")
+            .and_then(serde_json::Value::as_object_mut)
+        {
             b.insert(
                 "Html".to_string(),
                 serde_json::json!({ "Data": m.htmlBody, "Charset": "UTF-8" }),
@@ -366,12 +377,8 @@ async fn send_ses<E: From<String>>(cfg: &SesConfig, m: &EmailMessage) -> SkyResu
 
     let host = format!("email.{}.amazonaws.com", cfg.region);
     let headers = ses_sign_v4(&host, &cfg.region, &cfg.key, &cfg.secret, &payload);
-    let endpoint = email_endpoint(
-        "ses",
-        &format!("https://{}/v2/email/outbound-emails", host),
-    );
-    let header_refs: Vec<(&str, String)> =
-        headers.iter().map(|(k, v)| (*k, v.clone())).collect();
+    let endpoint = email_endpoint("ses", &format!("https://{}/v2/email/outbound-emails", host));
+    let header_refs: Vec<(&str, String)> = headers.iter().map(|(k, v)| (*k, v.clone())).collect();
     match email_post_json::<E>(&endpoint, &header_refs, payload).await {
         Ok(_) => SkyResult::Ok(format!("ses-{}", email_gen_id())),
         Err(e) => SkyResult::Err(e),
@@ -559,8 +566,7 @@ async fn send_smtp<E: From<String>>(cfg: &SmtpConfig, m: &EmailMessage) -> SkyRe
             // it back to raw bytes via sky_bytes. `into_bytes()` would re-UTF-8-
             // encode and corrupt any attachment byte >= 0x80.
             mixed = mixed.singlepart(
-                Attachment::new(att.filename.clone())
-                    .body(sky_bytes(&att.content), ct),
+                Attachment::new(att.filename.clone()).body(sky_bytes(&att.content), ct),
             );
         }
         builder.multipart(mixed)
@@ -594,7 +600,9 @@ async fn send_smtp<E: From<String>>(cfg: &SmtpConfig, m: &EmailMessage) -> SkyRe
         Ok(p) => p,
         Err(_) => {
             return SkyResult::Err(
-                "email.send/Smtp: port out of range (1-65535)".to_string().into(),
+                "email.send/Smtp: port out of range (1-65535)"
+                    .to_string()
+                    .into(),
             )
         }
     };
